@@ -1,0 +1,46 @@
+model:
+  base_url: "" # Your Responses-compatible base URL, including /v1 when needed.
+  name: "" # Model ID provided by your endpoint.
+  # Use KAGARI_MODEL_API_KEY for the credential.
+  timeout: 60s
+  max_output_tokens: 5000
+
+storage:
+  path: data/kagari.db
+
+telegram:
+  # Use KAGARI_TELEGRAM_TOKEN for the credential.
+  allowed_user_ids: []
+  target_chat_id: 0 # 0 replies to the submitting private chat.
+
+profile_path: profile.md
+log_level: info
+max_attempts: 3
+
+reader:
+  timeout: 20s
+  max_bytes: 4194304
+  max_content_chars: 20000
+  max_links: 40
+  cache_ttl: 24h
+  browser_fallback:
+    enabled: false # Not implemented; true is rejected explicitly.
+    engine: chromium # chromium | firefox | webkit; Chromium does not require Google Chrome.
+    mode: launch # launch locally | connect via Playwright WebSocket | cdp (Chromium only).
+    executable_path: "" # launch only; empty selects the Playwright-managed browser binary.
+    endpoint: "" # connect: ws/wss; cdp: http/https/ws/wss. Use env if it contains credentials.
+    headless: true # launch only; remote browser startup is controlled by its server.
+
+agent:
+  max_sources: 6
+  max_supplemental: 2
+  max_depth: 2
+  max_iterations: 10
+  timeout: 3m
+  categories: [AI, 工程, 前端, 产品, 其他]
+
+weekly:
+  enabled: false # Enable after choosing your delivery target and time.
+  timezone: Asia/Shanghai
+  weekday: 1 # 0=Sunday, 1=Monday, ..., 6=Saturday.
+  time: "09:00"

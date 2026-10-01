@@ -1,0 +1,21 @@
+# Local credentials and configuration
+.env
+.env.*
+!.env.example
+/config.yaml
+/profile.md
+
+# Runtime data and build output
+/data/
+/bin/
+/kagari
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.log
+
+# macOS
+.DS_Store
+
+AGENTS.md
