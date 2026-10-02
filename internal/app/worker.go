@@ -75,7 +75,7 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 		return err
 	}
 	if workErr != nil {
-		// 取消任务时也先保存部分证据和失败状态；endpoint 的原始错误或响应正文不能写入日志。
+		// 上下文取消时也保存部分结果并重新排队；endpoint 的原始错误或响应正文不能写入日志。
 		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		fields := []zap.Field{zap.Int64("job_id", job.ID), zap.String("kind", job.Kind), zap.Int("attempt", job.Attempts), zap.Int("max_attempts", w.Config.MaxAttempts)}

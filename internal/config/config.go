@@ -53,7 +53,7 @@ type BrowserFallback struct {
 
 type Agent struct {
 	MaxSources      int           `mapstructure:"max_sources"`      // 包括入口、原文、补读和失败尝试。
-	MaxSupplemental int           `mapstructure:"max_supplemental"` // evidence/context 子预算。
+	MaxSupplemental int           `mapstructure:"max_supplemental"` // 核对事实和补充背景的页面数量上限（evidence/context）。
 	MaxDepth        int           `mapstructure:"max_depth"`        // 首个抓取页面为 0，追读每深入一次加 1。
 	MaxIterations   int           `mapstructure:"max_iterations"`
 	Timeout         time.Duration `mapstructure:"timeout"`

@@ -24,7 +24,7 @@ type readReply struct {
 	Error  string         `json:"error,omitempty"`
 }
 
-// readingSession 保存本次来源图和程序侧预算。typed agent 的工具串行执行，
+// readingSession 保存本次来源关系、页面深度、页面数和补读数。typed agent 的工具串行执行，
 // 因此计数与 URL 索引在单一会话内更新，不需要跨任务共享锁。
 type readingSession struct {
 	e                   *Engine
@@ -104,7 +104,7 @@ func (s *readingSession) read(ctx context.Context, r readRequest) (src domain.So
 	}
 	if src, ok := s.byURL[u]; ok {
 		cacheHit = true
-		// 同一页面不重复抓取、不再次计入来源预算，但保留这次引用关系和阅读目的。
+		// 同一页面不重复抓取或增加页面计数，但保留这次引用关系和阅读目的。
 		s.readings = append(s.readings, domain.Reading{SourceID: src.ID, ParentID: r.ParentID, URL: u, Question: r.Question, Role: r.Role, Depth: depth})
 		return src, nil
 	}
@@ -117,7 +117,7 @@ func (s *readingSession) read(ctx context.Context, r readRequest) (src domain.So
 		}
 		s.supplemental++
 	}
-	// 首次阅读包括缓存命中与失败尝试，均占来源预算，避免失败页面引发无限追读。
+	// 首次阅读无论缓存命中还是读取失败，都增加页面计数，避免失败页面引发无限追读。
 	s.pages++
 	if s.e.CachedSource != nil && s.e.Config.Reader.CacheTTL > 0 {
 		cached, cacheErr := s.e.CachedSource(ctx, u)

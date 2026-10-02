@@ -2,7 +2,9 @@ package prompt
 
 const analysisOutputRules = `## 输出表达
 
-只输出符合 JSON Schema 的分析。title 是文章标题；headings 是报告的栏目名称，
+只输出符合 JSON Schema 的分析。title 是本次分析的标题。
+有明确主文章时使用其标题；多篇材料且没有明确主文章时，概括本次分析主题。
+headings 是报告的栏目名称，
 由你根据人格设定和 profile 中的表达规则、few-shot 生成，不使用 JSON 字段名代替栏目名称。
 headings 的 summary、discussion、evaluation、uncertainties、sources 分别对应
 事实摘要、第三方观点、你的评价、未确认与读取限制、原文与来源。

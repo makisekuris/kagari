@@ -144,7 +144,7 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	}
 	// 模拟生成已完成、尚未提交 outbox 时进程退出。
 	report, text, err := worker.processDigest(ctx, job)
-	if err != nil || len(inputs) != 2 || inputs[0] != inputs[1] || strings.Contains(inputs[0], "全文不应") || len(report.Input.Entries) != 2 || report.Input.Profile != "初始表达偏好" || report.Usage.TotalTokens != 18 || !strings.HasPrefix(text, "本周回顾（1条）") {
+	if err != nil || len(inputs) != 2 || inputs[0] != inputs[1] || strings.Contains(inputs[0], "全文不应") || len(report.Input.Entries) != 2 || report.Input.Profile != "初始表达偏好" || report.Usage.TotalTokens != 18 || !strings.HasPrefix(text, "阅读回顾（1条）") {
 		t.Fatalf("snapshot/generation: %+v %q err=%v inputs=%v", report, text, err, inputs)
 	}
 	if err := s.Recover(ctx); err != nil {
@@ -203,7 +203,7 @@ func TestDigestEmptyAndInputLimitDoNotCallModel(t *testing.T) {
 		job, err := worker.ProcessJob(ctx, id)
 		if empty {
 			var report digest.Report
-			if err != nil || json.Unmarshal(job.Result, &report) != nil || !strings.HasPrefix(digest.Render(report, cfg.Weekly.Timezone), "本周回顾（0条）") {
+			if err != nil || json.Unmarshal(job.Result, &report) != nil || !strings.HasPrefix(digest.Render(report, cfg.Weekly.Timezone), "阅读回顾（0条）") {
 				t.Fatalf("empty digest requires model: %+v %v", job, err)
 			}
 		} else if err == nil || job.Status != "failed" || !strings.Contains(job.LastError, "max_input_chars") {

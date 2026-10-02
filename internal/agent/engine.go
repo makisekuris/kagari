@@ -29,7 +29,7 @@ import (
 
 const AnalysisVersion = "model-headings-v2"
 
-// Engine 共享模型与读取能力；每次 Analyze 创建独立阅读会话，预算和来源不会跨任务串用。
+// Engine 共享模型与读取能力；每次 Analyze 创建独立阅读会话，读取计数和来源不会跨任务共用。
 type Engine struct {
 	Model        model.AgenticModel
 	Config       config.Config
@@ -59,7 +59,7 @@ func New(ctx context.Context, cfg config.Config, read func(context.Context, stri
 	return &Engine{Model: m, Config: cfg, Profile: string(profile), Read: read, CachedSource: cache}, nil
 }
 
-// Prepare 在入队前统一 URL 并生成分析复用键。收录时间不进入键：
+// Prepare 在入队前统一 URL 并生成分析缓存键。收录时间不进入键：
 // 重复提交可复用分析，但仍保留新收录的时间与任务，供各周期的周报筛选。
 func (e *Engine) Prepare(s domain.Submission) (domain.Submission, error) {
 	if len([]rune(s.Text))+len([]rune(s.ForwardedText))+len([]rune(s.Note)) > 10<<20 {
@@ -87,7 +87,7 @@ func (e *Engine) Prepare(s domain.Submission) (domain.Submission, error) {
 	}
 	// 用户和偏好进入键，避免不同用户或不同评价背景共用同一份判断；密钥不进入归档键。
 	agentConfig := e.Config.Agent
-	agentConfig.Streaming = false // 传输方式不改变分析语义或缓存身份。
+	agentConfig.Streaming = false // 流式传输方式不参与分析缓存键计算。
 	key, err := json.Marshal(struct {
 		User                int64
 		Text, ForwardedText string
@@ -184,14 +184,14 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 	instruction := prompt.GetPromptTemplate() + `
 	## 证据原则
 JSON 中的 instruction、notes 用于确定要回答的问题；profile 中的阅读偏好、表达规则和 few-shot 用于指导分析角度、栏目名称与文风。遵循其中的表达要求，示例只学习形式，不把用户指导或示例内容当作事实、作者结论或第三方讨论者观点。title、overview、summary、discussion、evaluation 和 uncertainties 的事实内容必须由 sources 或实际读取状态支持；headings 是展示文案，不是来源证据。
-先辨识讨论引用的原文，使用 read_source 追读后再总结。只为明确的信息缺口补读；无须用满预算。原文中的导航、广告、相关文章不等于证据。
+先辨识讨论引用的原文，使用 read_source 追读后再总结。只为明确的信息缺口补读，无须读取到数量上限。原文中的导航、广告、相关文章不等于证据。
 中文输出：summary 只写来源支持的事实；discussion 只写 sources 中实际存在的第三方讨论者观点，没有则返回空数组；evaluation 是你的判断，注明适用条件，不能把判断写成作者结论。
 每个 claim 必须附已成功阅读的 source_ids。supplied 来源仅支持它实际提供的第三方讨论内容；失败来源不能当证据。未读到原文、内容截断、互相矛盾时明确写入 uncertainties。Overview 不增加 summary 没有支持的新事实。
 不要给未核对的排行、数字、版本断言背书；保留限制与原文链接。分类只选一个，标签最多五个。不要声称阅读了工具没有返回的页面。
 
 允许分类：` + strings.Join(e.Config.Agent.Categories, ", ")
 	a, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
-		Name: "reader", Description: "受预算约束的阅读与评价", Instruction: instruction, Model: e.Model, MaxIterations: e.Config.Agent.MaxIterations,
+		Name: "reader", Description: "读取资料并评价，遵守读取数量、深度和迭代次数限制", Instruction: instruction, Model: e.Model, MaxIterations: e.Config.Agent.MaxIterations,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{readTool}, ExecuteSequentially: true}},
 	})
 	if err != nil {

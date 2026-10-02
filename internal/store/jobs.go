@@ -225,7 +225,7 @@ func (s *Store) FailJob(ctx context.Context, id int64, result []byte, reason str
 	return tx.Commit()
 }
 
-// InterruptJob preserves evidence without charging a user cancellation to the retry budget.
+// InterruptJob preserves partial results and requeues the job without counting the interrupted attempt.
 func (s *Store) InterruptJob(ctx context.Context, id int64, result []byte) error {
 	if err := validJSON(result); err != nil {
 		return err

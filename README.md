@@ -59,7 +59,7 @@ Commands load `.env` from the current working directory; no `source` command is 
 | 设置 / Setting | 默认值 / Default | 说明 / Description |
 | --- | --- | --- |
 | `storage.path` | `data/kagari.db` | SQLite 数据库 / SQLite database |
-| `profile_path` | `profile.md` | 人格和阅读偏好 / Persona and reading preferences |
+| `profile_path` | `profile.md` | 阅读偏好和表达示例 / Reading preferences and style examples |
 | `max_attempts` | `6` | 包含首次尝试 / Includes the first attempt |
 | `agent.streaming` | `false` | 启用 Responses SSE 与实时日志 / Enables Responses SSE and live logs |
 | `weekly.enabled` | `false` | 周报定时调度 / Scheduled weekly digests |
@@ -91,21 +91,21 @@ Place the global `-config` flag before the subcommand. These examples use the lo
 - `read URL` 读取单个 URL，不调用模型，也不创建任务。 / Reads one URL without calling the model or creating a job.
 - `analyze [-note TEXT] [-user ID] URL...` 分析一个或多个链接并归档结果。 / Analyzes one or more URLs and archives the result.
 - `run` 启动 Telegram long polling、任务处理、投递和启用后的周报调度。 / Starts Telegram polling, job processing, delivery, and enabled digest scheduling.
-- `digest [-user ID] [-cutoff RFC3339]` 回顾截止时间前七个日历日；`-start` 与 `-end` 可指定半开日期范围，必须同时提供且不能与 `-cutoff` 混用。 / Reviews the seven calendar days before the cutoff. Use `-start` and `-end` together for a half-open date range; they cannot be combined with `-cutoff`.
+- `digest [-user ID] [-cutoff RFC3339]` 默认回顾截止时间前七个日历日，包含开始时间、不包含截止时间。`-start` 与 `-end` 可指定日期范围，包含开始日期、不包含结束日期；必须同时提供且不能与 `-cutoff` 混用。 / By default, reviews the seven calendar days before the cutoff, including the start and excluding the cutoff. Use `-start` and `-end` together for a date range that includes the start date and excludes the end date; they cannot be combined with `-cutoff`.
 - `status ID` 查看任务和投递状态；`export ID` 输出任务 JSON。 / Shows job and delivery status; `export ID` prints the job JSON.
 - `retry ID` 重新排队失败任务；`retry-delivery ID` 手动重发失败或结果不确定的投递。 / Requeues a failed job; manually retries a failed or uncertain delivery.
 
-未指定 cutoff 的周报会创建新的时间快照；明确范围的周报可以回放已保存结果。空周报无需模型。默认最大尝试次数为 6，包含首次尝试；中间失败不会向 Telegram 发送最终失败通知。
+未指定 `-cutoff`、`-start` 和 `-end` 时，周报使用执行命令时的当前时间作为截止时间。同一用户、版本和精确时间范围可复用已保存结果。空周报无需调用模型。默认总共最多尝试 6 次，包含首次尝试；中间失败不会向 Telegram 发送最终失败通知。
 
-A digest without a cutoff creates a new time snapshot; an explicit range can replay a saved result. Empty digests need no model call. The default maximum is six attempts, including the first; intermediate failures do not send a final Telegram notice.
+Without `-cutoff`, `-start`, or `-end`, a digest uses the current time when the command runs as its cutoff. The same user, version, and exact time range can reuse a saved result. Empty digests need no model call. The default maximum is six attempts, including the first; intermediate failures do not send a final Telegram notice.
 
-CLI 的 `analyze` 和 `digest` 会短暂启动处理器，不能与 `run` 或另一个处理型 CLI 命令同时运行。状态、导出和重试命令可以在服务运行时使用。
+CLI 的 `analyze` 和 `digest` 会启动任务处理器，不能与 `run` 或另一个处理型 CLI 命令同时运行。状态、导出和重试命令可以在服务运行时使用。
 
-CLI `analyze` and `digest` briefly start a processor and must not run alongside `run` or another processing CLI command. Status, export, and retry commands can run while the service is active.
+CLI `analyze` and `digest` start a processor and must not run alongside `run` or another processing CLI command. Status, export, and retry commands can run while the service is active.
 
-Telegram 第一版只接收私聊中的 allowlisted 用户。默认回复提交所在私聊；配置 `telegram.target_chat_id` 后可将分析结果发往指定 chat 或频道，bot 需要相应发言权限。支持 `/help`、`/status ID`、`/retry ID`、`/retry_delivery ID`、`/weekly` 和 `/weekly START END`。
+Telegram 只接收允许列表中用户的私聊消息。默认回复提交所在私聊；配置 `telegram.target_chat_id` 后可将分析结果发往指定聊天或频道，bot 需要相应发言权限。支持 `/help`、`/status ID`、`/retry ID`、`/retry_delivery ID`、`/weekly` 和 `/weekly START END`。
 
-The first Telegram version accepts allowlisted users in private chats. Replies go to the submitting chat by default. Set `telegram.target_chat_id` to deliver analysis to another chat or channel; the bot needs permission to post there. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, and `/weekly START END`.
+Telegram accepts private messages from users on the allowlist. Replies go to the submitting chat by default. Set `telegram.target_chat_id` to deliver analysis to another chat or channel; the bot needs permission to post there. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, and `/weekly START END`.
 
 ## 数据库维护 / Database maintenance
 
@@ -145,9 +145,10 @@ Clearing does not retract Telegram messages already sent. Job IDs may be reused 
 
 - HTTP + Readability 读取网页，限制超时、响应大小、正文长度和链接数，并默认拒绝非公网地址。只有显式配置 `reader.allowed_non_public_cidrs` 才会放行指定网段。 / HTTP + Readability fetches web pages with timeout, response-size, content-length, and link limits. Non-public IPs are blocked by default; only explicitly configured CIDRs are allowed.
 - X 通过公开 oEmbed 读取可用的单条帖子；长帖、线程回复和链接卡片可能不完整。 / X posts are read through public oEmbed. Long posts, threads, and link cards may be incomplete.
-- 单次分析最多读取 6 页、补读 2 个来源、深度 2、迭代 10 次。周报 `weekly.max_input_chars` 默认 120000；超限任务失败并保留输入快照，不丢弃后续材料。 / One analysis can read up to 6 pages, 2 supplemental sources, depth 2, and 10 iterations. `weekly.max_input_chars` defaults to 120000; oversized jobs fail with their input snapshot preserved.
-- `weekly.enabled` 默认关闭；启用后按 `Asia/Shanghai` 时区和配置的星期、时间调度。 / `weekly.enabled` defaults to false. When enabled, digests follow the configured weekday and time in the `Asia/Shanghai` timezone.
-- 浏览器回落尚未实现；`reader.browser_fallback.enabled: true` 会被拒绝。 / Browser fallback is not implemented; `reader.browser_fallback.enabled: true` is rejected.
+- 默认单次分析最多计入 6 个页面，其中用于核对事实或补充背景的页面最多 2 个；追读原文也计入页面总数。首次读取页面时，缓存命中和失败尝试也会计数；同一会话再次读取同一页面不重复计数。首个页面深度为 0，默认最多追读到深度 2、迭代 10 次；这些限制可在 `agent` 配置中调整。 / By default, an analysis counts up to 6 pages in total, including primary-source follow-ups, with up to 2 pages for checking facts or adding context. A page's first read counts even on a cache hit or fetch failure; rereading it in the same session does not count again. The first page has depth 0; the default maximum depth is 2, with up to 10 iterations. These limits are configurable under `agent`.
+- 周报 `weekly.max_input_chars` 默认 120000；输入超过上限时任务失败并保留完整输入快照，不通过丢弃条目缩小输入。 / `weekly.max_input_chars` defaults to 120000; oversized digest jobs fail with the full input snapshot preserved, rather than dropping entries to fit.
+- `weekly.enabled` 默认关闭；启用后按 `weekly.timezone` 和配置的星期、时间调度，默认时区为 `Asia/Shanghai`。 / `weekly.enabled` defaults to false. When enabled, digests follow `weekly.timezone` and the configured weekday and time; the default timezone is `Asia/Shanghai`.
+- 网页读取失败后改用浏览器的功能尚未实现；`reader.browser_fallback.enabled: true` 会被拒绝。 / Browser fallback is not implemented; `reader.browser_fallback.enabled: true` is rejected.
 
 ## 日志与隐私 / Logs and privacy
 

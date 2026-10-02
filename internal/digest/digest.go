@@ -45,14 +45,14 @@ func Render(report Report, timezone string) string {
 	}
 	start, end := report.Start.In(loc), report.End.In(loc)
 	var out strings.Builder
-	fmt.Fprintf(&out, "每周阅读汇总（用户 %d）\n", report.UserID)
-	fmt.Fprintf(&out, "覆盖区间：[%s, %s)（%s）；按收录时间统计，不按文章发布日期。\n",
+	fmt.Fprintf(&out, "阅读汇总（用户 %d）\n", report.UserID)
+	fmt.Fprintf(&out, "覆盖区间：从 %s（含）至 %s（不含）（%s）；按收录时间统计，不按文章发布日期。\n",
 		start.Format("2006-01-02 15:04"), end.Format("2006-01-02 15:04"), timezone)
 	fmt.Fprintf(&out, "提交 %d 条；已完成分析 %d 条；待处理 %d 条；失败 %d 条。\n",
 		report.Total, len(report.Entries), report.Pending, report.Failed)
 	failedSources, truncatedSources := sourceCounts(report.Entries)
 	fmt.Fprintf(&out, "来源读取失败 %d 个；正文截断 %d 个。\n", failedSources, truncatedSources)
-	out.WriteString("原文正文已保存在本地归档；本周报只列摘要与链接，不重复输出全文。\n")
+	out.WriteString("原文正文已保存在本地归档；本次汇总只列摘要与链接，不重复输出全文。\n")
 	out.WriteString("摘要与评价由 AI 协助整理；重要信息请以原文为准。\n")
 	fmt.Fprintf(&out, "生成时间：%s\n", report.GeneratedAt.In(loc).Format("2006-01-02 15:04"))
 	if len(report.Entries) == 0 {

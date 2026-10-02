@@ -80,7 +80,7 @@ func TestWeeklyDigestCheck(t *testing.T) {
 	}
 	text := Render(report, "America/New_York")
 	aiIndex, zIndex := strings.Index(text, "【AI】"), strings.Index(text, "【Z】")
-	if aiIndex < 0 || zIndex < 0 || aiIndex > zIndex || !strings.Contains(text, "任务 #10") || !strings.Contains(text, "overview AI") || !strings.Contains(text, "evaluation Z") || !strings.Contains(text, "https://submitted.example/") || !strings.Contains(text, "https://source.example/ai") || !strings.Contains(text, "https://source.example/requested") || !strings.Contains(text, "https://source.example/final") || !strings.Contains(text, "来源读取失败 1 个；正文截断 2 个") || !strings.Contains(text, "原文正文已保存在本地归档") || !strings.Contains(text, "摘要与评价由 AI 协助整理") {
+	if aiIndex < 0 || zIndex < 0 || aiIndex > zIndex || !strings.HasPrefix(text, "阅读汇总（用户 7）\n") || !strings.Contains(text, "覆盖区间：从 2024-03-04 00:00（含）至 2024-03-11 00:00（不含）（America/New_York）；按收录时间统计，不按文章发布日期。") || strings.Contains(text, "每周阅读汇总") || strings.Contains(text, "本周") || !strings.Contains(text, "任务 #10") || !strings.Contains(text, "overview AI") || !strings.Contains(text, "evaluation Z") || !strings.Contains(text, "https://submitted.example/") || !strings.Contains(text, "https://source.example/ai") || !strings.Contains(text, "https://source.example/requested") || !strings.Contains(text, "https://source.example/final") || !strings.Contains(text, "来源读取失败 1 个；正文截断 2 个") || !strings.Contains(text, "原文正文已保存在本地归档") || !strings.Contains(text, "本次汇总只列摘要与链接") || !strings.Contains(text, "摘要与评价由 AI 协助整理") {
 		t.Fatalf("Render() omitted or misordered report content:\n%s", text)
 	}
 	if strings.Contains(text, "secret full source text") || !strings.Contains(text, "提交 4 条；已完成分析 2 条；待处理 1 条；失败 1 条") {

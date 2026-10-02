@@ -24,7 +24,7 @@ func (w *Worker) EnqueueDigest(ctx context.Context, request domain.DigestRequest
 		return 0, false, errors.New("unsupported digest version")
 	}
 	request.Version = domain.DigestVersion
-	// 新版本与旧周报分开；完整截止时间进入身份，同一请求仍只入队一次。
+	// 版本、用户和精确时间范围共同组成任务键，同一请求只入队一次。
 	key := fmt.Sprintf("%s:%d:%s:%s", request.Version, request.UserID, request.Start.UTC().Format(time.RFC3339Nano), request.End.UTC().Format(time.RFC3339Nano))
 	raw, err := json.Marshal(request)
 	if err != nil {
@@ -88,7 +88,7 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 		if err != nil {
 			return report, "", err
 		}
-		// ponytail: 字符数只作输入体积上限；实测需要精确上下文预算时再接 tokenizer。
+		// ponytail: 以字符数限制输入大小；需要按 token 检查模型上下文上限时再接 tokenizer。
 		if limit := w.Config.Weekly.InputLimit(); utf8.RuneCount(raw) > limit {
 			return report, "", fmt.Errorf("digest input exceeds weekly.max_input_chars (%d)", limit)
 		}

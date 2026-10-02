@@ -10,24 +10,24 @@ import (
 
 func renderReview(report Report) string {
 	if report.Input == nil {
-		return "周报生成未完成：尚无冻结的回顾输入。\n"
+		return "周报生成未完成：尚无已保存的回顾材料。\n"
 	}
 	if report.Review == nil {
-		return "周报生成未完成：尚未生成审核结果。\n"
+		return "周报生成未完成：尚未生成回顾内容。\n"
 	}
 	if ValidateReview(*report.Input, *report.Review) != nil {
 		return "周报生成未完成：回顾结果未通过校验。\n"
 	}
 	input, review := report.Input, report.Review
 	var out strings.Builder
-	fmt.Fprintf(&out, "本周回顾（%d条）\n", Count(*review))
+	fmt.Fprintf(&out, "阅读回顾（%d条）\n", Count(*review))
 	loc, err := time.LoadLocation(input.Timezone)
 	if err != nil {
 		loc = time.UTC
 	}
-	fmt.Fprintf(&out, "覆盖区间：[%s, %s)（%s）\n", input.Start.In(loc).Format("2006-01-02 15:04"), input.Cutoff.In(loc).Format("2006-01-02 15:04"), input.Timezone)
+	fmt.Fprintf(&out, "覆盖区间：从 %s（含）至 %s（不含）（%s）\n", input.Start.In(loc).Format("2006-01-02 15:04"), input.Cutoff.In(loc).Format("2006-01-02 15:04"), input.Timezone)
 	if len(input.Entries) == 0 {
-		out.WriteString("本周暂无可汇总的新内容。\n")
+		out.WriteString("所选时间范围内暂无可汇总的新内容。\n")
 		return out.String()
 	}
 	if strings.TrimSpace(review.Opening) != "" {
