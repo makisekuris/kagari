@@ -51,6 +51,23 @@ func TestConfigEnvironmentAndValidation(t *testing.T) {
 	}
 }
 
+func TestAgentStreamingOverride(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("config.yaml", []byte("agent:\n  streaming: true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KAGARI_AGENT_STREAMING", "false")
+	c, err := Load("")
+	if err != nil || c.Agent.Streaming {
+		t.Fatalf("environment did not disable streaming: %v %v", c.Agent.Streaming, err)
+	}
+	t.Setenv("KAGARI_AGENT_STREAMING", "true")
+	c, err = Load("")
+	if err != nil || !c.Agent.Streaming {
+		t.Fatalf("environment did not enable streaming: %v %v", c.Agent.Streaming, err)
+	}
+}
+
 func TestDotEnvPrecedenceAndIsolation(t *testing.T) {
 	t.Chdir(t.TempDir())
 	unsetBrowserFallbackEnv(t)

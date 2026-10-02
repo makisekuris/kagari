@@ -9,10 +9,12 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/go-telegram/bot/models"
-	"go.uber.org/zap"
 	"kagari/internal/domain"
 	"kagari/internal/reader"
+	messagetemplate "kagari/internal/telegram/message_template"
+
+	"github.com/go-telegram/bot/models"
+	"go.uber.org/zap"
 )
 
 func (c *Client) acceptUpdate(ctx context.Context, update *models.Update) error {
@@ -28,7 +30,8 @@ func (c *Client) acceptUpdate(ctx context.Context, update *models.Update) error 
 		return errors.New("Telegram update could not be saved")
 	}
 	if created && kind == "analyze" && ackChatID != 0 {
-		if _, err := c.Send(ctx, ackChatID, fmt.Sprintf("已收到，任务 #%d 已排队。", jobID)); err != nil {
+		role := &messagetemplate.Taffy{}
+		if _, err := c.Send(ctx, ackChatID, role.AskChatID(jobID)); err != nil {
 			c.log.Warn("Telegram acknowledgement failed", zap.String("reason", err.Error()))
 		}
 	}
@@ -62,9 +65,17 @@ func (c *Client) jobForUpdate(update *models.Update) (kind, key string, payload 
 		URLs:       messageURLs(text, entities),
 		ReceivedAt: time.Unix(int64(message.Date), 0).UTC(),
 	}
+	forwarded := message.ForwardOrigin != nil
+	if origin := message.ForwardOrigin; origin != nil && origin.Type == models.MessageOriginTypeUser && origin.MessageOriginUser != nil && origin.MessageOriginUser.SenderUser.ID == message.From.ID {
+		forwarded = false
+	}
+	if forwarded {
+		submission.ForwardedText = text
+		submission.Text = ""
+	}
 	prepared, prepareErr := c.prepare(submission)
 	if prepareErr != nil || len(prepared.URLs) == 0 {
-		payload, err = json.Marshal(domain.Command{UserID: message.From.ID, ChatID: message.Chat.ID, Text: "请发送包含链接的消息，并可附上阅读关注点。"})
+		payload, err = json.Marshal(domain.Command{UserID: message.From.ID, ChatID: message.Chat.ID, Text: "请发送包含链接的消息，可附上分析问题或备注。"})
 		return "notice", key, payload, message.Chat.ID, message.Chat.ID, err
 	}
 	// 身份和权限属于提交者；公共目标群只决定结果发到哪里，不能替代 UserID。

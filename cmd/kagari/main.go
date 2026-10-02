@@ -45,6 +45,9 @@ func run() error {
 		return err
 	}
 	logCfg := zap.NewProductionConfig()
+	if cfg.Agent.Streaming {
+		logCfg.Sampling = nil // SSE 的每个片段都要保留，不能被生产日志采样丢弃。
+	}
 	if err := logCfg.Level.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
 		return err
 	}
@@ -91,6 +94,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		e.Log = log
 		w.Engine = e
 	}
 	switch args[0] {

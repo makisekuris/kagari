@@ -57,6 +57,7 @@ type Agent struct {
 	MaxIterations   int           `mapstructure:"max_iterations"`
 	Timeout         time.Duration `mapstructure:"timeout"`
 	Categories      []string      `mapstructure:"categories"`
+	Streaming       bool          `mapstructure:"streaming"`
 }
 
 type Weekly struct {

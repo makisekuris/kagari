@@ -27,14 +27,24 @@ func Analysis(result domain.Result) string {
 	for i, s := range result.Sources {
 		refs[s.ID] = i + 1
 	}
+	headings := domain.AnalysisHeadings{
+		Summary:       "AI 摘要",
+		Discussion:    "讨论者观点",
+		Evaluation:    "Agent 评价",
+		Uncertainties: "未确认与限制",
+		Sources:       "原文与来源",
+	}
+	if a.Headings != nil {
+		headings = *a.Headings
+	}
 	for _, group := range []struct {
 		Title  string
 		Claims []domain.Claim
-	}{{"AI 摘要", a.Summary}, {"讨论者观点", a.Discussion}, {"Agent 评价", a.Evaluation}} {
+	}{{headings.Summary, a.Summary}, {headings.Discussion, a.Discussion}, {headings.Evaluation, a.Evaluation}} {
 		if len(group.Claims) == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "\n%s：\n", group.Title)
+		fmt.Fprintf(&b, "\n%s：\n", strings.TrimRight(strings.TrimSpace(group.Title), ":："))
 		for _, c := range group.Claims {
 			fmt.Fprintf(&b, "• %s", c.Text)
 			for _, id := range c.SourceIDs {
@@ -43,16 +53,13 @@ func Analysis(result domain.Result) string {
 			b.WriteByte('\n')
 		}
 	}
-	if a.Relevance != "" {
-		fmt.Fprintf(&b, "\n与你的关注点：%s\n", a.Relevance)
-	}
 	if len(a.Uncertainties) > 0 {
-		b.WriteString("\n未确认与限制：\n")
+		fmt.Fprintf(&b, "\n%s：\n", strings.TrimRight(strings.TrimSpace(headings.Uncertainties), ":："))
 		for _, u := range a.Uncertainties {
 			fmt.Fprintf(&b, "• %s\n", u)
 		}
 	}
-	b.WriteString("\n原文与来源：\n")
+	fmt.Fprintf(&b, "\n%s：\n", strings.TrimRight(strings.TrimSpace(headings.Sources), ":："))
 	for i, s := range result.Sources {
 		title := s.Title
 		if title == "" {

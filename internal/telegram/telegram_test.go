@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/go-telegram/bot/models"
 	"go.uber.org/zap"
 	"kagari/internal/config"
 	"kagari/internal/domain"
@@ -161,6 +162,53 @@ func TestPollPersistsBeforeAckExtractsUTF16AndDeduplicates(t *testing.T) {
 				t.Fatalf("caption text_link submission = %#v", sub)
 			}
 		}
+	}
+}
+
+func TestForwardedMessageSeparatesTaskAndThirdPartyText(t *testing.T) {
+	var prepared domain.Submission
+	client := testClient(t, testStore(t), baseConfig(), func(sub domain.Submission) (domain.Submission, error) {
+		prepared = sub
+		return sub, nil
+	}, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("unexpected Telegram request: %s", req.URL)
+		return nil, errors.New("unexpected request")
+	}))
+	message := &models.Message{
+		ID: 1, From: &models.User{ID: 7}, Chat: models.Chat{ID: 7, Type: models.ChatTypePrivate}, Date: 1700000000,
+		ForwardOrigin: &models.MessageOrigin{Type: models.MessageOriginTypeHiddenUser},
+		Text:          "third-party discussion https://example.org/post",
+	}
+	kind, _, payload, target, ack, err := client.jobForUpdate(&models.Update{ID: 1, Message: message})
+	if err != nil || kind != "analyze" || target != 900 || ack != 7 {
+		t.Fatalf("jobForUpdate() = (%q, %d, %d, %v)", kind, target, ack, err)
+	}
+	var queued domain.Submission
+	if err := json.Unmarshal(payload, &queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued.Text != "" || queued.ForwardedText != message.Text || len(queued.URLs) != 1 || queued.URLs[0] != "https://example.org/post" {
+		t.Fatalf("forwarded submission mixed identities: %#v", queued)
+	}
+	if prepared.Text != "" || prepared.ForwardedText != queued.ForwardedText {
+		t.Fatalf("prepare input mixed identities: %#v", prepared)
+	}
+	message.ForwardOrigin = &models.MessageOrigin{
+		Type: models.MessageOriginTypeUser,
+		MessageOriginUser: &models.MessageOriginUser{
+			SenderUser: models.User{ID: 7},
+		},
+	}
+	kind, _, payload, _, _, err = client.jobForUpdate(&models.Update{ID: 2, Message: message})
+	if err != nil || kind != "analyze" {
+		t.Fatalf("own forwarded message job = (%q, %v)", kind, err)
+	}
+	queued = domain.Submission{}
+	if err := json.Unmarshal(payload, &queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued.Text != message.Text || queued.ForwardedText != "" {
+		t.Fatalf("own forward became third-party source: %#v", queued)
 	}
 }
 

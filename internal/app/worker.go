@@ -37,10 +37,13 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 			cached, err := w.Store.FindResult(ctx, s.CacheKey)
 			if err != nil {
 				workErr = err
-			} else if cached != nil && w.Config.Reader.CacheTTL > 0 && time.Since(cached.CreatedAt) < w.Config.Reader.CacheTTL {
+			} else if cached != nil && cached.AnalysisVersion == agent.AnalysisVersion && w.Config.Reader.CacheTTL > 0 && time.Since(cached.CreatedAt) < w.Config.Reader.CacheTTL {
 				r = *cached
+				w.Log.Info("agent analysis cache hit", zap.Int64("job_id", job.ID), zap.Int("attempt", job.Attempts), zap.Bool("model_called", false))
 			} else {
-				r, workErr = w.Engine.Analyze(ctx, s)
+				engine := *w.Engine
+				engine.Log = w.Log.With(zap.Int64("job_id", job.ID), zap.Int("attempt", job.Attempts), zap.Int("max_attempts", w.Config.MaxAttempts))
+				r, workErr = engine.Analyze(ctx, s)
 			}
 		}
 		result = r

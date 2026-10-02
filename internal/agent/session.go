@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"time"
 
+	"go.uber.org/zap"
+
 	"kagari/internal/domain"
+	"kagari/internal/logging"
 	"kagari/internal/reader"
 )
 
@@ -44,7 +47,27 @@ func (s *readingSession) add(src domain.Source) {
 
 // read 的 err 表示请求违反阅读策略或基础设施失败；普通页面读取失败会保留为 Source
 // 返回，让模型可以选择其他已发现链接，并让归档解释哪些材料没有读到。
-func (s *readingSession) read(ctx context.Context, r readRequest) (domain.Source, error) {
+func (s *readingSession) read(ctx context.Context, r readRequest) (src domain.Source, err error) {
+	started := time.Now()
+	cacheHit := false
+	if s.e.Log != nil {
+		s.e.Log.Info("agent read_source started", zap.String("url", logURL(r.URL)), zap.String("role", r.Role), zap.String("parent_source_id", r.ParentID), zap.String("question", s.e.logContent(r.Question)))
+	}
+	defer func() {
+		if s.e.Log == nil {
+			return
+		}
+		fields := []zap.Field{zap.String("url", logURL(r.URL)), zap.String("role", r.Role), zap.String("source_id", src.ID), zap.String("status", src.Status),
+			zap.String("source_reason", logText(src.Reason)), zap.Bool("cache_hit", cacheHit), zap.Bool("truncated", src.Truncated), zap.Int("content_chars", len([]rune(src.Content))),
+			zap.Duration("elapsed", time.Since(started)), zap.Int("pages_used", s.pages), zap.Int("pages_limit", s.e.Config.Agent.MaxSources), zap.Int("supplemental_used", s.supplemental), zap.Int("supplemental_limit", s.e.Config.Agent.MaxSupplemental)}
+		if err != nil {
+			s.e.Log.Warn("agent read_source rejected", append(fields, logging.ErrorFields(err)...)...)
+		} else if !usable(src) {
+			s.e.Log.Warn("agent read_source failed", fields...)
+		} else {
+			s.e.Log.Info("agent read_source finished", fields...)
+		}
+	}()
 	u, err := reader.NormalizeURL(r.URL)
 	if err != nil {
 		return domain.Source{}, err
@@ -80,6 +103,7 @@ func (s *readingSession) read(ctx context.Context, r readRequest) (domain.Source
 		return domain.Source{}, errors.New("reading depth budget exhausted")
 	}
 	if src, ok := s.byURL[u]; ok {
+		cacheHit = true
 		// 同一页面不重复抓取、不再次计入来源预算，但保留这次引用关系和阅读目的。
 		s.readings = append(s.readings, domain.Reading{SourceID: src.ID, ParentID: r.ParentID, URL: u, Question: r.Question, Role: r.Role, Depth: depth})
 		return src, nil
@@ -95,7 +119,6 @@ func (s *readingSession) read(ctx context.Context, r readRequest) (domain.Source
 	}
 	// 首次阅读包括缓存命中与失败尝试，均占来源预算，避免失败页面引发无限追读。
 	s.pages++
-	var src domain.Source
 	if s.e.CachedSource != nil && s.e.Config.Reader.CacheTTL > 0 {
 		cached, cacheErr := s.e.CachedSource(ctx, u)
 		if cacheErr != nil {
@@ -103,6 +126,7 @@ func (s *readingSession) read(ctx context.Context, r readRequest) (domain.Source
 		}
 		if cached != nil && cached.Status == "ok" && time.Since(cached.FetchedAt) < s.e.Config.Reader.CacheTTL {
 			src = *cached
+			cacheHit = true
 		}
 	}
 	if src.ID == "" {
