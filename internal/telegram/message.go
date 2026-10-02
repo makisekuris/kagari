@@ -11,7 +11,6 @@ import (
 
 	"kagari/internal/domain"
 	"kagari/internal/reader"
-	messagetemplate "kagari/internal/telegram/message_template"
 
 	"github.com/go-telegram/bot/models"
 	"go.uber.org/zap"
@@ -30,8 +29,7 @@ func (c *Client) acceptUpdate(ctx context.Context, update *models.Update) error 
 		return errors.New("Telegram update could not be saved")
 	}
 	if created && kind == "analyze" && ackChatID != 0 {
-		role := &messagetemplate.Taffy{}
-		if _, err := c.Send(ctx, ackChatID, role.AskChatID(jobID)); err != nil {
+		if _, err := c.Send(ctx, ackChatID, c.replies.AskChatID(jobID)); err != nil {
 			c.log.Warn("Telegram acknowledgement failed", zap.String("reason", err.Error()))
 		}
 	}

@@ -25,10 +25,16 @@ type Client struct {
 	allowed map[int64]struct{}
 	store   *store.Store
 	prepare func(domain.Submission) (domain.Submission, error)
+	replies ReplyTemplate
 	log     *zap.Logger
 	http    *http.Client
 	bot     *telegrambot.Bot
 	baseURL string
+}
+
+// ReplyTemplate 提供带任务编号的收件回执，具体角色由入口注入。
+type ReplyTemplate interface {
+	AskChatID(jobID int64) string
 }
 
 type SendError struct {
@@ -45,13 +51,16 @@ func (e *SendError) Error() string {
 	return e.Reason
 }
 
-func New(cfg config.Telegram, st *store.Store, prepare func(domain.Submission) (domain.Submission, error), log *zap.Logger) (*Client, error) {
+func New(cfg config.Telegram, st *store.Store, prepare func(domain.Submission) (domain.Submission, error), log *zap.Logger, replies ReplyTemplate) (*Client, error) {
 	transport := &http.Transport{Proxy: nil}
-	return newClient(cfg, st, prepare, log, apiURL, transport)
+	return newClient(cfg, st, prepare, log, replies, apiURL, transport)
 }
 
 // newClient is the package-private API fixture seam; New always uses api.telegram.org.
-func newClient(cfg config.Telegram, st *store.Store, prepare func(domain.Submission) (domain.Submission, error), log *zap.Logger, baseURL string, transport http.RoundTripper) (*Client, error) {
+func newClient(cfg config.Telegram, st *store.Store, prepare func(domain.Submission) (domain.Submission, error), log *zap.Logger, replies ReplyTemplate, baseURL string, transport http.RoundTripper) (*Client, error) {
+	if replies == nil {
+		return nil, errors.New("telegram reply template is required")
+	}
 	if !validToken(cfg.Token) || len(cfg.AllowedUserIDs) == 0 || st == nil || prepare == nil {
 		return nil, errors.New("telegram token, allowlist, store, and prepare function are required")
 	}
@@ -87,7 +96,7 @@ func newClient(cfg config.Telegram, st *store.Store, prepare func(domain.Submiss
 	if err != nil {
 		return nil, errors.New("could not initialize Telegram client")
 	}
-	return &Client{config: cfg, allowed: allowed, store: st, prepare: prepare, log: log, http: httpClient, bot: sdk, baseURL: baseURL}, nil
+	return &Client{config: cfg, allowed: allowed, store: st, prepare: prepare, replies: replies, log: log, http: httpClient, bot: sdk, baseURL: baseURL}, nil
 }
 
 func validToken(token string) bool {

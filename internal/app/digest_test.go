@@ -9,13 +9,19 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
 	"kagari/internal/agent"
 	"kagari/internal/config"
 	"kagari/internal/digest"
 	"kagari/internal/domain"
+	"kagari/internal/persona"
 	"kagari/internal/store"
+
+	"go.uber.org/zap"
 )
+
+type digestTestPersona string
+
+func (p digestTestPersona) Prompt() string { return string(p) }
 
 func digestModelInput(t *testing.T, body map[string]any) domain.DigestInput {
 	t.Helper()
@@ -88,6 +94,7 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	archiveDigestEntry(t, s, "first", now.Add(-time.Hour))
 	archiveDigestEntry(t, s, "second", now.Add(-2*time.Hour))
 	var inputs []string
+	var modelInputs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		var body map[string]any
@@ -96,6 +103,8 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 			return
 		}
 		input := digestModelInput(t, body)
+		modelInput, _ := json.Marshal(body["input"])
+		modelInputs = append(modelInputs, string(modelInput))
 		rawInput, _ := json.Marshal(input)
 		inputs = append(inputs, string(rawInput))
 		if len(inputs) == 1 {
@@ -113,7 +122,8 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	}
 	cfg.ProfilePath = t.TempDir() + "/missing"
 	cfg.Model.BaseURL, cfg.Model.Name, cfg.Model.APIKey = server.URL+"/v1", "test", "fake"
-	e, err := agent.New(ctx, cfg, nil, nil)
+	initialPersona := persona.Default()
+	e, err := agent.New(ctx, cfg, nil, nil, initialPersona)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,16 +146,27 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	if err := json.Unmarshal(failed.Result, &snapshot); err != nil || snapshot.Input == nil || snapshot.Review != nil {
 		t.Fatalf("failed attempt lost input: %+v %v", snapshot, err)
 	}
+	if !strings.Contains(snapshot.Input.Instruction, initialPersona.Prompt()) {
+		t.Fatal("digest snapshot did not freeze the injected persona")
+	}
 	archiveDigestEntry(t, s, "late", now.Add(-3*time.Hour))
-	e.Profile = "后来改动的偏好"
+	replacement, err := agent.New(ctx, cfg, nil, nil, digestTestPersona("replacement-persona"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement.Profile = "后来改动的偏好"
+	worker.Engine = replacement
 	job, err = s.StartJob(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 模拟生成已完成、尚未提交 outbox 时进程退出。
 	report, text, err := worker.processDigest(ctx, job)
-	if err != nil || len(inputs) != 2 || inputs[0] != inputs[1] || strings.Contains(inputs[0], "全文不应") || len(report.Input.Entries) != 2 || report.Input.Profile != "初始表达偏好" || report.Usage.TotalTokens != 18 || !strings.HasPrefix(text, "阅读回顾（1条）") {
+	if err != nil || len(inputs) != 2 || inputs[0] != inputs[1] || strings.Contains(inputs[0], "全文不应") || len(report.Input.Entries) != 2 || report.Input.Profile != "初始表达偏好" || report.Usage.TotalTokens != 18 || !strings.HasPrefix(text, "本周回顾（1条）") {
 		t.Fatalf("snapshot/generation: %+v %q err=%v inputs=%v", report, text, err, inputs)
+	}
+	if modelInputs[0] != modelInputs[1] || strings.Contains(modelInputs[1], "replacement-persona") {
+		t.Fatal("digest retry replaced the frozen persona with the current one")
 	}
 	if err := s.Recover(ctx); err != nil {
 		t.Fatal(err)
@@ -203,7 +224,7 @@ func TestDigestEmptyAndInputLimitDoNotCallModel(t *testing.T) {
 		job, err := worker.ProcessJob(ctx, id)
 		if empty {
 			var report digest.Report
-			if err != nil || json.Unmarshal(job.Result, &report) != nil || !strings.HasPrefix(digest.Render(report, cfg.Weekly.Timezone), "阅读回顾（0条）") {
+			if err != nil || json.Unmarshal(job.Result, &report) != nil || !strings.HasPrefix(digest.Render(report, cfg.Weekly.Timezone), "本周回顾（0条）") {
 				t.Fatalf("empty digest requires model: %+v %v", job, err)
 			}
 		} else if err == nil || job.Status != "failed" || !strings.Contains(job.LastError, "max_input_chars") {
@@ -233,7 +254,7 @@ func TestDigestRejectsMissingEntriesWithoutPublishing(t *testing.T) {
 	defer s.Close()
 	now := time.Now()
 	archiveDigestEntry(t, s, "article", now.Add(-time.Hour))
-	worker := &Worker{Store: s, Config: cfg, Log: zap.NewNop()}
+	worker := &Worker{Store: s, Config: cfg, Log: zap.NewNop(), Persona: digestTestPersona("worker-injected-persona")}
 	id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{UserID: 7, Start: now.AddDate(0, 0, -7), End: now}, 900)
 	if err != nil {
 		t.Fatal(err)
@@ -245,6 +266,9 @@ func TestDigestRejectsMissingEntriesWithoutPublishing(t *testing.T) {
 	var report digest.Report
 	if err := json.Unmarshal(job.Result, &report); err != nil || report.Input == nil || report.Review != nil {
 		t.Fatalf("invalid review persisted as valid output: %+v %v", report, err)
+	}
+	if !strings.Contains(report.Input.Instruction, "worker-injected-persona") {
+		t.Fatal("CLI digest did not use the worker's injected persona")
 	}
 	counts, err := s.DeliveryCounts(ctx, id)
 	if err != nil || len(counts) != 0 {

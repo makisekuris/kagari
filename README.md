@@ -7,7 +7,6 @@ Kagari is a personal reading assistant written in Go. It accepts links from the 
 运行需要 Go 1.27；进程锁使用 `flock`，支持 macOS 和 Linux。模型 endpoint、Telegram bot 和频道权限由部署者配置。
 
 Requires Go 1.27. The process lock uses `flock` and supports macOS and Linux. You provide the model endpoint, Telegram bot, and any channel permissions.
-
 ## Quickstart / 快速开始
 
 ### 1. 配置 / Configure
@@ -68,6 +67,16 @@ Commands load `.env` from the current working directory; no `source` command is 
 `.env`、`config.yaml` 和 `profile.md` 已被 Git 忽略。不要将真实凭证写入示例文件或提交到仓库。
 
 `.env`, `config.yaml`, and `profile.md` are Git-ignored. Keep real credentials out of example files and commits.
+
+### 人格替换 / Persona injection
+
+调用方统一通过 `persona.Default()` 获取 `persona.PersonaRole` 接口，再分别注入 Agent 和 Telegram，不直接依赖具体人格类型。角色选择集中在 `internal/persona/main.go`；替换实现只需在这里切换，调用方不变。人格实现提供 `Prompt() string`（人格与语言风格）和 `AskChatID(int64) string`（带任务编号的收件回执），放在 `internal/persona/taffy/` 等子包中；通用任务规则和 JSON 输出格式保持独立。
+
+Callers obtain the `persona.PersonaRole` interface through `persona.Default()` and inject it into the Agent and Telegram without depending on a concrete persona type. Selection lives in `internal/persona/main.go`; switch implementations there without changing callers. Implementations provide `Prompt() string` for persona and language style, and `AskChatID(int64) string` for job acknowledgements, and live in subpackages such as `internal/persona/taffy/`. Common task rules and the JSON output format remain independent.
+
+Engine 构造时读取 `profile.md` 并冻结人格提示词；分析缓存键包含完整分析提示词，周报重试使用任务保存的提示词快照。修改 `profile.md` 后，长期运行的 `run` 服务需重启；单次 `analyze` 和 `digest` 命令会在执行时读取当前文件。修改人格实现后需重新构建程序；运行中的服务还需重启。暂不支持运行时切换角色。
+
+The Engine reads `profile.md` and freezes persona text when constructed. Analysis cache keys include the complete analysis prompt, and digest retries reuse the saved instruction snapshot. Restart a long-running `run` service after changing `profile.md`; one-shot `analyze` and `digest` commands read the current file when executed. Rebuild after changing persona code, then restart a running service to use the new binary. Runtime persona switching is not supported.
 
 ## CLI 命令 / CLI commands
 

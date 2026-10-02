@@ -14,7 +14,7 @@ func Run(ctx context.Context, w *Worker) error {
 	if err := w.Config.Validate(true, true); err != nil {
 		return err
 	}
-	client, err := telegram.New(w.Config.Telegram, w.Store, w.Engine.Prepare, w.Log)
+	client, err := telegram.New(w.Config.Telegram, w.Store, w.Engine.Prepare, w.Log, w.Replies)
 	if err != nil {
 		return err
 	}

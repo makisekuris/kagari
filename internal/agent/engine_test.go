@@ -15,6 +15,10 @@ import (
 	"kagari/internal/domain"
 )
 
+type testPersona string
+
+func (p testPersona) Prompt() string { return string(p) }
+
 func TestResponsesToolRoundTrip(t *testing.T) {
 	var calls atomic.Int32
 	var serializedInput string
@@ -95,7 +99,7 @@ func TestResponsesToolRoundTrip(t *testing.T) {
 			return domain.Source{ID: "s_root", URL: u, RequestedURL: u, Content: "讨论引用了作者原文", Status: "ok", Links: []domain.Link{{URL: "https://example.org/article"}}}, nil
 		}
 		return domain.Source{ID: "s_article", URL: u, RequestedURL: u, Content: "原文的事实说明", Status: "ok"}, nil
-	}, nil)
+	}, nil, testPersona("injected-analysis-persona"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,10 +120,13 @@ func TestResponsesToolRoundTrip(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Errorf("requests=%d", calls.Load())
 	}
-	for _, value := range []string{question, notes, profile} {
+	for _, value := range []string{question, notes, profile, "injected-analysis-persona"} {
 		if strings.Count(serializedInput, value) != 1 {
 			t.Errorf("model input should carry user guidance once, count=%d", strings.Count(serializedInput, value))
 		}
+	}
+	if strings.Contains(serializedInput, "永雏塔菲") || strings.Contains(serializedInput, "taffy") {
+		t.Fatal("analysis request retained a hardcoded persona")
 	}
 	for _, field := range []string{`\"instruction\"`, `\"notes\"`, `\"profile\"`, `\"sources\"`} {
 		if !strings.Contains(serializedInput, field) {
@@ -228,5 +235,47 @@ func TestAnalysisHeadingsValidation(t *testing.T) {
 	a.Headings = nil
 	if err := validate(a, sources, []string{"工程"}); err == nil {
 		t.Fatal("new model result without headings was accepted")
+	}
+}
+
+type mutablePersona struct{ text string }
+
+func (p *mutablePersona) Prompt() string { return p.text }
+
+func TestPersonaIsFrozenAndChangesCacheIdentity(t *testing.T) {
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Model.BaseURL, cfg.Model.APIKey, cfg.Model.Name = "https://model.test/v1", "test", "test"
+	cfg.ProfilePath = t.TempDir() + "/missing"
+	role := &mutablePersona{text: "first-persona"}
+	first, err := New(context.Background(), cfg, nil, nil, role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := domain.Submission{UserID: 7, URLs: []string{"https://example.org/article"}}
+	before, err := first.Prepare(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role.text = "second-persona"
+	after, err := first.Prepare(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.CacheKey != after.CacheKey || !strings.Contains(first.DigestPrompt(), "first-persona") {
+		t.Fatal("a mutable persona changed the running engine's frozen prompts")
+	}
+	second, err := New(context.Background(), cfg, nil, nil, role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := second.Prepare(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.CacheKey == before.CacheKey || !strings.Contains(second.DigestPrompt(), "second-persona") {
+		t.Fatal("replacing persona did not change prompts and cache identity")
 	}
 }

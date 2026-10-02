@@ -15,13 +15,16 @@ import (
 	"kagari/internal/logging"
 	"kagari/internal/render"
 	"kagari/internal/store"
+	"kagari/internal/telegram"
 )
 
 type Worker struct {
-	Store  *store.Store
-	Engine *agent.Engine
-	Config config.Config
-	Log    *zap.Logger
+	Store   *store.Store
+	Engine  *agent.Engine
+	Config  config.Config
+	Log     *zap.Logger
+	Persona agent.Persona
+	Replies telegram.ReplyTemplate
 }
 
 func (w *Worker) Process(ctx context.Context, job *domain.Job) error {

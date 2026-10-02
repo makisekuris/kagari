@@ -12,7 +12,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
 
-	"kagari/internal/agent/prompt"
 	"kagari/internal/digest"
 	"kagari/internal/domain"
 	"kagari/internal/logging"
@@ -44,7 +43,7 @@ func (e *Engine) GenerateDigest(ctx context.Context, input domain.DigestInput) (
 
 	instruction := input.Instruction
 	if instruction == "" {
-		instruction = prompt.GetDigestPrompt()
+		instruction = e.DigestPrompt()
 	}
 	a, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name: "weekly_digest", Description: "按输入分析生成周报", Instruction: instruction,

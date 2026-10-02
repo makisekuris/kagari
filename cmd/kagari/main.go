@@ -16,6 +16,7 @@ import (
 	"kagari/internal/app"
 	"kagari/internal/config"
 	"kagari/internal/domain"
+	"kagari/internal/persona"
 	"kagari/internal/reader"
 	"kagari/internal/render"
 	"kagari/internal/store"
@@ -89,9 +90,10 @@ func run() error {
 			return err
 		}
 	}
-	w := &app.Worker{Store: s, Config: cfg, Log: log}
+	role := persona.Default()
+	w := &app.Worker{Store: s, Config: cfg, Log: log, Persona: role, Replies: role}
 	if args[0] == "analyze" || args[0] == "run" {
-		e, err := agent.New(ctx, cfg, r.Read, s.CachedSource)
+		e, err := agent.New(ctx, cfg, r.Read, s.CachedSource, role)
 		if err != nil {
 			return err
 		}
