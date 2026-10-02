@@ -15,7 +15,7 @@ telegram:
 
 profile_path: profile.md
 log_level: info
-max_attempts: 3
+max_attempts: 6 # Includes the first attempt; at most five retries.
 
 reader:
   timeout: 20s
@@ -23,6 +23,7 @@ reader:
   max_content_chars: 20000
   max_links: 40
   cache_ttl: 24h
+  allowed_non_public_cidrs: [] # e.g. [198.18.0.0/16] for a TUN fake-IP range.
   browser_fallback:
     enabled: false # Not implemented; true is rejected explicitly.
     engine: chromium # chromium | firefox | webkit; Chromium does not require Google Chrome.
@@ -37,6 +38,8 @@ agent:
   max_depth: 2
   max_iterations: 10
   timeout: 3m
+  streaming: false # true sends stream=true and logs SSE chunks immediately at info level.
+  # These are model-facing category labels; customize them to change the taxonomy. / 这些类别名会作为模型输出标签；按需调整即可。
   categories: [AI, 工程, 前端, 产品, 其他]
 
 weekly:
@@ -44,3 +47,4 @@ weekly:
   timezone: Asia/Shanghai
   weekday: 1 # 0=Sunday, 1=Monday, ..., 6=Saturday.
   time: "09:00"
+  max_input_chars: 120000 # Serialized weekly input cap; oversized input fails without dropping entries.
