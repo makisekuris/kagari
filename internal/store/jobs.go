@@ -127,24 +127,6 @@ func (s *Store) ClaimJob(ctx context.Context) (*domain.Job, error) {
 	return job, nil
 }
 
-func (s *Store) SaveAttempt(ctx context.Context, id int64, result []byte) error {
-	if err := validJSON(result); err != nil {
-		return err
-	}
-	updated, err := s.db.ExecContext(ctx, `UPDATE jobs SET result=? WHERE id=? AND status='processing'`, result, id)
-	if err != nil {
-		return err
-	}
-	count, err := updated.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return fmt.Errorf("store: job %d is missing or is not processing", id)
-	}
-	return nil
-}
-
 func (s *Store) CompleteJob(ctx context.Context, id int64, result []byte, messages []string, sources []domain.Source) error {
 	if err := validJSON(result); err != nil {
 		return err
@@ -200,7 +182,11 @@ func sourceCacheURLs(source domain.Source) []string {
 	return urls
 }
 
-func (s *Store) FailJob(ctx context.Context, id int64, reason string, maxAttempts int, retryAt time.Time) error {
+// FailJob commits partial evidence, retry state and any terminal notice together.
+func (s *Store) FailJob(ctx context.Context, id int64, result []byte, reason string, maxAttempts int, retryAt time.Time, notice *domain.Command) error {
+	if err := validJSON(result); err != nil {
+		return err
+	}
 	if maxAttempts < 1 {
 		return errors.New("store: max attempts must be positive")
 	}
@@ -221,10 +207,41 @@ func (s *Store) FailJob(ctx context.Context, id int64, reason string, maxAttempt
 	if attempts >= maxAttempts {
 		state = "failed"
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET status=?,last_error=?,next_attempt_at=? WHERE id=?`, state, reason, timestamp(retryAt), id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET status=?,result=?,last_error=?,next_attempt_at=? WHERE id=?`, state, result, reason, timestamp(retryAt), id); err != nil {
 		return err
 	}
+	if state == "failed" && notice != nil && notice.ChatID != 0 {
+		payload, err := json.Marshal(notice)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		// A manual retry starts a new processing round and can produce a new final notice.
+		key := fmt.Sprintf("failed:%d:%s", id, timestamp(now))
+		if _, _, err := enqueue(ctx, tx, "notice", key, payload, notice.ChatID, now); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+// InterruptJob preserves evidence without charging a user cancellation to the retry budget.
+func (s *Store) InterruptJob(ctx context.Context, id int64, result []byte) error {
+	if err := validJSON(result); err != nil {
+		return err
+	}
+	updated, err := s.db.ExecContext(ctx, `UPDATE jobs SET status='pending',result=?,attempts=MAX(attempts-1,0),last_error='',next_attempt_at=? WHERE id=? AND status='processing'`, result, timestamp(time.Now()), id)
+	if err != nil {
+		return err
+	}
+	count, err := updated.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("store: job %d is missing or is not processing", id)
+	}
+	return nil
 }
 
 func (s *Store) Job(ctx context.Context, id int64) (*domain.Job, error) {

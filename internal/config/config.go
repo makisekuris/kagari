@@ -13,7 +13,7 @@ type Config struct {
 	Weekly      Weekly   `mapstructure:"weekly"`
 	ProfilePath string   `mapstructure:"profile_path"`
 	LogLevel    string   `mapstructure:"log_level"`
-	MaxAttempts int      `mapstructure:"max_attempts"` // 处理任务和已知未发送的投递共用尝试上限。
+	MaxAttempts int      `mapstructure:"max_attempts"` // 包含首次尝试；处理任务和已知未发送的投递共用上限。
 }
 
 type Model struct {

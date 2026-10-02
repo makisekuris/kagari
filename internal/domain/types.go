@@ -106,15 +106,16 @@ type Result struct {
 // Job 的处理状态与消息投递状态独立：completed 只表示产物和 outbox 已落库。
 // Key 防止同一入口事件重复入队；Attempts 是已领取处理的次数。
 type Job struct {
-	ID           int64
-	Kind         string
-	Key          string
-	Payload      json.RawMessage
-	Result       json.RawMessage
-	TargetChatID int64
-	Status       string
-	Attempts     int
-	LastError    string
+	ID            int64
+	Kind          string
+	Key           string
+	Payload       json.RawMessage
+	Result        json.RawMessage
+	TargetChatID  int64
+	Status        string
+	Attempts      int
+	LastError     string
+	NextAttemptAt time.Time `json:"next_attempt_at"`
 }
 
 // Delivery 是产物的一段消息；Part 保证同一任务按顺序投递。

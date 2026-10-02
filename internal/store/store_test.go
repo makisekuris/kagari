@@ -124,10 +124,7 @@ func TestRetryRecoveryAndOrderedUncertainDeliveries(t *testing.T) {
 		t.Fatalf("ClaimJob() = (%+v, %v)", job, err)
 	}
 	partial := mustJSON(t, domain.Result{Sources: []domain.Source{{URL: "https://example.com", Status: "ok"}}})
-	if err := s.SaveAttempt(ctx, id, partial); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.FailJob(ctx, id, "temporary", 1, time.Now().Add(time.Hour)); err != nil {
+	if err := s.FailJob(ctx, id, partial, "temporary", 1, time.Now().Add(time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
 	job, err = s.Job(ctx, id)
@@ -275,7 +272,7 @@ func TestStatsCountsAnalyzeSubmissionsByStatus(t *testing.T) {
 	if claimed, err := s.ClaimJob(ctx); err != nil || claimed == nil || claimed.ID != failedID {
 		t.Fatalf("second ClaimJob() = (%+v, %v)", claimed, err)
 	}
-	if err := s.FailJob(ctx, failedID, "no", 1, start); err != nil {
+	if err := s.FailJob(ctx, failedID, []byte(`{}`), "no", 1, start, nil); err != nil {
 		t.Fatal(err)
 	}
 	total, pending, failed, err := s.Stats(ctx, 5, start, end)

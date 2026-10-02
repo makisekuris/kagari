@@ -23,6 +23,9 @@ func TestConfigEnvironmentAndValidation(t *testing.T) {
 	if c.Reader.BrowserFallback.Enabled || c.Weekly.Enabled {
 		t.Fatal("optional integrations enabled by default")
 	}
+	if c.MaxAttempts != 6 {
+		t.Fatalf("max_attempts default = %d, want 6 total attempts", c.MaxAttempts)
+	}
 	if c.Reader.BrowserFallback.Engine != "chromium" || c.Reader.BrowserFallback.Mode != "launch" || c.Reader.BrowserFallback.ExecutablePath != "" || c.Reader.BrowserFallback.Endpoint != "" || !c.Reader.BrowserFallback.Headless {
 		t.Fatalf("unexpected browser fallback defaults: %+v", c.Reader.BrowserFallback)
 	}

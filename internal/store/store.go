@@ -161,12 +161,18 @@ func enqueue(ctx context.Context, tx *sql.Tx, kind, key string, payload []byte, 
 func scanJob(row interface{ Scan(...any) error }) (*domain.Job, error) {
 	var job domain.Job
 	var payload, result []byte
-	if err := row.Scan(&job.ID, &job.Kind, &job.Key, &payload, &result, &job.TargetChatID, &job.Status, &job.Attempts, &job.LastError); err != nil {
+	var nextAttempt string
+	if err := row.Scan(&job.ID, &job.Kind, &job.Key, &payload, &result, &job.TargetChatID, &job.Status, &job.Attempts, &job.LastError, &nextAttempt); err != nil {
 		return nil, err
+	}
+	var err error
+	job.NextAttemptAt, err = time.Parse(time.RFC3339Nano, nextAttempt)
+	if err != nil {
+		return nil, fmt.Errorf("store: invalid next attempt time: %w", err)
 	}
 	job.Payload = append(json.RawMessage(nil), payload...)
 	job.Result = append(json.RawMessage(nil), result...)
 	return &job, nil
 }
 
-const jobColumns = `id,kind,key,payload,result,target_chat_id,status,attempts,last_error`
+const jobColumns = `id,kind,key,payload,result,target_chat_id,status,attempts,last_error,next_attempt_at`

@@ -122,14 +122,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		job, err := s.StartJob(ctx, id)
-		if err != nil {
-			return err
-		}
-		if err := w.Process(ctx, job); err != nil {
-			return fmt.Errorf("task #%d: %w", id, err)
-		}
-		job, err = s.Job(ctx, id)
+		job, err := w.ProcessJob(ctx, id)
 		if err != nil {
 			return err
 		}
