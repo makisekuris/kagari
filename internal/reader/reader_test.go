@@ -100,7 +100,7 @@ func TestReadRejectsPrivateTargetsAndXStatusWithoutFetching(t *testing.T) {
 
 func TestDialPublicRejectsMixedPrivateDNSAnswers(t *testing.T) {
 	dials := 0
-	_, err := dialPublic(context.Background(), "tcp", "example.test:443", func(context.Context, string) ([]net.IPAddr, error) {
+	_, err := dialPublic(context.Background(), "tcp", "example.test:443", nil, func(context.Context, string) ([]net.IPAddr, error) {
 		return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}, {IP: net.ParseIP("100.64.0.12")}}, nil
 	}, func(context.Context, string, string) (net.Conn, error) {
 		dials++
@@ -108,6 +108,101 @@ func TestDialPublicRejectsMixedPrivateDNSAnswers(t *testing.T) {
 	})
 	if !errors.Is(err, errUnsafeTarget) || dials != 0 {
 		t.Fatalf("mixed public/private DNS answer: err=%v dials=%d", err, dials)
+	}
+}
+
+func TestDialAllowedNonPublicCIDRUsesPinnedIPAndRejectsMixedAnswers(t *testing.T) {
+	allowed := parseAllowedNonPublicCIDRs([]string{"198.18.0.0/16"})
+	var target string
+	conn, err := dialPublic(context.Background(), "tcp", "example.test:443", allowed, func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("198.18.0.1")}}, nil
+	}, func(_ context.Context, _, address string) (net.Conn, error) {
+		target = address
+		local, remote := net.Pipe()
+		_ = remote.Close()
+		return local, nil
+	})
+	if err != nil {
+		t.Fatalf("configured fake-IP dial failed: %v", err)
+	}
+	_ = conn.Close()
+	if target != "198.18.0.1:443" {
+		t.Fatalf("dial target = %q, want the validated IP", target)
+	}
+
+	dials := 0
+	_, err = dialPublic(context.Background(), "tcp", "example.test:443", allowed, func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("198.18.0.1")}, {IP: net.ParseIP("100.64.0.12")}}, nil
+	}, func(context.Context, string, string) (net.Conn, error) {
+		dials++
+		return nil, errors.New("unexpected dial")
+	})
+	if !errors.Is(err, errUnsafeTarget) || dials != 0 {
+		t.Fatalf("mixed DNS answer with an unapproved address: err=%v dials=%d", err, dials)
+	}
+}
+
+func TestReadAllowsOnlyConfiguredNonPublicCIDRs(t *testing.T) {
+	page := `<!doctype html><html><body><article><p>A useful fake-IP response.</p></article></body></html>`
+	calls := 0
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return response(req, http.StatusOK, "text/html", page), nil
+	})
+	reader := newReaderWithTransport(Options{}, transport)
+	blocked, err := reader.Read(context.Background(), "http://198.18.0.1/article")
+	if !errors.Is(err, errUnsafeTarget) || blocked.Status != statusRestricted || calls != 0 {
+		t.Fatalf("default fake-IP policy: source=%#v err=%v calls=%d", blocked, err, calls)
+	}
+
+	reader = newReaderWithTransport(Options{AllowedNonPublicCIDRs: []string{"198.18.0.0/16"}}, transport)
+	allowed, err := reader.Read(context.Background(), "http://198.18.0.1/article")
+	if err != nil || allowed.Status != statusOK || calls != 1 {
+		t.Fatalf("configured fake-IP policy: source=%#v err=%v calls=%d", allowed, err, calls)
+	}
+
+	reader = newReaderWithTransport(Options{AllowedNonPublicCIDRs: []string{"bad-cidr", "::ffff:198.18.0.0/112"}}, transport)
+	blocked, err = reader.Read(context.Background(), "http://198.18.0.1/article")
+	if !errors.Is(err, errUnsafeTarget) || blocked.Status != statusRestricted || calls != 1 {
+		t.Fatalf("invalid options broadened fake-IP access: source=%#v err=%v calls=%d", blocked, err, calls)
+	}
+}
+
+func TestReadRedirectUsesConfiguredNonPublicCIDRs(t *testing.T) {
+	page := `<!doctype html><html><body><article><p>A useful redirected response.</p></article></body></html>`
+	calls := 0
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.URL.Host == "example.test" {
+			res := response(req, http.StatusFound, "text/html", "")
+			res.Header.Set("Location", "http://198.18.0.1/final")
+			return res, nil
+		}
+		return response(req, http.StatusOK, "text/html", page), nil
+	})
+	reader := newReaderWithTransport(Options{}, transport)
+	blocked, err := reader.Read(context.Background(), "https://example.test/start")
+	if !errors.Is(err, errUnsafeTarget) || blocked.Status != statusRestricted || calls != 1 {
+		t.Fatalf("default fake-IP redirect: source=%#v err=%v calls=%d", blocked, err, calls)
+	}
+
+	reader = newReaderWithTransport(Options{AllowedNonPublicCIDRs: []string{"198.18.0.0/16"}}, transport)
+	allowed, err := reader.Read(context.Background(), "https://example.test/start")
+	if err != nil || allowed.Status != statusOK || calls != 3 {
+		t.Fatalf("configured fake-IP redirect: source=%#v err=%v calls=%d", allowed, err, calls)
+	}
+}
+
+func TestAllowedNonPublicCIDRIPBoundaries(t *testing.T) {
+	allowed := parseAllowedNonPublicCIDRs([]string{"198.18.0.0/16", "fe80::/10", "bad-cidr"})
+	if !isAllowedTargetIP(net.ParseIP("::ffff:198.18.0.1"), "", allowed) {
+		t.Fatal("IPv4-mapped address did not match its IPv4 exception")
+	}
+	if isAllowedTargetIP(net.ParseIP("fe80::1"), "eth0", allowed) {
+		t.Fatal("zoned IPv6 address was allowed")
+	}
+	if isAllowedTargetIP(nil, "", allowed) {
+		t.Fatal("invalid IP was allowed")
 	}
 }
 

@@ -259,9 +259,41 @@ func TestBrowserFallbackEnvironmentOverrides(t *testing.T) {
 	}
 }
 
+func TestAllowedNonPublicCIDRsEnvironmentAndValidation(t *testing.T) {
+	t.Chdir(t.TempDir())
+	unsetBrowserFallbackEnv(t)
+	cfg, err := Load("")
+	if err != nil || len(cfg.Reader.AllowedNonPublicCIDRs) != 0 {
+		t.Fatalf("default allowed CIDRs = %v, err=%v; want empty", cfg.Reader.AllowedNonPublicCIDRs, err)
+	}
+	t.Setenv("KAGARI_READER_ALLOWED_NON_PUBLIC_CIDRS", "198.18.0.0/16,fd00::/8")
+	cfg, err = Load("")
+	if err != nil || len(cfg.Reader.AllowedNonPublicCIDRs) != 2 || cfg.Reader.AllowedNonPublicCIDRs[0] != "198.18.0.0/16" || cfg.Reader.AllowedNonPublicCIDRs[1] != "fd00::/8" {
+		t.Fatalf("allowed CIDRs from env = %v, err=%v", cfg.Reader.AllowedNonPublicCIDRs, err)
+	}
+
+	for _, cidr := range []string{"198.18.0.1", "198.18.0.0/33", "::ffff:198.18.0.0/112", "fe80::1%eth0/64"} {
+		cfg := validConfigForTest()
+		cfg.Reader.AllowedNonPublicCIDRs = []string{cidr}
+		if err := cfg.Validate(false, false); err == nil || !strings.Contains(err.Error(), "allowed_non_public_cidrs") {
+			t.Errorf("Validate() accepted %q or returned an unrelated error: %v", cidr, err)
+		}
+	}
+	cfg = validConfigForTest()
+	cfg.Reader.AllowedNonPublicCIDRs = []string{"198.18.0.0/16", "fd00::/8"}
+	if err := cfg.Validate(false, false); err != nil {
+		t.Fatalf("valid allowed CIDRs rejected: %v", err)
+	}
+	t.Setenv("KAGARI_READER_ALLOWED_NON_PUBLIC_CIDRS", "not-a-cidr")
+	if _, err := Load(""); err == nil {
+		t.Fatal("invalid allowed CIDR from environment was accepted")
+	}
+}
+
 func unsetBrowserFallbackEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
+		"KAGARI_READER_ALLOWED_NON_PUBLIC_CIDRS",
 		"KAGARI_READER_BROWSER_FALLBACK_ENABLED",
 		"KAGARI_READER_BROWSER_FALLBACK_ENGINE",
 		"KAGARI_READER_BROWSER_FALLBACK_MODE",

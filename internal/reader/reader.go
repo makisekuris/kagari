@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -14,15 +15,17 @@ import (
 )
 
 type Options struct {
-	Timeout         time.Duration
-	MaxBytes        int64
-	MaxContentChars int
-	MaxLinks        int
+	Timeout               time.Duration
+	MaxBytes              int64
+	MaxContentChars       int
+	MaxLinks              int
+	AllowedNonPublicCIDRs []string
 }
 
 type Reader struct {
-	opts   Options
-	client *http.Client
+	opts                  Options
+	allowedNonPublicCIDRs []netip.Prefix
+	client                *http.Client
 }
 
 func New(opts Options) *Reader {
@@ -69,7 +72,7 @@ func (r *Reader) Read(ctx context.Context, rawURL string) (domain.Source, error)
 		source.ID = sourceID(source.URL)
 		return r.readXPost(ctx, source, target)
 	}
-	if ip := net.ParseIP(requestURL.Hostname()); ip != nil && !isPublicIP(ip) {
+	if ip := net.ParseIP(requestURL.Hostname()); ip != nil && !isAllowedTargetIP(ip, "", r.allowedNonPublicCIDRs) {
 		return finishError(source, statusRestricted, errUnsafeTarget.Error(), errUnsafeTarget)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, normalized, nil)

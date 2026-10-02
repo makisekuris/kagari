@@ -14,21 +14,22 @@ var (
 	errUnsafeTarget      = errors.New("URL resolves to a non-public address")
 	errUnverifiedXStatus = errors.New("redirected X status pages require verified post text")
 	nonPublicRanges      = prefixes(
-	// "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "100.100.0.0/16",
-	// "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
-	// "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15",
-	// "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
-	// "2001::/23", "2001:db8::/32", "2002::/16", "3fff::/20",
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "100.100.0.0/16",
+		"127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
+		"192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15",
+		"198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+		"2001::/23", "2001:db8::/32", "2002::/16", "3fff::/20",
 	)
 )
 
 // safeTransport 禁用代理；包括 t.co 在内的每个重定向目标都会重做校验，并直接连接已校验 IP 防止 DNS rebinding。
 func safeTransport(opts Options) http.RoundTripper {
 	dialer := &net.Dialer{Timeout: opts.Timeout, KeepAlive: 30 * time.Second}
+	allowed := parseAllowedNonPublicCIDRs(opts.AllowedNonPublicCIDRs)
 	return &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return dialPublic(ctx, network, address, net.DefaultResolver.LookupIPAddr, dialer.DialContext)
+			return dialPublic(ctx, network, address, allowed, net.DefaultResolver.LookupIPAddr, dialer.DialContext)
 		},
 		TLSHandshakeTimeout:   opts.Timeout,
 		ResponseHeaderTimeout: opts.Timeout,
@@ -39,8 +40,10 @@ func safeTransport(opts Options) http.RoundTripper {
 // newReaderWithTransport is the package-private fixture seam; production always uses safeTransport.
 func newReaderWithTransport(opts Options, transport http.RoundTripper) *Reader {
 	opts = defaults(opts)
+	allowed := parseAllowedNonPublicCIDRs(opts.AllowedNonPublicCIDRs)
 	return &Reader{
-		opts: opts,
+		opts:                  opts,
+		allowedNonPublicCIDRs: allowed,
 		client: &http.Client{
 			Timeout:   opts.Timeout,
 			Transport: transport,
@@ -57,7 +60,7 @@ func newReaderWithTransport(opts Options, transport http.RoundTripper) *Reader {
 				if isXStatusURL(u) {
 					return errUnverifiedXStatus
 				}
-				if ip := net.ParseIP(u.Hostname()); ip != nil && !isPublicIP(ip) {
+				if ip := net.ParseIP(u.Hostname()); ip != nil && !isAllowedTargetIP(ip, "", allowed) {
 					return errUnsafeTarget
 				}
 				req.URL = u
@@ -69,7 +72,7 @@ func newReaderWithTransport(opts Options, transport http.RoundTripper) *Reader {
 }
 
 // dialPublic 拒绝混合公网/非公网地址的 DNS 答案，并直接连接已校验 IP，避免二次解析更换目标。
-func dialPublic(ctx context.Context, network, address string, lookup func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
+func dialPublic(ctx context.Context, network, address string, allowed []netip.Prefix, lookup func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
@@ -87,7 +90,7 @@ func dialPublic(ctx context.Context, network, address string, lookup func(contex
 		return nil, errors.New("host resolved to no addresses")
 	}
 	for _, addr := range ips {
-		if addr.Zone != "" || !isPublicIP(addr.IP) {
+		if !isAllowedTargetIP(addr.IP, addr.Zone, allowed) {
 			return nil, errUnsafeTarget
 		}
 	}
@@ -100,6 +103,39 @@ func dialPublic(ctx context.Context, network, address string, lookup func(contex
 		lastErr = err
 	}
 	return nil, lastErr
+}
+
+func parseAllowedNonPublicCIDRs(raw []string) []netip.Prefix {
+	var allowed []netip.Prefix
+	for _, value := range raw {
+		prefix, err := netip.ParsePrefix(value)
+		if err == nil && !prefix.Addr().Is4In6() && prefix.Addr().Zone() == "" {
+			allowed = append(allowed, prefix.Masked())
+		}
+	}
+	return allowed
+}
+
+func isAllowedTargetIP(ip net.IP, zone string, allowed []netip.Prefix) bool {
+	if zone != "" {
+		return false
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	if addr.Is4In6() {
+		addr = addr.Unmap()
+	}
+	if isPublicIP(ip) {
+		return true
+	}
+	for _, prefix := range allowed {
+		if prefix.IsValid() && prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func isPublicIP(ip net.IP) bool {

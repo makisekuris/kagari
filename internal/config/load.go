@@ -22,7 +22,7 @@ func Load(path string) (Config, error) {
 		"storage.path": "data/kagari.db", "profile_path": "profile.md", "log_level": "info", "max_attempts": 6,
 		"model.timeout": "60s", "model.max_output_tokens": 5000,
 		"reader.timeout": "20s", "reader.max_bytes": 4 << 20, "reader.max_content_chars": 20000,
-		"reader.max_links": 40, "reader.cache_ttl": "24h",
+		"reader.max_links": 40, "reader.cache_ttl": "24h", "reader.allowed_non_public_cidrs": []string{},
 		"reader.browser_fallback.enabled": false, "reader.browser_fallback.engine": "chromium",
 		"reader.browser_fallback.mode": "launch", "reader.browser_fallback.executable_path": "",
 		"reader.browser_fallback.endpoint": "", "reader.browser_fallback.headless": true,

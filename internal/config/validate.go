@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -11,6 +12,12 @@ import (
 // Validate 先校验所有命令共享的边界，再按调用方需求检查凭证。
 // read 和归档回放不要求凭证；生成非空周报及 analyze/run 再启用模型检查。
 func (c Config) Validate(modelRequired, telegramRequired bool) error {
+	for _, cidr := range c.Reader.AllowedNonPublicCIDRs {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil || prefix.Addr().Zone() != "" || prefix.Addr().Is4In6() {
+			return errors.New("reader.allowed_non_public_cidrs must contain valid IPv4 or IPv6 CIDRs")
+		}
+	}
 	if err := validateBrowserFallback(c.Reader.BrowserFallback); err != nil {
 		return err
 	}

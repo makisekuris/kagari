@@ -31,12 +31,13 @@ type Telegram struct {
 }
 
 type Reader struct {
-	Timeout         time.Duration   `mapstructure:"timeout"`
-	MaxBytes        int64           `mapstructure:"max_bytes"`
-	MaxContentChars int             `mapstructure:"max_content_chars"`
-	MaxLinks        int             `mapstructure:"max_links"`
-	CacheTTL        time.Duration   `mapstructure:"cache_ttl"` // 来源缓存与已完成分析的复用时限；0 禁用复用。
-	BrowserFallback BrowserFallback `mapstructure:"browser_fallback"`
+	Timeout               time.Duration   `mapstructure:"timeout"`
+	MaxBytes              int64           `mapstructure:"max_bytes"`
+	MaxContentChars       int             `mapstructure:"max_content_chars"`
+	MaxLinks              int             `mapstructure:"max_links"`
+	CacheTTL              time.Duration   `mapstructure:"cache_ttl"` // 来源缓存与已完成分析的复用时限；0 禁用复用。
+	AllowedNonPublicCIDRs []string        `mapstructure:"allowed_non_public_cidrs"`
+	BrowserFallback       BrowserFallback `mapstructure:"browser_fallback"`
 }
 
 type BrowserFallback struct {
