@@ -36,7 +36,7 @@ func run() error {
 	}
 	args := root.Args()
 	if len(args) == 0 {
-		return errors.New("commands: read, analyze, run, digest, status, export, retry, retry-delivery")
+		return errors.New("commands: read, analyze, run, digest, status, export, retry, retry-delivery, db")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -56,6 +56,9 @@ func run() error {
 	defer log.Sync()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if args[0] == "db" {
+		return runDB(ctx, cfg.Storage.Path, args[1:], os.Stdout)
+	}
 	r := reader.New(reader.Options{Timeout: cfg.Reader.Timeout, MaxBytes: cfg.Reader.MaxBytes, MaxContentChars: cfg.Reader.MaxContentChars, MaxLinks: cfg.Reader.MaxLinks, AllowedNonPublicCIDRs: cfg.Reader.AllowedNonPublicCIDRs})
 	if args[0] == "read" {
 		if len(args) != 2 {
