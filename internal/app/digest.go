@@ -61,8 +61,14 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 			}
 			profile = string(data)
 		}
+		instruction := prompt.GetDigestPrompt("")
+		if w.Engine != nil {
+			instruction = w.Engine.DigestPrompt()
+		} else if w.Persona != nil {
+			instruction = prompt.GetDigestPrompt(w.Persona.Prompt())
+		}
 		now := time.Now().UTC()
-		input, err := digest.Prepare(request, now, w.Config.Weekly.Timezone, profile, prompt.GetDigestPrompt(), entries)
+		input, err := digest.Prepare(request, now, w.Config.Weekly.Timezone, profile, instruction, entries)
 		if err != nil {
 			return report, "", err
 		}
@@ -128,8 +134,8 @@ func (w *Worker) digestEngine(ctx context.Context, job *domain.Job) (*agent.Engi
 		engine = *w.Engine
 	} else {
 		cfg := w.Config
-		cfg.ProfilePath = "" // 人格和偏好已冻结在输入内，恢复任务不重读偏好文件。
-		created, err := agent.New(ctx, cfg, nil, nil)
+		cfg.ProfilePath = ""                               // 人格和偏好已冻结在输入内，恢复任务不重读偏好文件。
+		created, err := agent.New(ctx, cfg, nil, nil, nil) // 完整提示词已冻结，不再读取当前人格。
 		if err != nil {
 			return nil, err
 		}

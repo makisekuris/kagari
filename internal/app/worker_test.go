@@ -57,7 +57,7 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	defer s.Close()
 	e, err := agent.New(ctx, cfg, func(_ context.Context, u string) (domain.Source, error) {
 		return domain.Source{ID: "article", URL: u, RequestedURL: u, Status: "ok", Content: "正文应被保存到本地", FetchedAt: time.Now()}, nil
-	}, s.CachedSource)
+	}, s.CachedSource, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

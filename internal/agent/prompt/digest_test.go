@@ -5,12 +5,14 @@ import (
 	"testing"
 
 	"kagari/internal/agent/prompt"
+	"kagari/internal/persona"
 )
 
 func TestDigestPromptReusesPersonaWithoutAnalysisHeadingRules(t *testing.T) {
-	analysis, digest := prompt.GetPromptTemplate(), prompt.GetDigestPrompt()
+	rolePrompt := persona.Default().Prompt()
+	analysis, digest := prompt.GetPromptTemplate(rolePrompt), prompt.GetDigestPrompt(rolePrompt)
 	for _, promptText := range []string{analysis, digest} {
-		if !strings.Contains(promptText, "永雏塔菲") || !strings.Contains(promptText, "不嘲讽用户") {
+		if !strings.Contains(promptText, rolePrompt) {
 			t.Fatalf("persona missing from prompt: %s", promptText)
 		}
 	}

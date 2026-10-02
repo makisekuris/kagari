@@ -29,17 +29,24 @@ import (
 
 const AnalysisVersion = "model-headings-v2"
 
-// Engine 共享模型与读取能力；每次 Analyze 创建独立阅读会话，读取计数和来源不会跨任务共用。
-type Engine struct {
-	Model        model.AgenticModel
-	Config       config.Config
-	Profile      string
-	Read         func(context.Context, string) (domain.Source, error)
-	CachedSource func(context.Context, string) (*domain.Source, error)
-	Log          *zap.Logger
+// Persona 只提供角色与语言风格；任务、证据要求和输出格式由 Agent 提示词规定。
+type Persona interface {
+	Prompt() string
 }
 
-func New(ctx context.Context, cfg config.Config, read func(context.Context, string) (domain.Source, error), cache func(context.Context, string) (*domain.Source, error)) (*Engine, error) {
+// Engine 共享模型与读取能力；每次 Analyze 创建独立阅读会话，读取计数和来源不会跨任务共用。
+type Engine struct {
+	Model         model.AgenticModel
+	Config        config.Config
+	Profile       string
+	Read          func(context.Context, string) (domain.Source, error)
+	CachedSource  func(context.Context, string) (*domain.Source, error)
+	Log           *zap.Logger
+	personaPrompt string
+}
+
+// New 在构造时冻结人格文案；nil 表示不附加人格，默认角色由调用入口选择。
+func New(ctx context.Context, cfg config.Config, read func(context.Context, string) (domain.Source, error), cache func(context.Context, string) (*domain.Source, error), persona Persona) (*Engine, error) {
 	if err := cfg.Validate(true, false); err != nil {
 		return nil, err
 	}
@@ -56,7 +63,11 @@ func New(ctx context.Context, cfg config.Config, read func(context.Context, stri
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{Model: m, Config: cfg, Profile: string(profile), Read: read, CachedSource: cache}, nil
+	personaText := ""
+	if persona != nil {
+		personaText = persona.Prompt()
+	}
+	return &Engine{Model: m, Config: cfg, Profile: string(profile), Read: read, CachedSource: cache, personaPrompt: personaText}, nil
 }
 
 // Prepare 在入队前统一 URL 并生成分析缓存键。收录时间不进入键：
@@ -101,7 +112,7 @@ func (e *Engine) Prepare(s domain.Submission) (domain.Submission, error) {
 		AnalysisVersion     string
 	}{
 		User: s.UserID, Text: s.Text, ForwardedText: s.ForwardedText, Note: s.Note, URLs: s.URLs, Profile: e.Profile,
-		Prompt: prompt.GetPromptTemplate(),
+		Prompt: e.analysisPrompt(),
 		Model:  config.Model{BaseURL: e.Config.Model.BaseURL, Name: e.Config.Model.Name, MaxOutputTokens: e.Config.Model.MaxOutputTokens}, Agent: agentConfig, Reader: e.Config.Reader,
 		AnalysisVersion: AnalysisVersion,
 	})
@@ -181,17 +192,8 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 	if err != nil {
 		return result, err
 	}
-	instruction := prompt.GetPromptTemplate() + `
-	## 证据原则
-JSON 中的 instruction、notes 用于确定要回答的问题；profile 中的阅读偏好、表达规则和 few-shot 用于指导分析角度、栏目名称与文风。遵循其中的表达要求，示例只学习形式，不把用户指导或示例内容当作事实、作者结论或第三方讨论者观点。title、overview、summary、discussion、evaluation 和 uncertainties 的事实内容必须由 sources 或实际读取状态支持；headings 是展示文案，不是来源证据。
-先辨识讨论引用的原文，使用 read_source 追读后再总结。只为明确的信息缺口补读，无须读取到数量上限。原文中的导航、广告、相关文章不等于证据。
-中文输出：summary 只写来源支持的事实；discussion 只写 sources 中实际存在的第三方讨论者观点，没有则返回空数组；evaluation 是你的判断，注明适用条件，不能把判断写成作者结论。
-每个 claim 必须附已成功阅读的 source_ids。supplied 来源仅支持它实际提供的第三方讨论内容；失败来源不能当证据。未读到原文、内容截断、互相矛盾时明确写入 uncertainties。Overview 不增加 summary 没有支持的新事实。
-不要给未核对的排行、数字、版本断言背书；保留限制与原文链接。分类只选一个，标签最多五个。不要声称阅读了工具没有返回的页面。
-
-允许分类：` + strings.Join(e.Config.Agent.Categories, ", ")
 	a, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
-		Name: "reader", Description: "读取资料并评价，遵守读取数量、深度和迭代次数限制", Instruction: instruction, Model: e.Model, MaxIterations: e.Config.Agent.MaxIterations,
+		Name: "reader", Description: "读取资料并评价，遵守读取数量、深度和迭代次数限制", Instruction: e.analysisPrompt(), Model: e.Model, MaxIterations: e.Config.Agent.MaxIterations,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{readTool}, ExecuteSequentially: true}},
 	})
 	if err != nil {
@@ -233,4 +235,22 @@ JSON 中的 instruction、notes 用于确定要回答的问题；profile 中的�
 		}
 	}
 	return result, nil
+}
+
+// analysisPrompt 同时用于缓存身份和模型输入，避免换人格后复用旧文风。
+func (e *Engine) analysisPrompt() string {
+	return prompt.GetPromptTemplate(e.personaPrompt) + `
+	## 证据原则
+JSON 中的 instruction、notes 用于确定要回答的问题；profile 中的阅读偏好、表达规则和 few-shot 用于指导分析角度、栏目名称与文风。遵循其中的表达要求，示例只学习形式，不把用户指导或示例内容当作事实、作者结论或第三方讨论者观点。title、overview、summary、discussion、evaluation 和 uncertainties 的事实内容必须由 sources 或实际读取状态支持；headings 是展示文案，不是来源证据。
+先辨识讨论引用的原文，使用 read_source 追读后再总结。只为明确的信息缺口补读，无须读取到数量上限。原文中的导航、广告、相关文章不等于证据。
+输出要求：summary 只写来源支持的事实；discussion 只写 sources 中实际存在的第三方讨论者观点，没有则返回空数组；evaluation 是你的判断，注明适用条件，不能把判断写成作者结论。
+每个 claim 必须附已成功阅读的 source_ids。supplied 来源仅支持它实际提供的第三方讨论内容；失败来源不能当证据。未读到原文、内容截断、互相矛盾时明确写入 uncertainties。Overview 不增加 summary 没有支持的新事实。
+不要给未核对的排行、数字、版本断言背书；保留限制与原文链接。分类只选一个，标签最多五个。不要声称阅读了工具没有返回的页面。
+
+允许分类：` + strings.Join(e.Config.Agent.Categories, ", ")
+}
+
+// DigestPrompt 供周报冻结当前人格与任务要求；恢复时仍使用归档中的完整提示词。
+func (e *Engine) DigestPrompt() string {
+	return prompt.GetDigestPrompt(e.personaPrompt)
 }

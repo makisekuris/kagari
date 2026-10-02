@@ -131,6 +131,10 @@ func TestGenerateDigestConsumesStreamingResponse(t *testing.T) {
 		if request["stream"] != true {
 			t.Errorf("stream=%v, want true", request["stream"])
 		}
+		requestJSON, _ := json.Marshal(request)
+		if strings.Count(string(requestJSON), "injected-digest-persona") != 1 || strings.Contains(string(requestJSON), "永雏塔菲") {
+			t.Error("digest request did not use the injected persona")
+		}
 		message := map[string]any{"type": "message", "id": "msg_stream", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": raw, "annotations": []any{}}}}
 		response := map[string]any{"id": "resp_stream", "object": "response", "status": "completed", "model": "test", "output": []any{message}, "usage": map[string]any{"input_tokens": 4, "output_tokens": 3, "total_tokens": 7}}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -184,7 +188,7 @@ func newDigestTestEngineWithStreaming(t *testing.T, baseURL string, streaming bo
 	}
 	cfg.Agent.Streaming = streaming
 	cfg.Model.BaseURL, cfg.Model.APIKey, cfg.Model.Name = baseURL+"/v1", "test", "test"
-	e, err := New(context.Background(), cfg, nil, nil)
+	e, err := New(context.Background(), cfg, nil, nil, testPersona("injected-digest-persona"))
 	if err != nil {
 		t.Fatal(err)
 	}

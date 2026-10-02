@@ -20,7 +20,7 @@ func renderReview(report Report) string {
 	}
 	input, review := report.Input, report.Review
 	var out strings.Builder
-	fmt.Fprintf(&out, "阅读回顾（%d条）\n", Count(*review))
+	fmt.Fprintf(&out, "本周回顾（%d条）\n", Count(*review))
 	loc, err := time.LoadLocation(input.Timezone)
 	if err != nil {
 		loc = time.UTC

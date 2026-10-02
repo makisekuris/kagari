@@ -13,11 +13,13 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/go-telegram/bot/models"
-	"go.uber.org/zap"
 	"kagari/internal/config"
 	"kagari/internal/domain"
+	"kagari/internal/persona"
 	"kagari/internal/store"
+
+	"github.com/go-telegram/bot/models"
+	"go.uber.org/zap"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -45,11 +47,17 @@ func testStore(t *testing.T) *store.Store {
 
 func testClient(t *testing.T, st *store.Store, cfg config.Telegram, prepare func(domain.Submission) (domain.Submission, error), transport http.RoundTripper) *Client {
 	t.Helper()
-	client, err := newClient(cfg, st, prepare, zap.NewNop(), "https://telegram.test", transport)
+	client, err := newClient(cfg, st, prepare, zap.NewNop(), persona.Default(), "https://telegram.test", transport)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return client
+}
+
+type customReplyTemplate struct{}
+
+func (customReplyTemplate) AskChatID(jobID int64) string {
+	return fmt.Sprintf("Custom receipt for task #%d", jobID)
 }
 
 func baseConfig() config.Telegram {
@@ -162,6 +170,51 @@ func TestPollPersistsBeforeAckExtractsUTF16AndDeduplicates(t *testing.T) {
 				t.Fatalf("caption text_link submission = %#v", sub)
 			}
 		}
+	}
+}
+
+func TestAcceptUpdateUsesInjectedReplyAndDeduplicatesAck(t *testing.T) {
+	st := testStore(t)
+	var sends int
+	var ackChatID string
+	var ackText string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if !strings.HasSuffix(req.URL.Path, "/sendMessage") {
+			t.Fatalf("unexpected Telegram request: %s", req.URL.Path)
+		}
+		sends++
+		if err := req.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		ackChatID, ackText = req.FormValue("chat_id"), req.FormValue("text")
+		return apiResponse(req, http.StatusOK, `{"ok":true,"result":{"message_id":88,"date":1700000004,"chat":{"id":7,"type":"private"}}}`), nil
+	})
+	client, err := newClient(baseConfig(), st, func(sub domain.Submission) (domain.Submission, error) { return sub, nil }, zap.NewNop(), customReplyTemplate{}, "https://telegram.test", transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var update models.Update
+	if err := json.Unmarshal([]byte(messageUpdate(40, "https://example.com/a")), &update); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := client.acceptUpdate(context.Background(), &update); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sends != 1 || ackChatID != "7" || ackText != "Custom receipt for task #1" {
+		t.Fatalf("ack sends=%d chat=%q text=%q; want one injected ack to chat 7 for task 1", sends, ackChatID, ackText)
+	}
+	job, err := st.Job(context.Background(), 1)
+	if err != nil || job == nil || job.ID != 1 || job.TargetChatID != 900 {
+		t.Fatalf("persisted job = (%+v, %v), want task 1 targeting chat 900", job, err)
+	}
+}
+
+func TestNewClientRequiresReplyTemplate(t *testing.T) {
+	_, err := newClient(baseConfig(), testStore(t), func(sub domain.Submission) (domain.Submission, error) { return sub, nil }, zap.NewNop(), nil, "https://telegram.test", nil)
+	if err == nil || err.Error() != "telegram reply template is required" {
+		t.Fatalf("newClient() error = %v, want clear missing reply template error", err)
 	}
 }
 

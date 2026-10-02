@@ -110,7 +110,7 @@ func TestAgentMessagesAndLiveSSE(t *testing.T) {
 					return domain.Source{ID: "root", URL: u, Status: "ok", Content: "入口", Links: []domain.Link{{URL: "https://example.org/article"}}}, nil
 				}
 				return domain.Source{ID: "article", URL: u, Status: "ok", Content: strings.Repeat("完整原文 ", 100)}, nil
-			}, nil)
+			}, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,7 +214,7 @@ func TestModelFailureDiagnosticsExcludeUpstreamBody(t *testing.T) {
 			cfg.ProfilePath = t.TempDir() + "/missing"
 			engine, err := New(context.Background(), cfg, func(_ context.Context, u string) (domain.Source, error) {
 				return domain.Source{ID: "root", URL: u, Status: "ok", Content: "原文"}, nil
-			}, nil)
+			}, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
