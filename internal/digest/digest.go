@@ -10,17 +10,6 @@ import (
 	"kagari/internal/domain"
 )
 
-type Report struct {
-	UserID      int64                 `json:"user_id"`
-	Start       time.Time             `json:"start"`
-	End         time.Time             `json:"end"`
-	GeneratedAt time.Time             `json:"generated_at"`
-	Total       int                   `json:"total"`
-	Pending     int                   `json:"pending"`
-	Failed      int                   `json:"failed"`
-	Entries     []domain.ArchiveEntry `json:"entries"`
-}
-
 func Build(userID int64, start, end, now time.Time, entries []domain.ArchiveEntry, total, pending, failed int) Report {
 	report := Report{
 		UserID: userID, Start: start.UTC(), End: end.UTC(), GeneratedAt: now.UTC(),
@@ -46,6 +35,9 @@ func Build(userID int64, start, end, now time.Time, entries []domain.ArchiveEntr
 }
 
 func Render(report Report, timezone string) string {
+	if report.Version != "" {
+		return renderReview(report)
+	}
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
 		loc = time.UTC

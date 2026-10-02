@@ -21,6 +21,16 @@ func PreviousWeek(now time.Time, loc *time.Location) (start, end time.Time) {
 	return start, end
 }
 
+// Window returns the seven calendar days ending at cutoff, preserving its local wall time.
+func Window(cutoff time.Time, loc *time.Location) (start, end time.Time) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	end = cutoff
+	start = cutoff.In(loc).AddDate(0, 0, -7)
+	return start, end
+}
+
 func Due(now, enabledAt time.Time, cfg config.Weekly) ([]domain.DigestRequest, error) {
 	if !cfg.Enabled {
 		return nil, nil
@@ -54,7 +64,7 @@ func Due(now, enabledAt time.Time, cfg config.Weekly) ([]domain.DigestRequest, e
 
 	requests := make([]domain.DigestRequest, 0)
 	for !trigger.After(now) {
-		start, end := PreviousWeek(trigger, loc)
+		start, end := Window(trigger, loc)
 		requests = append(requests, domain.DigestRequest{Start: start, End: end})
 		day = day.AddDate(0, 0, 7)
 		trigger = scheduledAt(day, hour, minute, loc)

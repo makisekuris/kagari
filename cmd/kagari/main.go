@@ -10,13 +10,11 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
-	"time"
 
 	"go.uber.org/zap"
 	"kagari/internal/agent"
 	"kagari/internal/app"
 	"kagari/internal/config"
-	"kagari/internal/digest"
 	"kagari/internal/domain"
 	"kagari/internal/reader"
 	"kagari/internal/render"
@@ -133,54 +131,7 @@ func run() error {
 		fmt.Printf("任务 #%d\n%s\n", id, render.Analysis(result))
 		return nil
 	case "digest":
-		flags := flag.NewFlagSet("digest", flag.ContinueOnError)
-		startFlag := flags.String("start", "", "inclusive receipt date YYYY-MM-DD")
-		endFlag := flags.String("end", "", "exclusive receipt date YYYY-MM-DD")
-		user := flags.Int64("user", 0, "archive owner user ID")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		if len(flags.Args()) != 0 {
-			return errors.New("unexpected digest arguments")
-		}
-		loc, _ := time.LoadLocation(cfg.Weekly.Timezone)
-		start, end := digest.PreviousWeek(time.Now(), loc)
-		if *startFlag != "" || *endFlag != "" {
-			start, err = time.ParseInLocation("2006-01-02", *startFlag, loc)
-			if err != nil {
-				return err
-			}
-			end, err = time.ParseInLocation("2006-01-02", *endFlag, loc)
-			if err != nil {
-				return err
-			}
-		}
-		id, created, err := w.EnqueueDigest(ctx, domain.DigestRequest{UserID: *user, Start: start, End: end}, 0)
-		if err != nil {
-			return err
-		}
-		if created {
-			job, err := s.StartJob(ctx, id)
-			if err != nil {
-				return err
-			}
-			if err := w.Process(ctx, job); err != nil {
-				return err
-			}
-		}
-		job, err := s.Job(ctx, id)
-		if err != nil {
-			return err
-		}
-		if job.Status != "completed" {
-			return fmt.Errorf("digest #%d is %s; start the service or retry the failed task", id, job.Status)
-		}
-		var report digest.Report
-		if err := json.Unmarshal(job.Result, &report); err != nil {
-			return err
-		}
-		fmt.Print(digest.Render(report, cfg.Weekly.Timezone))
-		return nil
+		return runDigest(ctx, w, args[1:], os.Stdout)
 	case "status", "export", "retry", "retry-delivery":
 		if len(args) != 2 {
 			return fmt.Errorf("usage: kagari %s TASK_ID", args[0])

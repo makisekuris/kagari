@@ -11,7 +11,6 @@ import (
 	"go.uber.org/zap"
 	"kagari/internal/agent"
 	"kagari/internal/config"
-	"kagari/internal/digest"
 	"kagari/internal/domain"
 	"kagari/internal/logging"
 	"kagari/internal/render"
@@ -52,21 +51,7 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 		sources = r.Sources
 		text = render.Analysis(r)
 	case "digest":
-		var request domain.DigestRequest
-		workErr = json.Unmarshal(job.Payload, &request)
-		if workErr == nil {
-			entries, err := w.Store.Entries(ctx, request.UserID, request.Start, request.End)
-			workErr = err
-			if err == nil {
-				total, pending, failed, err := w.Store.Stats(ctx, request.UserID, request.Start, request.End)
-				workErr = err
-				if err == nil {
-					report := digest.Build(request.UserID, request.Start, request.End, time.Now(), entries, total, pending, failed)
-					result = report
-					text = digest.Render(report, w.Config.Weekly.Timezone)
-				}
-			}
-		}
+		result, text, workErr = w.processDigest(ctx, job)
 	case "command":
 		var c domain.Command
 		workErr = json.Unmarshal(job.Payload, &c)
@@ -148,14 +133,4 @@ func backoff(attempt int) time.Duration {
 		attempt = 6
 	}
 	return time.Duration(1<<attempt) * 5 * time.Second
-}
-
-func (w *Worker) EnqueueDigest(ctx context.Context, request domain.DigestRequest, target int64) (int64, bool, error) {
-	if !request.Start.Before(request.End) {
-		return 0, false, errors.New("start must be before end")
-	}
-	key := fmt.Sprintf("%d:%s:%s", request.UserID, request.Start.UTC().Format(time.RFC3339), request.End.UTC().Format(time.RFC3339))
-	// 用户加完整周范围构成 period 幂等键；已完成周报视为快照，不因归档后来变化而重算。
-	raw, _ := json.Marshal(request)
-	return w.Store.Enqueue(ctx, "digest", key, raw, target)
 }

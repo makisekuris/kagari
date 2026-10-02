@@ -43,13 +43,16 @@ func TestWeeklyDigestCheck(t *testing.T) {
 		}
 		seen[key] = true
 	}
-	if !due[1].Start.Equal(time.Date(2024, 3, 4, 0, 0, 0, 0, newYork)) || !due[1].End.Equal(time.Date(2024, 3, 11, 0, 0, 0, 0, newYork)) {
+	if !due[1].Start.Equal(time.Date(2024, 3, 4, 9, 0, 0, 0, newYork)) || !due[1].End.Equal(time.Date(2024, 3, 11, 9, 0, 0, 0, newYork)) {
 		t.Fatalf("DST due period = [%s,%s)", due[1].Start, due[1].End)
+	}
+	if !due[0].End.Equal(time.Date(2024, 3, 4, 9, 0, 0, 0, newYork)) || !due[2].End.Equal(time.Date(2024, 3, 18, 9, 0, 0, 0, newYork)) {
+		t.Fatalf("catch-up windows should use each trigger as cutoff: %+v", due)
 	}
 	weekly.Weekday = 1
 	exactEnabledAt := time.Date(2024, 3, 11, 9, 0, 0, 0, newYork)
 	due, err = Due(time.Date(2024, 3, 18, 9, 0, 0, 0, newYork), exactEnabledAt, weekly)
-	if err != nil || len(due) != 1 || !due[0].Start.Equal(time.Date(2024, 3, 11, 0, 0, 0, 0, newYork)) {
+	if err != nil || len(due) != 1 || !due[0].Start.Equal(time.Date(2024, 3, 11, 9, 0, 0, 0, newYork)) {
 		t.Fatalf("Due() at exact enabled boundary = (%+v, %v)", due, err)
 	}
 	sundayGap := config.Weekly{Enabled: true, Timezone: "America/New_York", Weekday: 0, Time: "02:30"}

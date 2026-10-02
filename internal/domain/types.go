@@ -136,13 +136,6 @@ type ArchiveEntry struct {
 	Result     Result     `json:"result"`
 }
 
-// DigestRequest 按 UserID 和收录时间半开区间 [Start, End) 选择已完成分析。
-type DigestRequest struct {
-	UserID int64     `json:"user_id"`
-	Start  time.Time `json:"start"`
-	End    time.Time `json:"end"`
-}
-
 type Command struct {
 	UserID int64  `json:"user_id"`
 	ChatID int64  `json:"chat_id"`

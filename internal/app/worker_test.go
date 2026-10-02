@@ -24,8 +24,20 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
 		a := domain.Analysis{Title: "文章标题", Overview: "原文事实", Summary: []domain.Claim{{Text: "原文事实", SourceIDs: []string{"article"}}}, Discussion: []domain.Claim{}, Evaluation: []domain.Claim{{Text: "适合当前需求", SourceIDs: []string{"article"}}}, Category: "工程", Tags: []string{"Go"}, Uncertainties: []string{}}
-		raw, _ := json.Marshal(a)
+		a.Headings = &domain.AnalysisHeadings{Summary: "原文简报喵", Discussion: "讨论", Evaluation: "taffy锐评", Uncertainties: "限制", Sources: "来源"}
+		var output any = a
+		properties := body["text"].(map[string]any)["format"].(map[string]any)["schema"].(map[string]any)["properties"].(map[string]any)
+		if properties["sections"] != nil {
+			input := digestModelInput(t, body)
+			output = digestModelReview(input)
+		}
+		raw, _ := json.Marshal(output)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_app", "object": "response", "status": "completed", "model": "test", "output": []any{map[string]any{"type": "message", "id": "msg_app", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": string(raw), "annotations": []any{}}}}}})
 	}))
@@ -51,6 +63,23 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	}
 	w := &Worker{Store: s, Engine: e, Config: cfg, Log: zap.NewNop()}
 	now := time.Now().UTC()
+	legacy, err := e.Prepare(domain.Submission{UserID: 7, ChatID: 7, URLs: []string{"https://example.org/article"}, ReceivedAt: now.Add(-48 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPayload, _ := json.Marshal(legacy)
+	legacyID, _, err := s.Enqueue(ctx, "analyze", "legacy", legacyPayload, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartJob(ctx, legacyID); err != nil {
+		t.Fatal(err)
+	}
+	legacyResult, _ := json.Marshal(domain.Result{Analysis: domain.Analysis{Title: "旧答案引用了用户提示词"}, AnalysisVersion: "source-boundaries-v1", CreatedAt: now})
+	if err := s.CompleteJob(ctx, legacyID, legacyResult, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var firstID int64
 	for i := 0; i < 2; i++ {
 		sub, err := e.Prepare(domain.Submission{UserID: 7, ChatID: 7, URLs: []string{"https://example.org/article"}, ReceivedAt: now.Add(time.Duration(i) * time.Second)})
 		if err != nil {
@@ -60,6 +89,9 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 		id, _, err := s.Enqueue(ctx, "analyze", string(rune('a'+i)), raw, 7)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if i == 0 {
+			firstID = id
 		}
 		job, err := s.StartJob(ctx, id)
 		if err != nil {
@@ -79,6 +111,9 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	if len(entries) != 1 || entries[0].Result.Sources[0].Content != "正文应被保存到本地" {
 		t.Fatal("archive dedup/evidence missing")
 	}
+	if headings := entries[0].Result.Analysis.Headings; headings == nil || headings.Evaluation != "taffy锐评" {
+		t.Fatalf("archive lost generated headings: %+v", headings)
+	}
 	request := domain.DigestRequest{UserID: 7, Start: now.Add(-time.Hour), End: now.Add(time.Hour)}
 	id, created, err := w.EnqueueDigest(ctx, request, 7)
 	if err != nil || !created {
@@ -96,8 +131,8 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	if err := json.Unmarshal(job.Result, &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Total != 2 || len(report.Entries) != 1 {
-		t.Fatalf("digest counts %+v", report)
+	if report.Input == nil || len(report.Input.Entries) != 1 || report.Review == nil || digest.Count(*report.Review) != 1 || requests.Load() != 2 {
+		t.Fatalf("digest generation %+v", report)
 	}
 	duplicate, created, err := w.EnqueueDigest(ctx, request, 7)
 	if err != nil || created || duplicate != id {
@@ -107,20 +142,23 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 		t.Fatal("cross-user status access")
 	}
 	sendCtx, cancel := context.WithCancel(ctx)
-	if err := deliver(sendCtx, w, func(context.Context, int64, string) (int64, error) {
+	if err := deliver(sendCtx, w, func(_ context.Context, _ int64, text string) (int64, error) {
+		if !strings.Contains(text, "原文简报喵：") || !strings.Contains(text, "taffy锐评：") || strings.Contains(text, "AI 摘要：") || strings.Contains(text, "Agent 评价：") {
+			t.Errorf("delivery replaced model headings: %s", text)
+		}
 		cancel()
 		return 0, &telegram.SendError{Reason: "timeout", Uncertain: true}
 	}); err != nil {
 		t.Fatal(err)
 	}
-	counts, err := s.DeliveryCounts(ctx, 1)
+	counts, err := s.DeliveryCounts(ctx, firstID)
 	if err != nil || counts["uncertain"] != 1 {
 		t.Fatalf("delivery outcome lost: %v %v", counts, err)
 	}
-	if err := s.RetryDeliveries(ctx, 1); err != nil {
+	if err := s.RetryDeliveries(ctx, firstID); err != nil {
 		t.Fatal(err)
 	}
-	counts, _ = s.DeliveryCounts(ctx, 1)
+	counts, _ = s.DeliveryCounts(ctx, firstID)
 	if counts["pending"] == 0 {
 		t.Fatal("manual resend not queued")
 	}

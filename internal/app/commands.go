@@ -30,7 +30,7 @@ func (w *Worker) command(ctx context.Context, c domain.Command) string {
 	}
 	if cmd == "/weekly" {
 		loc, _ := time.LoadLocation(w.Config.Weekly.Timezone)
-		start, end := digest.PreviousWeek(time.Now(), loc)
+		start, end := digest.Window(time.Now(), loc)
 		if len(fields) == 3 {
 			var err error
 			start, err = time.ParseInLocation("2006-01-02", fields[1], loc)
@@ -126,4 +126,4 @@ func (w *Worker) Status(ctx context.Context, id int64) (string, error) {
 	return text, nil
 }
 
-const help = "直接发送或转发含链接的消息，附上你的阅读关注点。\n/status 任务号：查看处理和投递状态\n/retry 任务号：重试处理失败的任务\n/retry_delivery 任务号：重发失败或结果不确定的消息（可能重复）\n/weekly：汇总上一完整周\n/weekly YYYY-MM-DD YYYY-MM-DD：按收录日期汇总，结束日期不包含"
+const help = "直接发送或转发含链接的消息，附上你的阅读关注点。\n/status 任务号：查看处理和投递状态\n/retry 任务号：重试处理失败的任务\n/retry_delivery 任务号：重发失败或结果不确定的消息（可能重复）\n/weekly：回顾截至现在的一周内容\n/weekly YYYY-MM-DD YYYY-MM-DD：按收录日期回顾，结束日期不包含"

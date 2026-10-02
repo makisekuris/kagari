@@ -61,8 +61,19 @@ type Agent struct {
 }
 
 type Weekly struct {
-	Enabled  bool   `mapstructure:"enabled"`
-	Timezone string `mapstructure:"timezone"`
-	Weekday  int    `mapstructure:"weekday"`
-	Time     string `mapstructure:"time"`
+	Enabled       bool   `mapstructure:"enabled"`
+	Timezone      string `mapstructure:"timezone"`
+	Weekday       int    `mapstructure:"weekday"`
+	Time          string `mapstructure:"time"`
+	MaxInputChars int    `mapstructure:"max_input_chars"`
+}
+
+const DefaultWeeklyInputChars = 120000
+
+// InputLimit 兼容直接构造的旧配置；文件加载仍会写入默认值。
+func (w Weekly) InputLimit() int {
+	if w.MaxInputChars == 0 {
+		return DefaultWeeklyInputChars
+	}
+	return w.MaxInputChars
 }

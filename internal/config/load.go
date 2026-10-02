@@ -29,8 +29,8 @@ func Load(path string) (Config, error) {
 		"agent.max_sources": 6, "agent.max_supplemental": 2, "agent.max_depth": 2,
 		"agent.max_iterations": 10, "agent.timeout": "3m", "agent.categories": []string{"AI", "工程", "前端", "产品", "其他"},
 		"agent.streaming": false,
-		"weekly.enabled": false, "weekly.timezone": "Asia/Shanghai", "weekly.weekday": 1,
-		"weekly.time": "09:00",
+		"weekly.enabled":  false, "weekly.timezone": "Asia/Shanghai", "weekly.weekday": 1,
+		"weekly.time": "09:00", "weekly.max_input_chars": DefaultWeeklyInputChars,
 	}
 	for key, value := range defaults {
 		v.SetDefault(key, value)

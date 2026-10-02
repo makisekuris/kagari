@@ -9,7 +9,7 @@ import (
 )
 
 // Validate 先校验所有命令共享的边界，再按调用方需求检查凭证。
-// read 和本地 digest 不要求模型或 Telegram 凭证，analyze/run 再启用相应检查。
+// read 和归档回放不要求凭证；生成非空周报及 analyze/run 再启用模型检查。
 func (c Config) Validate(modelRequired, telegramRequired bool) error {
 	if err := validateBrowserFallback(c.Reader.BrowserFallback); err != nil {
 		return err
@@ -50,6 +50,9 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 	}
 	if _, err := time.Parse("15:04", c.Weekly.Time); err != nil {
 		return errors.New("weekly.time must be HH:MM")
+	}
+	if c.Weekly.InputLimit() < 1024 {
+		return errors.New("weekly.max_input_chars must be at least 1024")
 	}
 	if modelRequired {
 		if c.Model.Name == "" || c.Model.APIKey == "" || c.Model.BaseURL == "" {
