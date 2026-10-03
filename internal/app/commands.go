@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"kagari/internal/digest"
 	"kagari/internal/domain"
+	"kagari/internal/telegram"
 )
 
 func (w *Worker) notice(ctx context.Context, key string, userID, chatID int64, text string) (int64, bool, error) {
@@ -44,11 +44,8 @@ func (w *Worker) command(ctx context.Context, c domain.Command) string {
 		} else if len(fields) != 1 {
 			return "用法：/weekly 或 /weekly 开始日期 结束日期（结束日期不包含）"
 		}
-		target := c.ChatID
-		if w.Config.Telegram.TargetChatID != 0 {
-			target = w.Config.Telegram.TargetChatID
-		}
-		id, created, err := w.EnqueueDigest(ctx, domain.DigestRequest{UserID: c.UserID, Start: start, End: end}, target)
+		chatIDs := w.Config.Telegram.ChatIDs(c.ChatID)
+		id, created, err := w.EnqueueDigest(ctx, domain.DigestRequest{UserID: c.UserID, Start: start, End: end}, chatIDs[0], telegram.Targets(chatIDs)...)
 		if err != nil {
 			return "周报排队失败：请检查日期范围"
 		}
@@ -107,7 +104,7 @@ func (w *Worker) Status(ctx context.Context, id int64) (string, error) {
 	if job == nil {
 		return "", errors.New("job not found")
 	}
-	counts, err := w.Store.DeliveryCounts(ctx, id)
+	counts, err := w.Store.DeliveryTargetCounts(ctx, id)
 	if err != nil {
 		return "", err
 	}
@@ -115,13 +112,8 @@ func (w *Worker) Status(ctx context.Context, id int64) (string, error) {
 	if job.LastError != "" {
 		text += "\n" + job.LastError
 	}
-	keys := make([]string, 0, len(counts))
-	for k := range counts {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		text += fmt.Sprintf("\n投递 %s：%d", key, counts[key])
+	for _, count := range counts {
+		text += fmt.Sprintf("\n投递 %s/%s %s：%d", count.Target.Channel, count.Target.Address, count.Status, count.Count)
 	}
 	return text, nil
 }

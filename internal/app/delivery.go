@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"kagari/internal/telegram"
+	"kagari/internal/distribution"
 )
 
-func deliver(ctx context.Context, w *Worker, send func(context.Context, int64, string) (int64, error)) error {
+func deliver(ctx context.Context, w *Worker, dispatcher distribution.Dispatcher) error {
 	for ctx.Err() == nil {
 		d, err := w.Store.ClaimDelivery(ctx)
 		if err != nil {
@@ -21,12 +21,12 @@ func deliver(ctx context.Context, w *Worker, send func(context.Context, int64, s
 			}
 			continue
 		}
-		messageID, sendErr := send(ctx, d.ChatID, d.Text)
+		messageID, sendErr := dispatcher.Send(ctx, *d)
 		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		if sendErr == nil {
-			err = w.Store.SentDelivery(persistCtx, d.ID, messageID)
+			err = w.Store.SentDeliveryReceipt(persistCtx, d.ID, messageID)
 		} else {
-			failure := &telegram.SendError{Reason: "Telegram delivery outcome is unknown", Uncertain: true}
+			failure := &distribution.SendError{Reason: "delivery outcome is unknown", Uncertain: true}
 			_ = errors.As(sendErr, &failure)
 			attempts := w.Config.MaxAttempts
 			if failure.Permanent {

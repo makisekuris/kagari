@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"kagari/internal/domain"
@@ -17,10 +18,11 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*domain.Delivery, error) {
 	}
 	defer tx.Rollback()
 	var id int64
-	// 后续分段必须等前面全部 sent；failed/uncertain 也会阻塞，防止用户看到乱序正文。
 	err = tx.QueryRowContext(ctx, `SELECT d.id FROM deliveries d
 		WHERE d.status='pending' AND d.next_attempt_at<=?
-		AND NOT EXISTS (SELECT 1 FROM deliveries p WHERE p.job_id=d.job_id AND p.part<d.part AND p.status<>'sent')
+		AND NOT EXISTS (SELECT 1 FROM deliveries p WHERE p.job_id=d.job_id AND p.channel=d.channel
+			AND CASE WHEN p.address='' THEN CAST(p.chat_id AS TEXT) ELSE p.address END = CASE WHEN d.address='' THEN CAST(d.chat_id AS TEXT) ELSE d.address END
+			AND p.part<d.part AND p.status<>'sent')
 		ORDER BY d.id LIMIT 1`, timestamp(time.Now())).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -31,7 +33,8 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*domain.Delivery, error) {
 	if _, err := tx.ExecContext(ctx, `UPDATE deliveries SET status='sending',attempts=attempts+1 WHERE id=? AND status='pending'`, id); err != nil {
 		return nil, err
 	}
-	delivery, err := scanDelivery(tx.QueryRowContext(ctx, `SELECT id,job_id,chat_id,part,text,status,attempts FROM deliveries WHERE id=?`, id))
+	delivery, err := scanDelivery(tx.QueryRowContext(ctx, `SELECT id,job_id,chat_id,channel,
+		CASE WHEN address='' THEN CAST(chat_id AS TEXT) ELSE address END,part,text,status,attempts FROM deliveries WHERE id=?`, id))
 	if err != nil {
 		return nil, err
 	}
@@ -43,11 +46,16 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*domain.Delivery, error) {
 
 func scanDelivery(row interface{ Scan(...any) error }) (*domain.Delivery, error) {
 	var delivery domain.Delivery
-	err := row.Scan(&delivery.ID, &delivery.JobID, &delivery.ChatID, &delivery.Part, &delivery.Text, &delivery.Status, &delivery.Attempts)
+	err := row.Scan(&delivery.ID, &delivery.JobID, &delivery.ChatID, &delivery.Target.Channel, &delivery.Target.Address,
+		&delivery.Part, &delivery.Text, &delivery.Status, &delivery.Attempts)
 	return &delivery, err
 }
 
 func (s *Store) SentDelivery(ctx context.Context, id, messageID int64) error {
+	return s.SentDeliveryReceipt(ctx, id, strconv.FormatInt(messageID, 10))
+}
+
+func (s *Store) SentDeliveryReceipt(ctx context.Context, id int64, messageID string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE deliveries SET status='sent',message_id=?,last_error='' WHERE id=? AND status='sending'`, messageID, id)
 	if err != nil {
 		return err
@@ -60,11 +68,11 @@ func (s *Store) SentDelivery(ctx context.Context, id, messageID int64) error {
 		return nil
 	}
 	var status string
-	var previous sql.NullInt64
+	var previous sql.NullString
 	if err := s.db.QueryRowContext(ctx, `SELECT status,message_id FROM deliveries WHERE id=?`, id).Scan(&status, &previous); err != nil {
 		return err
 	}
-	if status == "sent" && previous.Valid && previous.Int64 == messageID {
+	if status == "sent" && previous.Valid && previous.String == messageID {
 		return nil
 	}
 	return fmt.Errorf("store: cannot mark delivery %d sent in state %q", id, status)

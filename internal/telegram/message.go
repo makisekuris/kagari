@@ -24,7 +24,11 @@ func (c *Client) acceptUpdate(ctx context.Context, update *models.Update) error 
 	if err != nil {
 		return errors.New("Telegram update could not be prepared")
 	}
-	jobID, created, err := c.store.AcceptUpdate(ctx, update.ID, kind, key, payload, targetChatID)
+	var targets []domain.DeliveryTarget
+	if kind == "analyze" {
+		targets = Targets(c.config.ChatIDs(ackChatID))
+	}
+	jobID, created, err := c.store.AcceptUpdate(ctx, update.ID, kind, key, payload, targetChatID, targets...)
 	if err != nil {
 		return errors.New("Telegram update could not be saved")
 	}
@@ -77,10 +81,7 @@ func (c *Client) jobForUpdate(update *models.Update) (kind, key string, payload 
 		return "notice", key, payload, message.Chat.ID, message.Chat.ID, err
 	}
 	// 身份和权限属于提交者；公共目标群只决定结果发到哪里，不能替代 UserID。
-	targetChatID = c.config.TargetChatID
-	if targetChatID == 0 {
-		targetChatID = message.Chat.ID
-	}
+	targetChatID = c.config.ChatIDs(message.Chat.ID)[0]
 	payload, err = json.Marshal(prepared)
 	return "analyze", key, payload, targetChatID, message.Chat.ID, err
 }

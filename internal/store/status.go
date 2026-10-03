@@ -48,3 +48,30 @@ func (s *Store) DeliveryCounts(ctx context.Context, jobID int64) (map[string]int
 	}
 	return counts, rows.Err()
 }
+
+type DeliveryStatus struct {
+	Target domain.DeliveryTarget
+	Status string
+	Count  int
+}
+
+func (s *Store) DeliveryTargetCounts(ctx context.Context, jobID int64) ([]DeliveryStatus, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT channel,
+		CASE WHEN address='' THEN CAST(chat_id AS TEXT) ELSE address END,status,count(*)
+		FROM deliveries WHERE job_id=?
+		GROUP BY channel,CASE WHEN address='' THEN CAST(chat_id AS TEXT) ELSE address END,status
+		ORDER BY channel,CASE WHEN address='' THEN CAST(chat_id AS TEXT) ELSE address END,status`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var statuses []DeliveryStatus
+	for rows.Next() {
+		var status DeliveryStatus
+		if err := rows.Scan(&status.Target.Channel, &status.Target.Address, &status.Status, &status.Count); err != nil {
+			return nil, err
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses, rows.Err()
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"kagari/internal/agent"
 	"kagari/internal/config"
 	"kagari/internal/digest"
+	"kagari/internal/distribution"
 	"kagari/internal/domain"
 	"kagari/internal/store"
 	"kagari/internal/telegram"
@@ -142,13 +144,13 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 		t.Fatal("cross-user status access")
 	}
 	sendCtx, cancel := context.WithCancel(ctx)
-	if err := deliver(sendCtx, w, func(_ context.Context, _ int64, text string) (int64, error) {
+	if err := deliver(sendCtx, w, distribution.Dispatcher{"telegram": telegram.Adapter(func(_ context.Context, _ int64, text string) (int64, error) {
 		if !strings.Contains(text, "原文简报喵：") || !strings.Contains(text, "taffy锐评：") || strings.Contains(text, "AI 摘要：") || strings.Contains(text, "Agent 评价：") {
 			t.Errorf("delivery replaced model headings: %s", text)
 		}
 		cancel()
 		return 0, &telegram.SendError{Reason: "timeout", Uncertain: true}
-	}); err != nil {
+	})}); err != nil {
 		t.Fatal(err)
 	}
 	counts, err := s.DeliveryCounts(ctx, firstID)
@@ -175,6 +177,7 @@ func TestScheduleRestartCatchupIsIdempotent(t *testing.T) {
 	cfg.Weekly.Enabled = true
 	cfg.Weekly.Timezone = "UTC"
 	cfg.Telegram.AllowedUserIDs = []int64{7}
+	cfg.Telegram.TargetChatIDs = []int64{7, -100123}
 	w := &Worker{Store: s, Config: cfg, Log: zap.NewNop()}
 	if err := s.SetMeta(ctx, "weekly_cursor", "2026-09-14T08:00:00Z"); err != nil {
 		t.Fatal(err)
@@ -196,7 +199,7 @@ func TestScheduleRestartCatchupIsIdempotent(t *testing.T) {
 			break
 		}
 		count++
-		if job.Kind != "digest" || job.TargetChatID != 7 {
+		if job.Kind != "digest" || job.TargetChatID != 7 || !reflect.DeepEqual(job.Targets, telegram.Targets([]int64{7, -100123})) {
 			t.Fatal("wrong scheduled job")
 		}
 	}

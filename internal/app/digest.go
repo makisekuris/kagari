@@ -16,7 +16,7 @@ import (
 	"kagari/internal/domain"
 )
 
-func (w *Worker) EnqueueDigest(ctx context.Context, request domain.DigestRequest, target int64) (int64, bool, error) {
+func (w *Worker) EnqueueDigest(ctx context.Context, request domain.DigestRequest, target int64, targets ...domain.DeliveryTarget) (int64, bool, error) {
 	if !request.Start.Before(request.End) {
 		return 0, false, errors.New("start must be before end")
 	}
@@ -30,7 +30,7 @@ func (w *Worker) EnqueueDigest(ctx context.Context, request domain.DigestRequest
 	if err != nil {
 		return 0, false, err
 	}
-	return w.Store.Enqueue(ctx, "digest", key, raw, target)
+	return w.Store.Enqueue(ctx, "digest", key, raw, target, targets...)
 }
 
 func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report digest.Report, text string, err error) {
