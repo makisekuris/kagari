@@ -7,18 +7,63 @@ Kagari is a personal reading assistant written in Go. It accepts links from the 
 运行需要 Go 1.27；进程锁使用 `flock`，支持 macOS 和 Linux。模型 endpoint、Telegram bot 和频道权限由部署者配置。
 
 Requires Go 1.27. The process lock uses `flock` and supports macOS and Linux. You provide the model endpoint, Telegram bot, and any channel permissions.
+
+## 日常操作 / Everyday commands
+
+在项目根目录运行 `make` 或 `make help` 查看命令。需要 Go 和 Make；macOS 和 Linux 的 Make 均可使用。
+
+Run `make` or `make help` from the project root to list commands. Requires Go and Make; Make on macOS and Linux is supported.
+
+| 命令 / Command | 用途 / Purpose |
+| --- | --- |
+| `make init` | 复制示例配置，保留已有文件 / Copy example configuration, preserving existing files |
+| `make build` | 为当前平台构建 `bin/kagari` / Build `bin/kagari` for the current platform |
+| `make build-mac` | 构建 macOS arm64 产物 / Build for macOS arm64 |
+| `make build-linux` | 构建 Linux amd64 产物 / Build for Linux amd64 |
+| `make run` | 构建并启动 Telegram 服务 / Build and start the Telegram service |
+| `make cli ARGS='...'` | 构建并执行任意 CLI 子命令 / Build and execute any CLI subcommand |
+| `make check` | 运行全部测试和 `go vet` / Run all tests and `go vet` |
+| `make test` / `make vet` | 单独运行测试或静态检查 / Run tests or static checks separately |
+| `make fmt` | 格式化 Go 代码 / Format Go code |
+
+```sh
+make cli ARGS='read https://example.com/article'
+make cli ARGS='analyze -note "关注系统设计" -user 123456 https://example.com/article'
+make cli ARGS='digest -user 123456'
+make cli ARGS='status 17'
+make cli ARGS='db info'
+make run CONFIG=path/to/config.yaml
+```
+
+`run` 和 `cli` 每次先构建，构建失败则停止。`CONFIG` 默认是 `config.yaml`，可在这两个目标上覆盖；`.env` 仍从当前工作目录读取。`ARGS` 按 shell 参数解析，包含空格的单个参数需像上面的 `-note` 一样加引号。其他子命令与数据库清理要求见下文。
+
+`run` and `cli` build first on every invocation and stop if the build fails. `CONFIG` defaults to `config.yaml` and can be overridden for either target; `.env` is still loaded from the current working directory. `ARGS` is parsed as shell arguments; quote individual arguments containing spaces as shown with `-note`. See below for other subcommands and database clearing requirements.
+
+跨平台构建关闭 CGO，产物名称包含平台和架构。macOS 默认使用 Apple Silicon 的 `arm64`，Intel Mac 使用 `MAC_ARCH=amd64`；Linux 默认使用 `amd64`，ARM 服务器使用 `LINUX_ARCH=arm64`：
+
+Cross-platform builds disable CGO and include the platform and architecture in the output name. macOS defaults to `arm64` for Apple Silicon; use `MAC_ARCH=amd64` for Intel Macs. Linux defaults to `amd64`; use `LINUX_ARCH=arm64` for ARM servers:
+
+```sh
+make build-mac                    # bin/kagari-darwin-arm64
+make build-mac MAC_ARCH=amd64     # bin/kagari-darwin-amd64
+make build-linux                  # bin/kagari-linux-amd64
+make build-linux LINUX_ARCH=arm64 # bin/kagari-linux-arm64
+```
+
+将对应产物与本地配置放到目标机器，直接运行该文件；`make run` 和 `make cli` 使用本机的 `bin/kagari`。
+
+Place the matching binary and local configuration on the target machine and run that binary directly. `make run` and `make cli` use the native `bin/kagari`.
+
 ## Quickstart / 快速开始
 
 ### 1. 配置 / Configure
 
-复制示例文件。`-n` 会保留已有的本地配置：
+复制示例文件，保留已有的本地配置：
 
-Copy the examples. `-n` leaves existing local files unchanged:
+Copy the examples, leaving existing local files unchanged:
 
 ```sh
-cp -n .env.example .env
-cp -n config.example.yaml config.yaml
-cp -n profile.example.md profile.md
+make init
 ```
 
 在 `.env` 中填写 `KAGARI_MODEL_BASE_URL`、`KAGARI_MODEL_NAME` 和 `KAGARI_MODEL_API_KEY`。使用 Telegram 时填写 `KAGARI_TELEGRAM_TOKEN`，并在 `config.yaml` 的 `telegram.allowed_user_ids` 中加入允许使用 bot 的用户 ID。
@@ -28,9 +73,7 @@ Set `KAGARI_MODEL_BASE_URL`, `KAGARI_MODEL_NAME`, and `KAGARI_MODEL_API_KEY` in 
 ### 2. 构建并试读 / Build and read
 
 ```sh
-mkdir -p bin
-go build -o bin/kagari ./cmd/kagari
-./bin/kagari -config config.yaml read https://example.com/article
+make cli ARGS='read https://example.com/article'
 ```
 
 `read` 不需要模型凭证。配置好模型后，可分析链接：
@@ -38,7 +81,7 @@ go build -o bin/kagari ./cmd/kagari
 `read` does not require model credentials. Configure a model endpoint to analyze a link:
 
 ```sh
-./bin/kagari -config config.yaml analyze -user 123456 https://example.com/article
+make cli ARGS='analyze -user 123456 https://example.com/article'
 ```
 
 启动 Telegram 服务：
@@ -46,7 +89,7 @@ go build -o bin/kagari ./cmd/kagari
 Start the Telegram service:
 
 ```sh
-./bin/kagari -config config.yaml run
+make run
 ```
 
 ## 配置 / Configuration
@@ -153,7 +196,7 @@ Clearing does not retract Telegram messages already sent. Job IDs may be reused 
 ## 行为与限制 / Behavior and limits
 
 - HTTP + Readability 读取网页，限制超时、响应大小、正文长度和链接数，并默认拒绝非公网地址。只有显式配置 `reader.allowed_non_public_cidrs` 才会放行指定网段。 / HTTP + Readability fetches web pages with timeout, response-size, content-length, and link limits. Non-public IPs are blocked by default; only explicitly configured CIDRs are allowed.
-- X 通过公开 oEmbed 读取可用的单条帖子；长帖、线程回复和链接卡片可能不完整。 / X posts are read through public oEmbed. Long posts, threads, and link cards may be incomplete.
+- X 通过公开 oEmbed 读取可用的单条帖子。分析时先读取全部提交入口，再在页面数与深度限制内自动访问 X 正文中提取到的外部链接（包括 `t.co` 短链），将链接网页正文作为独立来源交给模型；访问失败或达到限制时保留说明。自动访问只追读一层，进一步追读由 Agent 按信息缺口决定。长帖、线程回复和链接卡片可能仍不完整。 / X posts are read through public oEmbed. Analysis reads all submitted entries first, then automatically follows external links extracted from the X post text, including `t.co` short links, within page and depth limits. Linked page text is supplied to the model as separate sources; fetch failures and reading limits are retained. Automatic follow-ups cover one level; the agent decides further reads based on information gaps. Long posts, threads, and link cards may still be incomplete.
 - 默认单次分析最多计入 6 个页面，其中用于核对事实或补充背景的页面最多 2 个；追读原文也计入页面总数。首次读取页面时，缓存命中和失败尝试也会计数；同一会话再次读取同一页面不重复计数。首个页面深度为 0，默认最多追读到深度 2、迭代 10 次；这些限制可在 `agent` 配置中调整。 / By default, an analysis counts up to 6 pages in total, including primary-source follow-ups, with up to 2 pages for checking facts or adding context. A page's first read counts even on a cache hit or fetch failure; rereading it in the same session does not count again. The first page has depth 0; the default maximum depth is 2, with up to 10 iterations. These limits are configurable under `agent`.
 - 周报 `weekly.max_input_chars` 默认 120000；输入超过上限时任务失败并保留完整输入快照，不通过丢弃条目缩小输入。 / `weekly.max_input_chars` defaults to 120000; oversized digest jobs fail with the full input snapshot preserved, rather than dropping entries to fit.
 - `weekly.enabled` 默认关闭；启用后按 `weekly.timezone` 和配置的星期、时间调度，默认时区为 `Asia/Shanghai`。 / `weekly.enabled` defaults to false. When enabled, digests follow `weekly.timezone` and the configured weekday and time; the default timezone is `Asia/Shanghai`.
