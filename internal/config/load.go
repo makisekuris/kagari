@@ -35,7 +35,7 @@ func Load(path string) (Config, error) {
 	for key, value := range defaults {
 		v.SetDefault(key, value)
 	}
-	keys := []string{"model.base_url", "model.api_key", "model.name", "telegram.token", "telegram.allowed_user_ids", "telegram.target_chat_id"}
+	keys := []string{"model.base_url", "model.api_key", "model.name", "telegram.token", "telegram.allowed_user_ids", "telegram.target_chat_id", "telegram.target_chat_ids"}
 	for key := range defaults {
 		keys = append(keys, key)
 	}

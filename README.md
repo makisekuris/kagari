@@ -155,9 +155,19 @@ CLI 的 `analyze` 和 `digest` 会启动任务处理器，不能与 `run` 或另
 
 CLI `analyze` and `digest` start a processor and must not run alongside `run` or another processing CLI command. Status, export, and retry commands can run while the service is active.
 
-Telegram 只接收允许列表中用户的私聊消息。默认回复提交所在私聊；配置 `telegram.target_chat_id` 后可将分析结果发往指定聊天或频道，bot 需要相应发言权限。支持 `/help`、`/status ID`、`/retry ID`、`/retry_delivery ID`、`/weekly` 和 `/weekly START END`。
+Telegram 只接收允许列表中用户的私聊消息。确认、命令回复和处理失败通知发回私聊；分析与周报结果默认发回提交私聊。配置 `telegram.target_chat_ids` 可将同一结果分发到多个聊天或频道，bot 需要相应发言权限。列表非空时优先于旧配置 `telegram.target_chat_id`；列表为空时继续使用旧配置，单目标为 `0` 时回复提交私聊。支持 `/help`、`/status ID`、`/retry ID`、`/retry_delivery ID`、`/weekly` 和 `/weekly START END`。
 
-Telegram accepts private messages from users on the allowlist. Replies go to the submitting chat by default. Set `telegram.target_chat_id` to deliver analysis to another chat or channel; the bot needs permission to post there. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, and `/weekly START END`.
+Telegram accepts private messages from users on the allowlist. Acknowledgements, command replies, and processing failure notices stay in private chat. Analysis and digest results default to the submitting chat. Set `telegram.target_chat_ids` to distribute the same result to multiple chats or channels; the bot needs posting permission. A nonempty list takes precedence over the legacy `telegram.target_chat_id`; an empty list uses that legacy setting, with `0` falling back to private chat. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, and `/weekly START END`.
+
+```yaml
+telegram:
+  allowed_user_ids: [123456789]
+  target_chat_ids: [123456789, -1001234567890]
+```
+
+用实际私聊和频道 ID 替换示例；也可设置 `KAGARI_TELEGRAM_TARGET_CHAT_IDS=123456789,-1001234567890`。目标在入队时保存，修改配置只影响新任务。每个目标分别记录投递状态和分段顺序，一个目标失败不会阻塞其他目标。`/status ID` 显示每个目标的状态；`/retry_delivery ID` 仅重新排队失败或结果不确定的投递，已发送部分保留。结果不确定的消息仍需手动重发，可能重复。
+
+Replace the example IDs with your private chat and channel IDs, or set `KAGARI_TELEGRAM_TARGET_CHAT_IDS=123456789,-1001234567890`. Targets are saved at enqueue time; configuration changes affect new jobs. Each target has independent delivery status and part ordering, so one target's failure does not block the others. `/status ID` shows each target's status. `/retry_delivery ID` requeues only failed or uncertain deliveries and preserves sent parts; retrying an uncertain delivery may duplicate a message.
 
 ## 数据库维护 / Database maintenance
 

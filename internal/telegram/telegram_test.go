@@ -209,6 +209,18 @@ func TestAcceptUpdateUsesInjectedReplyAndDeduplicatesAck(t *testing.T) {
 	if err != nil || job == nil || job.ID != 1 || job.TargetChatID != 900 {
 		t.Fatalf("persisted job = (%+v, %v), want task 1 targeting chat 900", job, err)
 	}
+	// 同一条提交的文章目标可以包含频道；回执仍只发到原私聊。
+	client.config.TargetChatIDs = []int64{7, -100123}
+	if err := json.Unmarshal([]byte(messageUpdate(41, "https://example.com/b")), &update); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.acceptUpdate(context.Background(), &update); err != nil {
+		t.Fatal(err)
+	}
+	job, err = st.Job(context.Background(), 2)
+	if err != nil || job == nil || len(job.Targets) != 2 || job.Targets[0].Address != "7" || job.Targets[1].Address != "-100123" || sends != 2 || ackChatID != "7" {
+		t.Fatalf("multi-target job = %+v, %v; ack sends=%d chat=%s", job, err, sends, ackChatID)
+	}
 }
 
 func TestNewClientRequiresReplyTemplate(t *testing.T) {

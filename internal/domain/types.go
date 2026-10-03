@@ -112,18 +112,26 @@ type Job struct {
 	Payload       json.RawMessage
 	Result        json.RawMessage
 	TargetChatID  int64
+	Targets       []DeliveryTarget // 入队时保存，处理和重试不读取当前分发配置。
 	Status        string
 	Attempts      int
 	LastError     string
 	NextAttemptAt time.Time `json:"next_attempt_at"`
 }
 
-// Delivery 是产物的一段消息；Part 保证同一任务按顺序投递。
-// uncertain 表示 Telegram 可能已经接收，需用户显式允许后才能重新发送。
+// DeliveryTarget 标识渠道及该渠道的目标地址，不包含凭证。
+type DeliveryTarget struct {
+	Channel string `json:"channel"`
+	Address string `json:"address"`
+}
+
+// Delivery 是产物的一段消息；Part 保证同一任务、同一目标按顺序投递。
+// uncertain 表示渠道可能已经接收，需用户显式允许后才能重新发送。
 type Delivery struct {
 	ID       int64
 	JobID    int64
 	ChatID   int64
+	Target   DeliveryTarget
 	Part     int
 	Text     string
 	Status   string

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"kagari/internal/distribution"
 	"kagari/internal/telegram"
 )
 
@@ -18,6 +19,7 @@ func Run(ctx context.Context, w *Worker) error {
 	if err != nil {
 		return err
 	}
+	w.Distribution = distribution.Dispatcher{"telegram": telegram.Adapter(client.Send)}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var group sync.WaitGroup
@@ -37,7 +39,7 @@ func Run(ctx context.Context, w *Worker) error {
 		}()
 	}
 	start(client.Poll)
-	start(func(ctx context.Context) error { return deliver(ctx, w, client.Send) })
+	start(func(ctx context.Context) error { return deliver(ctx, w, w.Distribution) })
 	start(func(ctx context.Context) error { return work(ctx, w) })
 	<-ctx.Done()
 	group.Wait()

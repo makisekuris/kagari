@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"kagari/internal/agent"
 	"kagari/internal/config"
+	"kagari/internal/distribution"
 	"kagari/internal/domain"
 	"kagari/internal/logging"
 	"kagari/internal/render"
@@ -19,12 +20,13 @@ import (
 )
 
 type Worker struct {
-	Store   *store.Store
-	Engine  *agent.Engine
-	Config  config.Config
-	Log     *zap.Logger
-	Persona agent.Persona
-	Replies telegram.ReplyTemplate
+	Store        *store.Store
+	Engine       *agent.Engine
+	Config       config.Config
+	Log          *zap.Logger
+	Persona      agent.Persona
+	Replies      telegram.ReplyTemplate
+	Distribution distribution.Dispatcher
 }
 
 func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
@@ -70,6 +72,18 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 	default:
 		workErr = errors.New("unknown job kind")
 	}
+	var messages []domain.Delivery
+	if workErr == nil {
+		dispatcher := w.Distribution
+		if dispatcher == nil {
+			dispatcher = distribution.Dispatcher{"telegram": telegram.Adapter(nil)}
+		}
+		publishText := text
+		if len(job.Targets) > 0 && job.Kind != "digest" {
+			publishText = fmt.Sprintf("任务 #%d\n%s", job.ID, text)
+		}
+		messages, workErr = dispatcher.Plan(job.Targets, publishText)
+	}
 	if result == nil {
 		result = map[string]string{"status": "failed"}
 	}
@@ -100,7 +114,7 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 			var owner domain.Submission
 			if json.Unmarshal(job.Payload, &owner) == nil {
 				record := "读取记录"
-				if job.Kind == "digest" && job.TargetChatID != 0 {
+				if job.Kind == "digest" && len(job.Targets) > 0 {
 					owner.ChatID = owner.UserID
 					record = "材料快照"
 				}
@@ -120,15 +134,7 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 		}
 		return workErr
 	}
-	var messages []string
-	if job.TargetChatID != 0 {
-		if job.Kind == "digest" {
-			messages = render.Chunks(text)
-		} else {
-			messages = render.Chunks(fmt.Sprintf("任务 #%d\n%s", job.ID, text))
-		}
-	}
-	return w.Store.CompleteJob(ctx, job.ID, raw, messages, sources)
+	return w.Store.CompletePublication(ctx, job.ID, raw, messages, sources)
 }
 
 func backoff(attempt int) time.Duration {

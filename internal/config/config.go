@@ -28,6 +28,21 @@ type Telegram struct {
 	Token          string  `mapstructure:"token"`
 	AllowedUserIDs []int64 `mapstructure:"allowed_user_ids"`
 	TargetChatID   int64   `mapstructure:"target_chat_id"`
+	TargetChatIDs  []int64 `mapstructure:"target_chat_ids"`
+}
+
+// ChatIDs 优先使用多目标配置；未配置时兼容单目标或回复提交私聊。
+func (t Telegram) ChatIDs(fallback int64) []int64 {
+	if len(t.TargetChatIDs) > 0 {
+		return append([]int64(nil), t.TargetChatIDs...)
+	}
+	if t.TargetChatID != 0 {
+		return []int64{t.TargetChatID}
+	}
+	if fallback != 0 {
+		return []int64{fallback}
+	}
+	return nil
 }
 
 type Reader struct {

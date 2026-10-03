@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"kagari/internal/digest"
+	"kagari/internal/telegram"
 )
 
 func schedule(ctx context.Context, w *Worker, now time.Time) error {
@@ -32,11 +33,8 @@ func schedule(ctx context.Context, w *Worker, now time.Time) error {
 	for _, request := range requests {
 		for _, userID := range w.Config.Telegram.AllowedUserIDs {
 			request.UserID = userID
-			target := w.Config.Telegram.TargetChatID
-			if target == 0 {
-				target = userID
-			}
-			if _, _, err := w.EnqueueDigest(ctx, request, target); err != nil {
+			chatIDs := w.Config.Telegram.ChatIDs(userID)
+			if _, _, err := w.EnqueueDigest(ctx, request, chatIDs[0], telegram.Targets(chatIDs)...); err != nil {
 				return err
 			}
 		}

@@ -4,7 +4,7 @@
 
 ## 系统边界
 
-Kagari 是 Go 单进程应用，使用本地 SQLite 保存提交、任务、分析、来源缓存、周报和 Telegram 投递状态。读取、模型分析、队列和 Telegram 适配器都在一个进程内协作；CLI 和 Telegram 共用任务处理与存储路径。
+Kagari 是 Go 单进程应用，使用本地 SQLite 保存提交、任务、分析、来源缓存、周报和各目标的投递状态。读取、模型分析、分发、队列和 Telegram 适配器都在一个进程内协作；CLI 和 Telegram 共用任务处理与存储路径。
 
 项目使用 Eino typed agent 和 OpenAI Responses 兼容模型、标准库 HTTP、Readability、Telegram long polling、Viper、Zap 与 `database/sql`/`modernc.org/sqlite`。网页读取覆盖普通 HTTP 页面与公开 X 单帖 oEmbed。当前不支持任意搜索、登录或验证码绕过、付费墙绕过、全文镜像，也不会在网页读取失败后改用浏览器。
 
@@ -19,7 +19,8 @@ Kagari 是 Go 单进程应用，使用本地 SQLite 保存提交、任务、分�
 | `internal/digest` | 整理周报输入、按 `CacheKey` 去重、检查条目分组与引用、渲染和旧报告兼容 |
 | `internal/store` | SQLite schema、任务队列、归档、缓存、投递 outbox 与维护查询 |
 | `internal/app` | Worker、命令权限、任务重试、投递与周报调度 |
-| `internal/telegram` | Bot 客户端、long polling、update offset 和消息解析 |
+| `internal/distribution` | 根据渠道和地址生成投递计划、去重目标、调用渠道发送实现及统一发送错误契约 |
+| `internal/telegram` | Bot 客户端、long polling、update offset、消息解析和 Telegram 分发适配器 |
 | `internal/render` | 单条分析报告与 Telegram 消息分段 |
 | `internal/domain` | 提交、来源、分析、任务、投递和周报领域类型 |
 
@@ -29,7 +30,10 @@ Kagari 是 Go 单进程应用，使用本地 SQLite 保存提交、任务、分�
 2. Agent 规范化 URL，并以用户、输入、profile、提示词、模型和分析设置计算分析缓存键；收录时间不参与键的计算。
 3. Reader 读取已提交的链接。Agent 只能通过 `read_source` 追读已发现的链接；会话限制来源数、补读数和深度。
 4. 模型返回严格结构化结果。程序校验必填栏目、分类和来源引用后，才将结果作为成功分析发布。
-5. Worker 将结果和待发送消息写入 SQLite。消息由独立 delivery 状态机发送；结果未知的发送不会自动重试，以避免静默重复消息。
+5. Worker 将渲染后的文章交给分发层，按入队时保存的渠道和地址生成投递计划。文章只生成一次，各渠道适配器负责分段与发送；结果、分段 outbox 和来源缓存原子写入 SQLite。
+6. 独立 delivery 状态机调用渠道适配器发送。顺序和唯一性按任务、渠道、地址、分段编号确定，一个目标失败不会阻塞其他目标。结果未知的发送不会自动重试，以避免静默重复消息。
+
+当前配置接入 Telegram 多目标，确认、命令回复和处理失败通知只回私聊。旧单目标配置与旧任务继续沿用原目标；启动时迁移 outbox，保留已有状态和消息编号。CLI 分析与周报命令继续只输出本地结果。分发层不依赖 Telegram 客户端，新渠道通过注册正文处理和发送函数接入；目前未实现其他渠道或内容分类路由。
 
 分析结果分开保存来源事实、讨论者观点和评价。失败的读取可作为来源状态保留，但不能作为成功证据；每条结论的来源 ID 必须指向实际读取成功的来源。模型生成的栏目名称是展示文案，不改变证据含义。旧归档没有栏目字段时使用兼容默认值。
 

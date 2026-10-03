@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 	payload BLOB NOT NULL,
 	result BLOB,
 	target_chat_id INTEGER NOT NULL,
+	targets TEXT,
 	status TEXT NOT NULL CHECK (status IN ('pending','processing','completed','failed')),
 	attempts INTEGER NOT NULL DEFAULT 0,
 	last_error TEXT NOT NULL DEFAULT '',
@@ -36,18 +38,19 @@ CREATE INDEX IF NOT EXISTS jobs_analyze_user ON jobs(json_extract(payload,'$.use
 CREATE TABLE IF NOT EXISTS deliveries (
 	id INTEGER PRIMARY KEY,
 	job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-	chat_id INTEGER NOT NULL,
+	channel TEXT NOT NULL DEFAULT 'telegram',
+	address TEXT NOT NULL DEFAULT '',
+	chat_id INTEGER NOT NULL DEFAULT 0,
 	part INTEGER NOT NULL,
 	text TEXT NOT NULL,
 	status TEXT NOT NULL CHECK (status IN ('pending','sending','sent','failed','uncertain')),
 	attempts INTEGER NOT NULL DEFAULT 0,
 	last_error TEXT NOT NULL DEFAULT '',
 	next_attempt_at TEXT NOT NULL,
-	message_id INTEGER,
-	UNIQUE (job_id, part)
+	message_id TEXT,
+	UNIQUE (job_id, channel, address, part)
 );
 CREATE INDEX IF NOT EXISTS deliveries_claim ON deliveries(status, next_attempt_at, id);
-CREATE INDEX IF NOT EXISTS deliveries_order ON deliveries(job_id, part, status);
 CREATE TABLE IF NOT EXISTS source_cache (
 	url TEXT PRIMARY KEY,
 	source BLOB NOT NULL,
@@ -124,6 +127,10 @@ func New(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: initialize schema: %w", err)
 	}
+	if err := migrate(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: migrate database: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 
@@ -140,10 +147,28 @@ func validJSON(raw []byte) error {
 	return nil
 }
 
-func enqueue(ctx context.Context, tx *sql.Tx, kind, key string, payload []byte, targetChatID int64, now time.Time) (int64, bool, error) {
-	result, err := tx.ExecContext(ctx, `INSERT INTO jobs(kind,key,payload,target_chat_id,status,next_attempt_at,created_at)
-		VALUES(?,?,?,?,'pending',?,?) ON CONFLICT(kind,key) DO NOTHING`,
-		kind, key, payload, targetChatID, timestamp(now), timestamp(now))
+func enqueue(ctx context.Context, tx *sql.Tx, kind, key string, payload []byte, targetChatID int64, now time.Time, targets ...domain.DeliveryTarget) (int64, bool, error) {
+	var snapshot []byte
+	if len(targets) > 0 {
+		seen := make(map[domain.DeliveryTarget]bool, len(targets))
+		for _, target := range targets {
+			if strings.TrimSpace(target.Channel) == "" || strings.TrimSpace(target.Address) == "" {
+				return 0, false, errors.New("store: delivery target channel and address are required")
+			}
+			if seen[target] {
+				return 0, false, fmt.Errorf("store: duplicate delivery target %q/%q", target.Channel, target.Address)
+			}
+			seen[target] = true
+		}
+		var err error
+		snapshot, err = json.Marshal(targets)
+		if err != nil {
+			return 0, false, err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO jobs(kind,key,payload,target_chat_id,targets,status,next_attempt_at,created_at)
+		VALUES(?,?,?,?,?,'pending',?,?) ON CONFLICT(kind,key) DO NOTHING`,
+		kind, key, payload, targetChatID, snapshot, timestamp(now), timestamp(now))
 	if err != nil {
 		return 0, false, err
 	}
@@ -160,9 +185,9 @@ func enqueue(ctx context.Context, tx *sql.Tx, kind, key string, payload []byte, 
 
 func scanJob(row interface{ Scan(...any) error }) (*domain.Job, error) {
 	var job domain.Job
-	var payload, result []byte
+	var payload, result, targets []byte
 	var nextAttempt string
-	if err := row.Scan(&job.ID, &job.Kind, &job.Key, &payload, &result, &job.TargetChatID, &job.Status, &job.Attempts, &job.LastError, &nextAttempt); err != nil {
+	if err := row.Scan(&job.ID, &job.Kind, &job.Key, &payload, &result, &job.TargetChatID, &targets, &job.Status, &job.Attempts, &job.LastError, &nextAttempt); err != nil {
 		return nil, err
 	}
 	var err error
@@ -172,7 +197,15 @@ func scanJob(row interface{ Scan(...any) error }) (*domain.Job, error) {
 	}
 	job.Payload = append(json.RawMessage(nil), payload...)
 	job.Result = append(json.RawMessage(nil), result...)
+	if len(targets) > 0 {
+		if err := json.Unmarshal(targets, &job.Targets); err != nil {
+			return nil, fmt.Errorf("store: invalid delivery target snapshot: %w", err)
+		}
+	}
+	if len(job.Targets) == 0 && job.TargetChatID != 0 {
+		job.Targets = []domain.DeliveryTarget{{Channel: "telegram", Address: strconv.FormatInt(job.TargetChatID, 10)}}
+	}
 	return &job, nil
 }
 
-const jobColumns = `id,kind,key,payload,result,target_chat_id,status,attempts,last_error,next_attempt_at`
+const jobColumns = `id,kind,key,payload,result,target_chat_id,targets,status,attempts,last_error,next_attempt_at`

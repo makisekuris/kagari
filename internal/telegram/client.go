@@ -11,6 +11,7 @@ import (
 	"github.com/go-telegram/bot/models"
 	"go.uber.org/zap"
 	"kagari/internal/config"
+	"kagari/internal/distribution"
 	"kagari/internal/domain"
 	"kagari/internal/store"
 )
@@ -37,19 +38,7 @@ type ReplyTemplate interface {
 	AskChatID(jobID int64) string
 }
 
-type SendError struct {
-	Reason     string
-	RetryAfter time.Duration
-	Uncertain  bool
-	Permanent  bool
-}
-
-func (e *SendError) Error() string {
-	if e == nil {
-		return ""
-	}
-	return e.Reason
-}
+type SendError = distribution.SendError
 
 func New(cfg config.Telegram, st *store.Store, prepare func(domain.Submission) (domain.Submission, error), log *zap.Logger, replies ReplyTemplate) (*Client, error) {
 	transport := &http.Transport{Proxy: nil}
