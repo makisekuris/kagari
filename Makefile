@@ -25,6 +25,10 @@ build:
 	mkdir -p bin
 	go build -o bin/kagari ./cmd/kagari
 
+build-linux:
+	mkdir -p bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/kagari-linux-amd64 ./cmd/kagari
+
 run: build
 	./bin/kagari -config "$(CONFIG)" run
 
