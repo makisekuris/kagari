@@ -18,15 +18,8 @@ import (
 )
 
 func TestGenerateDigestMergesAndSendsFrozenSnapshotWithoutSourceBodies(t *testing.T) {
-	merged := domain.DigestReview{
-		Opening: "这周有个值得追的共同线索喵。",
-		Sections: []domain.DigestSection{{Name: "工程", Items: []domain.DigestItem{{
-			EntryIDs: []int64{11, 12}, Title: "同一项目的重复进展", Review: "两篇材料都谈到同一项进展，证据分别来自两条原文。",
-			Refs: []domain.DigestRef{{JobID: 11, SourceID: "s_11"}, {JobID: 12, SourceID: "s_12"}},
-		}}}},
-		Closing: "后续再看原文有没有补充喵。",
-	}
-	encoded, _ := json.Marshal(merged)
+	merged := "## 工程进展\n两篇材料提供了共同线索。"
+	encoded := []byte(merged)
 	var requestBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {
@@ -39,13 +32,10 @@ func TestGenerateDigestMergesAndSendsFrozenSnapshotWithoutSourceBodies(t *testin
 		}
 		data, _ := json.Marshal(body)
 		requestBody = string(data)
-		format := body["text"].(map[string]any)["format"].(map[string]any)
-		if format["name"] != "weekly_digest" || format["strict"] != true {
-			t.Errorf("digest format=%v", format)
-		}
-		properties := format["schema"].(map[string]any)["properties"].(map[string]any)
-		if _, ok := properties["sections"]; !ok {
-			t.Error("digest schema is missing sections")
+		if text, ok := body["text"].(map[string]any); ok {
+			if format, ok := text["format"].(map[string]any); ok && format["type"] == "json_schema" {
+				t.Error("final digest remains schema constrained")
+			}
 		}
 		if tools, ok := body["tools"].([]any); ok && len(tools) != 0 {
 			t.Error("digest request must not expose tools")
@@ -54,7 +44,7 @@ func TestGenerateDigestMergesAndSendsFrozenSnapshotWithoutSourceBodies(t *testin
 		if snapshot == nil {
 			t.Error("serialized user input did not contain the digest snapshot")
 		} else {
-			if _, ok := snapshot["instruction"]; ok {
+			if value := snapshot["instruction"]; value != "" && value != nil {
 				t.Error("system instruction was duplicated in the user input")
 			}
 			entries := snapshot["entries"].([]any)
@@ -81,16 +71,16 @@ func TestGenerateDigestMergesAndSendsFrozenSnapshotWithoutSourceBodies(t *testin
 		Cutoff: time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC), AsOf: time.Date(2026, 9, 28, 1, 0, 0, 0, time.UTC),
 		Timezone: "Asia/Shanghai", Profile: "profile-frozen-once", Instruction: "digest-system-instruction-once",
 		Entries: []domain.DigestEntry{
-			{JobID: 11, ReceivedAt: time.Date(2026, 9, 22, 1, 0, 0, 0, time.UTC), Analysis: domain.Analysis{Title: "进展一", Category: "工程", Summary: []domain.Claim{{Text: "事实一", SourceIDs: []string{"s_11"}}}}, Sources: []domain.DigestSource{{ID: "s_11", Title: "材料一", URL: "https://example.org/1", Status: "ok", Usable: true}}},
-			{JobID: 12, ReceivedAt: time.Date(2026, 9, 24, 1, 0, 0, 0, time.UTC), Analysis: domain.Analysis{Title: "进展二", Category: "工程", Summary: []domain.Claim{{Text: "事实二", SourceIDs: []string{"s_12"}}}}, Sources: []domain.DigestSource{{ID: "s_12", Title: "材料二", URL: "https://example.org/2", Status: "ok", Usable: true}}},
+			{JobID: 11, ReceivedAt: time.Date(2026, 9, 22, 1, 0, 0, 0, time.UTC), Body: "事实一", Sources: []domain.DigestSource{{ID: "s_11", Title: "材料一", URL: "https://example.org/1", Status: "ok", Usable: true}}},
+			{JobID: 12, ReceivedAt: time.Date(2026, 9, 24, 1, 0, 0, 0, time.UTC), Body: "事实二", Sources: []domain.DigestSource{{ID: "s_12", Title: "材料二", URL: "https://example.org/2", Status: "ok", Usable: true}}},
 		},
 	}
 	review, usage, err := e.GenerateDigest(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if review.Sections[0].Items[0].EntryIDs[1] != 12 || len(review.Sections[0].Items[0].Refs) != 2 {
-		t.Fatalf("merged output=%+v", review)
+	if review != merged {
+		t.Fatalf("output=%s", review)
 	}
 	if usage != (domain.Usage{InputTokens: 13, OutputTokens: 8, TotalTokens: 21}) {
 		t.Fatalf("usage=%+v", usage)
@@ -111,7 +101,7 @@ func TestGenerateDigestReturnsUsageWhenResponseIsIncomplete(t *testing.T) {
 	}))
 	defer server.Close()
 	e := newDigestTestEngine(t, server.URL)
-	_, usage, err := e.GenerateDigest(context.Background(), domain.DigestInput{})
+	_, usage, err := e.GenerateDigest(context.Background(), domain.DigestInput{Instruction: e.DigestPrompt()})
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("err=%v", err)
 	}
@@ -121,7 +111,7 @@ func TestGenerateDigestReturnsUsageWhenResponseIsIncomplete(t *testing.T) {
 }
 
 func TestGenerateDigestConsumesStreamingResponse(t *testing.T) {
-	raw := `{"opening":"","sections":[],"closing":""}`
+	raw := "# Weekly review\nBody saved."
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -151,7 +141,7 @@ func TestGenerateDigestConsumesStreamingResponse(t *testing.T) {
 	}))
 	defer server.Close()
 	e := newDigestTestEngineWithStreaming(t, server.URL, true)
-	_, usage, err := e.GenerateDigest(context.Background(), domain.DigestInput{})
+	_, usage, err := e.GenerateDigest(context.Background(), domain.DigestInput{Instruction: e.DigestPrompt()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,14 +154,14 @@ func TestConsumeEventsHandlesStreamingMessages(t *testing.T) {
 	e := &Engine{}
 	msg := &schema.AgenticMessage{
 		Role:          schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{{Type: schema.ContentBlockTypeAssistantGenText, AssistantGenText: &schema.AssistantGenText{Text: `{"opening":"streamed"}`}}},
+		ContentBlocks: []*schema.ContentBlock{{Type: schema.ContentBlockTypeAssistantGenText, AssistantGenText: &schema.AssistantGenText{Text: "streamed result"}}},
 		ResponseMeta:  &schema.AgenticResponseMeta{TokenUsage: &schema.TokenUsage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}},
 	}
 	it, gen := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.AgenticMessage]]()
 	gen.Send(adk.EventFromAgenticMessage(nil, schema.StreamReaderFromArray([]*schema.AgenticMessage{msg}), schema.AgenticRoleTypeAssistant))
 	gen.Close()
 	output, usage, reported, err := e.consumeEvents(it, 1)
-	if err != nil || output != `{"opening":"streamed"}` || !reported || usage.TotalTokens != 5 {
+	if err != nil || output != "streamed result" || !reported || usage.TotalTokens != 5 {
 		t.Fatalf("consume=(%q, %+v, %v, %v)", output, usage, reported, err)
 	}
 }

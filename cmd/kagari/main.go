@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"go.uber.org/zap"
 	"kagari/internal/agent"
 	"kagari/internal/app"
+	"kagari/internal/browser"
 	"kagari/internal/config"
 	"kagari/internal/domain"
 	"kagari/internal/persona"
@@ -97,6 +99,11 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		if cfg.Browser.Enabled {
+			e.OpenBrowser = func(ctx context.Context) (func(context.Context, string) (domain.Source, error), func(), error) {
+				return browser.Open(ctx, cfg)
+			}
+		}
 		e.Log = log
 		w.Engine = e
 	}
@@ -108,15 +115,16 @@ func run() error {
 		return app.Run(ctx, w)
 	case "analyze":
 		flags := flag.NewFlagSet("analyze", flag.ContinueOnError)
+		question := flags.String("question", "", "question to explore")
 		note := flags.String("note", "", "reading question or preference")
 		user := flags.Int64("user", 0, "archive owner user ID")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if len(flags.Args()) == 0 {
-			return errors.New("usage: kagari analyze [-note TEXT] [-user ID] URL...")
+		if len(flags.Args()) == 0 && strings.TrimSpace(*question) == "" {
+			return errors.New("usage: kagari analyze [-question TEXT] [-note TEXT] [-user ID] [URL...]")
 		}
-		sub, err := w.Engine.Prepare(domain.Submission{UserID: *user, URLs: flags.Args(), Note: *note})
+		sub, err := w.Engine.Prepare(domain.Submission{Text: *question, UserID: *user, URLs: flags.Args(), Note: *note})
 		if err != nil {
 			return err
 		}

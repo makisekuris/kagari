@@ -25,11 +25,15 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 			return errors.New("reader.allowed_non_public_cidrs must contain valid IPv4 or IPv6 CIDRs")
 		}
 	}
-	if err := validateBrowserFallback(c.Reader.BrowserFallback); err != nil {
-		return err
+	if c.Browser.Enabled && strings.TrimSpace(c.Browser.Command) == "" {
+		return errors.New("browser.command is required when browser.enabled=true")
 	}
-	if c.Reader.BrowserFallback.Enabled {
-		return errors.New("reader.browser_fallback is not implemented; keep enabled=false")
+	for _, arg := range c.Browser.Args {
+		for _, flag := range []string{"--config", "--proxy", "--cdp", "--endpoint", "--extension", "--allow-unrestricted-file-access", "--browser", "--user-data-dir", "--storage-state"} {
+			if arg == flag || strings.HasPrefix(arg, flag+"=") || strings.HasPrefix(arg, "--cdp-") || strings.HasPrefix(arg, "--proxy-") {
+				return errors.New("browser.args must not override the isolated browser or network policy")
+			}
+		}
 	}
 	if strings.TrimSpace(c.Storage.Path) == "" {
 		return errors.New("storage.path is required")
@@ -43,18 +47,11 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 	if c.Reader.MaxBytes < 1024 || c.Reader.MaxContentChars < 256 || c.Reader.MaxLinks < 1 || c.Model.MaxOutputTokens < 1 {
 		return errors.New("reader and model limits must be positive")
 	}
-	if c.Agent.MaxSources < 1 || c.Agent.MaxSources > 30 || c.Agent.MaxSupplemental < 0 || c.Agent.MaxDepth < 0 || c.Agent.MaxDepth > 5 || c.Agent.MaxIterations < 1 {
+	if c.Agent.MaxSources < 1 || c.Agent.MaxSources > 30 || c.Agent.MaxIterations < 1 {
 		return errors.New("invalid agent reading limits")
 	}
-	if len(c.Agent.Categories) == 0 || c.MaxAttempts < 1 {
-		return errors.New("categories and max_attempts are required")
-	}
-	seen := map[string]bool{}
-	for _, category := range c.Agent.Categories {
-		if category == "" || seen[category] {
-			return errors.New("categories must be nonempty and unique")
-		}
-		seen[category] = true
+	if c.MaxAttempts < 1 {
+		return errors.New("max_attempts must be positive")
 	}
 	if _, err := time.LoadLocation(c.Weekly.Timezone); err != nil {
 		return fmt.Errorf("weekly.timezone: %w", err)
@@ -65,7 +62,7 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 	if _, err := time.Parse("15:04", c.Weekly.Time); err != nil {
 		return errors.New("weekly.time must be HH:MM")
 	}
-	if c.Weekly.InputLimit() < 1024 {
+	if c.Weekly.MaxInputChars < 1024 {
 		return errors.New("weekly.max_input_chars must be at least 1024")
 	}
 	if modelRequired {
@@ -86,50 +83,6 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 				return errors.New("telegram.allowed_user_ids must contain positive user IDs")
 			}
 		}
-	}
-	return nil
-}
-
-func validateBrowserFallback(cfg BrowserFallback) error {
-	if cfg.Engine != "chromium" && cfg.Engine != "firefox" && cfg.Engine != "webkit" {
-		return errors.New("reader.browser_fallback.engine must be chromium, firefox, or webkit")
-	}
-	switch cfg.Mode {
-	case "launch":
-		if cfg.Endpoint != "" {
-			return errors.New("reader.browser_fallback.endpoint is only valid for connect or cdp mode")
-		}
-	case "connect", "cdp":
-		if cfg.ExecutablePath != "" {
-			return errors.New("reader.browser_fallback.executable_path is only valid for launch mode")
-		}
-		if cfg.Mode == "cdp" && cfg.Engine != "chromium" {
-			return errors.New("reader.browser_fallback.cdp mode requires the chromium engine")
-		}
-		if err := validateBrowserEndpoint(cfg.Mode, cfg.Endpoint); err != nil {
-			return err
-		}
-	default:
-		return errors.New("reader.browser_fallback.mode must be launch, connect, or cdp")
-	}
-	return nil
-}
-
-func validateBrowserEndpoint(mode, endpoint string) error {
-	invalid := errors.New("reader.browser_fallback.endpoint must be an absolute URL with a hostname and no userinfo or fragment")
-	if endpoint == "" || endpoint != strings.TrimSpace(endpoint) || strings.Contains(endpoint, "#") {
-		return invalid
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || !u.IsAbs() || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
-		return invalid
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if mode == "connect" && scheme != "ws" && scheme != "wss" {
-		return errors.New("reader.browser_fallback.connect endpoint must use ws or wss")
-	}
-	if mode == "cdp" && scheme != "http" && scheme != "https" && scheme != "ws" && scheme != "wss" {
-		return errors.New("reader.browser_fallback.cdp endpoint must use http, https, ws, or wss")
 	}
 	return nil
 }

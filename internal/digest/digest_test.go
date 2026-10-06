@@ -1,12 +1,10 @@
 package digest
 
 import (
-	"strings"
 	"testing"
 	"time"
 
 	"kagari/internal/config"
-	"kagari/internal/domain"
 )
 
 func TestWeeklyDigestCheck(t *testing.T) {
@@ -66,28 +64,4 @@ func TestWeeklyDigestCheck(t *testing.T) {
 		t.Fatalf("Due() missed first valid time after DST gap: (%+v, %v)", due, err)
 	}
 
-	periodStart := time.Date(2024, 3, 4, 0, 0, 0, 0, newYork)
-	periodEnd := time.Date(2024, 3, 11, 0, 0, 0, 0, newYork)
-	entries := []domain.ArchiveEntry{
-		{JobID: 20, Submission: domain.Submission{UserID: 7, ChatID: 9, ReceivedAt: time.Date(2024, 3, 8, 12, 0, 0, 0, newYork), URLs: []string{"https://submitted.example/"}}, Result: domain.Result{Analysis: domain.Analysis{Category: "Z", Title: "Second", Overview: "overview Z", Evaluation: []domain.Claim{{Text: "evaluation Z"}}}, Sources: []domain.Source{{RequestedURL: "https://source.example/requested", URL: "https://source.example/final", Status: "error", Truncated: true, Content: "secret full source text"}, {Status: "incomplete", Truncated: true, Content: "partial source"}, {Status: "supplied", Content: "forwarded discussion"}}}},
-		{JobID: 10, Submission: domain.Submission{UserID: 7, ReceivedAt: time.Date(2024, 3, 5, 12, 0, 0, 0, newYork)}, Result: domain.Result{Analysis: domain.Analysis{Category: "AI", Title: "First", Overview: "overview AI", Evaluation: []domain.Claim{{Text: "evaluation AI"}}}, Sources: []domain.Source{{Title: "Source", URL: "https://source.example/ai", Status: "ok", Content: "readable article"}}}},
-		{JobID: 30, Submission: domain.Submission{UserID: 7, ReceivedAt: periodEnd}},
-		{JobID: 31, Submission: domain.Submission{UserID: 8, ReceivedAt: periodStart}},
-	}
-	report := Build(7, periodStart, periodEnd, now, entries, 4, 1, 1)
-	if len(report.Entries) != 2 || report.Entries[0].JobID != 10 || report.Entries[1].JobID != 20 {
-		t.Fatalf("Build() kept wrong entries/order: %+v", report.Entries)
-	}
-	text := Render(report, "America/New_York")
-	aiIndex, zIndex := strings.Index(text, "【AI】"), strings.Index(text, "【Z】")
-	if aiIndex < 0 || zIndex < 0 || aiIndex > zIndex || !strings.HasPrefix(text, "阅读汇总（用户 7）\n") || !strings.Contains(text, "覆盖区间：从 2024-03-04 00:00（含）至 2024-03-11 00:00（不含）（America/New_York）；按收录时间统计，不按文章发布日期。") || strings.Contains(text, "每周阅读汇总") || strings.Contains(text, "本周") || !strings.Contains(text, "任务 #10") || !strings.Contains(text, "overview AI") || !strings.Contains(text, "evaluation Z") || !strings.Contains(text, "https://submitted.example/") || !strings.Contains(text, "https://source.example/ai") || !strings.Contains(text, "https://source.example/requested") || !strings.Contains(text, "https://source.example/final") || !strings.Contains(text, "来源读取失败 1 个；正文截断 2 个") || !strings.Contains(text, "原文正文已保存在本地归档") || !strings.Contains(text, "本次汇总只列摘要与链接") || !strings.Contains(text, "摘要与评价由 AI 协助整理") {
-		t.Fatalf("Render() omitted or misordered report content:\n%s", text)
-	}
-	if strings.Contains(text, "secret full source text") || !strings.Contains(text, "提交 4 条；已完成分析 2 条；待处理 1 条；失败 1 条") {
-		t.Fatalf("Render() exposed body or miscounted articles:\n%s", text)
-	}
-	empty := Render(Build(7, periodStart, periodEnd, now, nil, 0, 0, 0), "UTC")
-	if !strings.Contains(empty, "本周期没有已完成分析") || !strings.Contains(empty, "没有可汇总的新信息") {
-		t.Fatalf("empty report not explicit: %s", empty)
-	}
 }

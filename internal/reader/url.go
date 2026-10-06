@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"golang.org/x/net/idna"
+
+	"kagari/internal/domain"
 )
 
 var urlPattern = regexp.MustCompile(`(?i)\bhttps?://[^\s<>"']+`)
@@ -85,8 +87,36 @@ func ExtractURLs(text string) []string {
 	return urls
 }
 
+func appendTextURLs(links []domain.Link, text, context string, limit int, excludeX bool, seen map[string]struct{}) ([]domain.Link, bool) {
+	for _, target := range ExtractURLs(text) {
+		if excludeX {
+			u, _ := url.Parse(target)
+			if isXOrTwitterHost(u.Hostname()) {
+				continue
+			}
+		}
+		var capped bool
+		links, capped = appendLink(links, seen, target, target, context, limit)
+		if capped {
+			return links, true
+		}
+	}
+	return links, false
+}
+
+func appendLink(links []domain.Link, seen map[string]struct{}, target, text, context string, limit int) ([]domain.Link, bool) {
+	if _, ok := seen[target]; ok {
+		return links, false
+	}
+	if len(links) >= limit {
+		return links, true
+	}
+	seen[target] = struct{}{}
+	return append(links, domain.Link{URL: target, Text: excerpt(text, 200), Context: excerpt(context, 400)}), false
+}
+
 func trimURLPunctuation(s string) string {
-	s = strings.TrimRight(s, ".,;:!?'”’")
+	s = strings.TrimRight(s, ".,;:!?'”’，。；：！？、")
 	for _, pair := range [][2]byte{{')', '('}, {']', '['}, {'}', '{'}} {
 		for strings.HasSuffix(s, string(pair[0])) && strings.Count(s, string(pair[0])) > strings.Count(s, string(pair[1])) {
 			s = strings.TrimSuffix(s, string(pair[0]))

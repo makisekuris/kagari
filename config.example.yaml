@@ -25,23 +25,17 @@ reader:
   max_links: 40
   cache_ttl: 24h
   allowed_non_public_cidrs: [] # e.g. [198.18.0.0/16] for a TUN fake-IP range.
-  browser_fallback:
-    enabled: false # Not implemented; true is rejected explicitly.
-    engine: chromium # chromium | firefox | webkit; Chromium does not require Google Chrome.
-    mode: launch # launch locally | connect via Playwright WebSocket | cdp (Chromium only).
-    executable_path: "" # launch only; empty selects the Playwright-managed browser binary.
-    endpoint: "" # connect: ws/wss; cdp: http/https/ws/wss. Use env if it contains credentials.
-    headless: true # launch only; remote browser startup is controlled by its server.
+
+browser:
+  enabled: false # Exposes browse_url to the model when enabled.
+  command: npx # Playwright MCP executable; no shell is used.
+  args: [-y, "@playwright/mcp@0.0.82", --headless, --isolated, --codegen, none]
 
 agent:
   max_sources: 6
-  max_supplemental: 2
-  max_depth: 2
   max_iterations: 10
   timeout: 3m
   streaming: false # true sends stream=true and logs SSE chunks immediately at info level.
-  # These are model-facing category labels; customize them to change the taxonomy. / 这些类别名会作为模型输出标签；按需调整即可。
-  categories: [AI, 工程, 前端, 产品, 其他]
 
 weekly:
   enabled: false # Enable after choosing your delivery target and time.

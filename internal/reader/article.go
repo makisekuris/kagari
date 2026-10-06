@@ -121,6 +121,9 @@ func extractLinks(root *html.Node, base *url.URL, limit int) ([]domain.Link, boo
 		if n == nil || truncated {
 			return
 		}
+		if n.Type == html.ElementNode && (n.Data == "script" || n.Data == "style") {
+			return
+		}
 		if n.Type == html.ElementNode && n.Data == "a" {
 			href := ""
 			for _, attr := range n.Attr {
@@ -131,15 +134,16 @@ func extractLinks(root *html.Node, base *url.URL, limit int) ([]domain.Link, boo
 			}
 			if href != "" {
 				if target, err := resolveLink(base, href); err == nil {
-					if _, ok := seen[target]; !ok {
-						if len(links) >= limit {
-							truncated = true
-							return
-						}
-						seen[target] = struct{}{}
-						links = append(links, domain.Link{URL: target, Text: excerpt(nodeText(n), 200), Context: excerpt(paragraphContext(n), 400)})
-					}
+					links, truncated = appendLink(links, seen, target, nodeText(n), paragraphContext(n), limit)
 				}
+			}
+			return
+		}
+		if n.Type == html.TextNode {
+			context := paragraphContext(n)
+			links, truncated = appendTextURLs(links, n.Data, context, limit, false, seen)
+			if truncated {
+				return
 			}
 		}
 		for child := n.FirstChild; child != nil; child = child.NextSibling {

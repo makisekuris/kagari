@@ -1,85 +1,12 @@
 package render
 
 import (
-	"fmt"
 	"strings"
-	"unicode"
 
 	"kagari/internal/domain"
 )
 
-func Analysis(result domain.Result) string {
-	a := result.Analysis
-	var b strings.Builder
-	for _, tag := range a.Tags {
-		tag = strings.Map(func(r rune) rune {
-			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
-				return r
-			}
-			return -1
-		}, tag)
-		if tag != "" {
-			fmt.Fprintf(&b, "#%s ", tag)
-		}
-	}
-	fmt.Fprintf(&b, "\n%s\n%s\n", a.Title, a.Overview)
-	refs := map[string]int{}
-	for i, s := range result.Sources {
-		refs[s.ID] = i + 1
-	}
-	headings := domain.AnalysisHeadings{
-		Summary:       "AI 摘要",
-		Discussion:    "讨论者观点",
-		Evaluation:    "Agent 评价",
-		Uncertainties: "未确认与限制",
-		Sources:       "原文与来源",
-	}
-	if a.Headings != nil {
-		headings = *a.Headings
-	}
-	for _, group := range []struct {
-		Title  string
-		Claims []domain.Claim
-	}{{headings.Summary, a.Summary}, {headings.Discussion, a.Discussion}, {headings.Evaluation, a.Evaluation}} {
-		if len(group.Claims) == 0 {
-			continue
-		}
-		fmt.Fprintf(&b, "\n%s：\n", strings.TrimRight(strings.TrimSpace(group.Title), ":："))
-		for _, c := range group.Claims {
-			fmt.Fprintf(&b, "• %s", c.Text)
-			for _, id := range c.SourceIDs {
-				fmt.Fprintf(&b, " [%d]", refs[id])
-			}
-			b.WriteByte('\n')
-		}
-	}
-	if len(a.Uncertainties) > 0 {
-		fmt.Fprintf(&b, "\n%s：\n", strings.TrimRight(strings.TrimSpace(headings.Uncertainties), ":："))
-		for _, u := range a.Uncertainties {
-			fmt.Fprintf(&b, "• %s\n", u)
-		}
-	}
-	fmt.Fprintf(&b, "\n%s：\n", strings.TrimRight(strings.TrimSpace(headings.Sources), ":："))
-	for i, s := range result.Sources {
-		title := s.Title
-		if title == "" {
-			title = s.Kind
-		}
-		fmt.Fprintf(&b, "[%d] %s", i+1, title)
-		if s.Author != "" {
-			fmt.Fprintf(&b, " · %s", s.Author)
-		}
-		if s.URL != "" {
-			fmt.Fprintf(&b, "\n%s", s.URL)
-		}
-		if !((s.Status == "ok") || (s.Status == "supplied")) {
-			fmt.Fprintf(&b, "（%s）", s.Status)
-		}
-		b.WriteByte('\n')
-	}
-	b.WriteString("\n由 AI 协助摘要与评价，重要判断请核对原文；提取的正文、来源与追读记录已保存到本地档案。")
-	return strings.TrimSpace(b.String())
-}
+func Analysis(result domain.Result) string { return strings.TrimSpace(result.Body) }
 
 // Telegram measures message length in UTF-16 units. Plain text avoids markup
 // escaping and broken entities when a long report is split.

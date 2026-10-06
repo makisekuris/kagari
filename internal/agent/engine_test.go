@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,222 +20,237 @@ type testPersona string
 
 func (p testPersona) Prompt() string { return string(p) }
 
-func TestResponsesToolRoundTrip(t *testing.T) {
-	var calls atomic.Int32
-	var serializedInput string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/responses" {
-			t.Errorf("path %s", r.URL.Path)
-		}
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Error(err)
-		}
-		format := body["text"].(map[string]any)["format"].(map[string]any)
-		if format["type"] != "json_schema" || format["strict"] != true {
-			t.Errorf("missing strict format: %v", format)
-		}
-		properties := format["schema"].(map[string]any)["properties"].(map[string]any)
-		if _, ok := properties["relevance"]; ok {
-			t.Error("new analysis schema still requests relevance")
-		}
-		headings, ok := properties["headings"].(map[string]any)
-		if !ok {
-			t.Error("analysis schema is missing model-generated headings")
-			return
-		}
-		for _, name := range []string{"summary", "discussion", "evaluation", "uncertainties", "sources"} {
-			field := headings["properties"].(map[string]any)[name].(map[string]any)
-			if field["type"] != "string" || field["enum"] != nil || field["const"] != nil {
-				t.Errorf("heading %s must allow model-generated text: %v", name, field)
-			}
-		}
-		if body["store"] != false {
-			t.Error("remote storage should be disabled")
-		}
-		var output []any
-		if calls.Add(1) == 1 {
-			output = []any{map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_article", "name": "read_source", "arguments": `{"url":"https://example.org/article","parent_source_id":"s_root","question":"核对作者原文","role":"primary"}`}}
-		} else {
-			input, _ := json.Marshal(body["input"])
-			serializedInput = string(input)
-			found := false
-			for _, item := range body["input"].([]any) {
-				obj := item.(map[string]any)
-				if obj["type"] == "function_call_output" && obj["call_id"] == "call_article" {
-					found = true
-				}
-			}
-			if !found {
-				t.Error("function output missing its call_id")
-			}
-			a := domain.Analysis{Title: "标题", Overview: "原文要点", Summary: []domain.Claim{{Text: "有依据的事实", SourceIDs: []string{"s_article"}}}, Discussion: []domain.Claim{}, Evaluation: []domain.Claim{}, Category: "工程", Tags: []string{"Go"}, Uncertainties: []string{}}
-			a.Headings = &domain.AnalysisHeadings{Summary: "相关简报喵", Discussion: "讨论里的声音喵", Evaluation: "taffy锐评", Uncertainties: "待查线索喵", Sources: "原文与线索喵"}
-			raw, _ := json.Marshal(a)
-			output = []any{map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": string(raw), "annotations": []any{}}}}}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_test", "object": "response", "created_at": 1, "status": "completed", "model": "test", "output": output, "usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}})
-	}))
-	defer server.Close()
+func engineConfig(t *testing.T, endpoint string) config.Config {
+	t.Helper()
 	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	question := strings.Repeat("question-only-instruction ", 4)
-	notes := strings.Repeat("notes-only-context ", 4)
-	profile := strings.Repeat("profile-only-preference ", 4)
-	forwarded := "第三方讨论内容 https://example.org/discussion"
-	cfg.ProfilePath = t.TempDir() + "/profile.md"
+	cfg.Model.BaseURL, cfg.Model.APIKey, cfg.Model.Name = endpoint+"/v1", "test-key", "test-model"
+	cfg.ProfilePath = t.TempDir() + "/missing-profile"
+	cfg.Agent.MaxSources = 8
+	cfg.Agent.MaxIterations = 8
+	cfg.Agent.Timeout = 5 * time.Second
+	return cfg
+}
+
+func responseTool(name, url, callID string) []any {
+	args, _ := json.Marshal(readRequest{URL: url})
+	return []any{map[string]any{"type": "function_call", "id": "fc_" + callID, "call_id": callID, "name": name, "arguments": string(args)}}
+}
+
+func responseText(text string) []any {
+	return []any{map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text}}}}
+}
+
+func writeResponse(w http.ResponseWriter, call int, output []any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": "resp", "object": "response", "status": "completed", "model": "fixture", "output": output,
+		"usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+	})
+}
+
+func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T) {
+	const aURL = "https://example.org/a"
+	const bURL = "https://example.org/b"
+	const cURL = "https://example.org/c"
+	var calls atomic.Int32
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		serialized, _ := json.Marshal(body)
+		requests = append(requests, string(serialized))
+		if body["text"] != nil {
+			t.Errorf("final JSON format unexpectedly constrained: %v", body["text"])
+		}
+		call := int(calls.Add(1))
+		if call > 1 {
+			input, _ := json.Marshal(body["input"])
+			if !strings.Contains(string(input), "function_call_output") {
+				t.Errorf("tool output missing from turn %d", call)
+			}
+		}
+		switch call {
+		case 1:
+			writeResponse(w, call, responseTool("read_url", aURL, "read-a"))
+		case 2:
+			input, _ := json.Marshal(body["input"])
+			if !strings.Contains(string(input), "HTTP 403") {
+				t.Errorf("failed read was not returned to the model: %s", input)
+			}
+			writeResponse(w, call, responseTool("read_url", bURL, "read-b"))
+		case 3:
+			input, _ := json.Marshal(body["input"])
+			if !strings.Contains(string(input), "B has a link to C") {
+				t.Errorf("usable source was not returned to the model: %s", input)
+			}
+			writeResponse(w, call, responseTool("read_url", cURL, "read-c"))
+		case 4:
+			writeResponse(w, call, responseText("## Answer\nB and C confirm the result."))
+		default:
+			t.Errorf("unexpected model call %d", call)
+			writeResponse(w, call, responseText("unexpected"))
+		}
+	}))
+	defer server.Close()
+
+	cfg := engineConfig(t, server.URL)
+	profile := "Use concise English."
 	if err := os.WriteFile(cfg.ProfilePath, []byte(profile), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Model.BaseURL = server.URL + "/v1"
-	cfg.Model.APIKey = "test"
-	cfg.Model.Name = "test"
-	reads := 0
-	e, err := New(context.Background(), cfg, func(_ context.Context, u string) (domain.Source, error) {
-		reads++
-		if u == "https://example.org/discussion" {
-			return domain.Source{ID: "s_root", URL: u, RequestedURL: u, Content: "讨论引用了作者原文", Status: "ok", Links: []domain.Link{{URL: "https://example.org/article"}}}, nil
+	readCalls := 0
+	engine, err := New(context.Background(), cfg, func(_ context.Context, u string) (domain.Source, error) {
+		readCalls++
+		switch u {
+		case aURL:
+			return domain.Source{ID: "a", URL: u, RequestedURL: u, Status: "restricted", Reason: "HTTP 403"}, errors.New("forbidden")
+		case bURL:
+			return domain.Source{ID: "b", URL: u, RequestedURL: u, Status: "ok", Content: "B has a link to C", Links: []domain.Link{{URL: cURL, Text: "C"}}}, nil
+		case cURL:
+			return domain.Source{ID: "c", URL: u, RequestedURL: u, Status: "ok", Content: "C confirms the random value 4711"}, nil
+		default:
+			return domain.Source{}, errors.New("unexpected URL")
 		}
-		return domain.Source{ID: "s_article", URL: u, RequestedURL: u, Content: "原文的事实说明", Status: "ok"}, nil
-	}, nil, testPersona("injected-analysis-persona"))
+	}, nil, testPersona("persona fixture"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := e.Prepare(domain.Submission{Text: question, Note: notes, ForwardedText: forwarded})
+	question := "What does the source say? QUESTION_TOKEN"
+	submission, err := engine.Prepare(domain.Submission{Text: question, Note: "NOTE_TOKEN", ForwardedText: "FORWARDED_TOKEN"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := e.Analyze(context.Background(), s)
+	result, err := engine.Analyze(context.Background(), submission)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reads != 2 || len(result.Readings) != 2 || result.Readings[1].ParentID != "s_root" {
-		t.Fatalf("reading graph: %+v", result)
+	if calls.Load() != 4 || readCalls != 3 {
+		t.Fatalf("calls=%d reads=%d", calls.Load(), readCalls)
 	}
-	if result.Usage.TotalTokens != 36 {
-		t.Errorf("usage=%+v", result.Usage)
+	if result.Body != "## Answer\nB and C confirm the result." {
+		t.Fatalf("body=%q", result.Body)
 	}
-	if calls.Load() != 2 {
-		t.Errorf("requests=%d", calls.Load())
+	if !result.UsageReported || result.Usage.TotalTokens != 72 || result.AnalysisVersion != AnalysisVersion {
+		t.Fatalf("metadata=%+v", result)
 	}
-	for _, value := range []string{question, notes, profile, "injected-analysis-persona"} {
-		if strings.Count(serializedInput, value) != 1 {
-			t.Errorf("model input should carry user guidance once, count=%d", strings.Count(serializedInput, value))
+	if len(result.Sources) != 4 || result.Sources[1].Status != "restricted" || len(result.Readings) != 3 {
+		t.Fatalf("partial failure or readings were lost: %+v", result)
+	}
+	if result.Readings[0].URL != aURL || result.Readings[2].URL != cURL {
+		t.Fatalf("unexpected readings: %+v", result.Readings)
+	}
+	firstInput := requests[0]
+	for _, want := range []string{question, "NOTE_TOKEN", "FORWARDED_TOKEN", profile, "persona fixture", "read_url"} {
+		if !strings.Contains(firstInput, want) {
+			t.Errorf("initial request omitted %q", want)
 		}
 	}
-	if strings.Contains(serializedInput, "永雏塔菲") || strings.Contains(serializedInput, "taffy") {
-		t.Fatal("analysis request retained a hardcoded persona")
-	}
-	for _, field := range []string{`\"instruction\"`, `\"notes\"`, `\"profile\"`, `\"sources\"`} {
-		if !strings.Contains(serializedInput, field) {
-			t.Errorf("model input missing explicit field %s", field)
-		}
-	}
-	if result.AnalysisVersion != AnalysisVersion {
-		t.Errorf("analysis version = %q, want %q", result.AnalysisVersion, AnalysisVersion)
-	}
-	if result.Analysis.Headings == nil || result.Analysis.Headings.Summary != "相关简报喵" {
-		t.Fatalf("model-generated headings were lost: %+v", result.Analysis.Headings)
-	}
-	foundForwarded := false
-	for _, source := range result.Sources {
-		if strings.Contains(source.Content, question) || strings.Contains(source.Content, notes) || strings.Contains(source.Content, profile) {
-			t.Fatalf("user guidance became source evidence: %+v", source)
-		}
-		if source.ReadMethod == "forwarded_text" {
-			foundForwarded = source.Status == "supplied" && source.Content == forwarded
-		}
-	}
-	if !foundForwarded {
-		t.Fatalf("forwarded text was not preserved as supplied source: %+v", result.Sources)
+	if strings.Contains(firstInput, "categories") || strings.Contains(firstInput, "claim_ids") {
+		t.Fatalf("input retained final schema contract: %s", firstInput)
 	}
 }
 
-func TestReadingPolicyAndEvidenceValidation(t *testing.T) {
-	cfg, _ := config.Load("")
+func TestBrowserIsOpenedLazilyAndCanRetrySameURLWithHTTP(t *testing.T) {
+	const target = "https://example.org/page"
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		switch calls.Add(1) {
+		case 1:
+			tools, _ := body["tools"].([]any)
+			names := make(map[string]bool)
+			for _, raw := range tools {
+				definition, _ := raw.(map[string]any)
+				name, _ := definition["name"].(string)
+				names[name] = true
+			}
+			if !names["read_url"] || !names["browse_url"] {
+				t.Errorf("both HTTP and browser tools must be available: %v", names)
+			}
+			writeResponse(w, 1, responseTool("browse_url", target, "browse"))
+		case 2:
+			writeResponse(w, 2, responseTool("read_url", target, "http"))
+		case 3:
+			writeResponse(w, 3, responseText("The browser was unavailable; HTTP supplied the page."))
+		default:
+			t.Errorf("unexpected request")
+			writeResponse(w, 4, responseText("unexpected"))
+		}
+	}))
+	defer server.Close()
+	cfg := engineConfig(t, server.URL)
 	cfg.Agent.MaxSources = 2
-	cfg.Agent.MaxSupplemental = 1
-	cfg.Agent.MaxDepth = 1
-	e := &Engine{Config: cfg, Read: func(_ context.Context, u string) (domain.Source, error) {
-		return domain.Source{ID: u, URL: u, Content: "正文", Status: "ok", Links: []domain.Link{{URL: "https://example.org/child"}, {URL: "https://example.org/other"}}}, nil
-	}}
-	s := newSession(e)
-	s.allowed["https://example.org/root"] = true
-	root, err := s.read(context.Background(), readRequest{URL: "https://example.org/root", Role: "entry"})
+	engine, err := New(context.Background(), cfg, func(_ context.Context, u string) (domain.Source, error) {
+		return domain.Source{ID: "http-page", URL: u, RequestedURL: u, Status: "ok", Content: "read with HTTP"}, nil
+	}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.read(context.Background(), readRequest{URL: "https://invented.org/", ParentID: root.ID, Role: "primary", Question: "原文"}); err == nil {
-		t.Fatal("accepted invented URL")
+	opened := 0
+	engine.OpenBrowser = func(context.Context) (func(context.Context, string) (domain.Source, error), func(), error) {
+		opened++
+		return nil, nil, errors.New("browser startup failed")
 	}
-	child, err := s.read(context.Background(), readRequest{URL: "https://example.org/child", ParentID: root.ID, Role: "context", Question: "补充背景"})
+	submission, err := engine.Prepare(domain.Submission{Text: "Read this page"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.read(context.Background(), readRequest{URL: "https://example.org/other", ParentID: root.ID, Role: "context", Question: "再读"}); err == nil {
-		t.Fatal("budget not enforced")
+	result, err := engine.Analyze(context.Background(), submission)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := s.read(context.Background(), readRequest{URL: "https://example.org/other", ParentID: child.ID, Role: "primary", Question: "再读"}); err == nil {
-		t.Fatal("depth not enforced")
+	if opened != 1 || calls.Load() != 3 {
+		t.Fatalf("browser opens=%d model calls=%d", opened, calls.Load())
 	}
-	a := domain.Analysis{Title: "标题", Overview: "概述", Category: "工程", Summary: []domain.Claim{{Text: "事实", SourceIDs: []string{"never-read"}}}}
-	a.Headings = &domain.AnalysisHeadings{Summary: "事实", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"}
-	if err := validate(a, s.sources, cfg.Agent.Categories); err == nil || !strings.Contains(err.Error(), "unread source") {
-		t.Fatal("unread source accepted")
+	if result.Body == "" || len(result.Readings) != 2 || result.Readings[0].Backend != browserBackend || result.Readings[1].Backend != httpBackend {
+		t.Fatalf("same-URL retry was not recorded: %+v", result)
 	}
-	if err := decode(`{"title":"x","surprise":true}`, &a); err == nil {
-		t.Fatal("unknown field accepted")
+	if len(result.Sources) != 2 || result.Sources[0].Status != "failed" || !result.Sources[1].Usable() {
+		t.Fatalf("browser failure was not preserved: %+v", result.Sources)
 	}
-	if err := decode(`{} {}`, &a); err == nil {
-		t.Fatal("trailing JSON accepted")
+}
+
+func TestPrepareAllowsTextOnlyAndKeepsCacheIdentityScoped(t *testing.T) {
+	engine := &Engine{Config: config.Config{Agent: config.Agent{MaxSources: 4}}}
+	if _, err := engine.Prepare(domain.Submission{}); err == nil {
+		t.Fatal("empty submission was accepted")
 	}
-	// Stable cache identity ignores receipt time but changes with user and reading preferences.
-	sub := domain.Submission{UserID: 1, URLs: []string{"https://example.org/root"}, ReceivedAt: time.Now()}
-	first, _ := e.Prepare(sub)
+	sub := domain.Submission{UserID: 1, Text: "Question", ReceivedAt: time.Now()}
+	first, err := engine.Prepare(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sub.ReceivedAt = sub.ReceivedAt.Add(time.Hour)
-	same, _ := e.Prepare(sub)
-	if first.CacheKey != same.CacheKey {
-		t.Fatal("receipt timestamp changed cache identity")
+	same, err := engine.Prepare(sub)
+	if err != nil || first.CacheKey != same.CacheKey {
+		t.Fatalf("receipt time changed cache key: %v", err)
 	}
 	sub.UserID = 2
-	other, _ := e.Prepare(sub)
+	other, _ := engine.Prepare(sub)
 	if first.CacheKey == other.CacheKey {
-		t.Fatal("cross-user identity reused")
+		t.Fatal("cross-user cache identity reused")
 	}
 	sub.UserID = 1
-	sub.ForwardedText = "third-party discussion"
-	forwarded, _ := e.Prepare(sub)
-	if first.CacheKey == forwarded.CacheKey {
-		t.Fatal("forwarded source identity did not change cache key")
+	sub.Note = "different preference"
+	other, _ = engine.Prepare(sub)
+	if first.CacheKey == other.CacheKey {
+		t.Fatal("different user guidance reused cache identity")
 	}
-	var legacy domain.Analysis
-	if err := decode(`{"relevance":"legacy preference"}`, &legacy); err != nil || legacy.Relevance != "legacy preference" {
-		t.Fatalf("legacy relevance decode = (%q, %v)", legacy.Relevance, err)
-	}
-}
-
-func TestAnalysisHeadingsValidation(t *testing.T) {
-	a := domain.Analysis{
-		Headings: &domain.AnalysisHeadings{Summary: "任意摘要标题喵", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"},
-		Title:    "文章", Overview: "事实", Category: "工程",
-		Summary: []domain.Claim{{Text: "事实", SourceIDs: []string{"source"}}},
-	}
-	sources := []domain.Source{{ID: "source", Content: "事实", Status: "ok"}}
-	if err := validate(a, sources, []string{"工程"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, heading := range []string{"", "  ", "：", "第一行\n第二行", "第一行\r第二行", strings.Repeat("长", 81)} {
-		a.Headings.Summary = heading
-		if err := validate(a, sources, []string{"工程"}); err == nil {
-			t.Fatalf("invalid heading %q was accepted", heading)
-		}
-	}
-	a.Headings = nil
-	if err := validate(a, sources, []string{"工程"}); err == nil {
-		t.Fatal("new model result without headings was accepted")
+	sub.Note = ""
+	engine.Config.Browser.Enabled = true
+	other, _ = engine.Prepare(sub)
+	if first.CacheKey == other.CacheKey {
+		t.Fatal("browser configuration did not change cache identity")
 	}
 }
 
@@ -254,7 +270,7 @@ func TestPersonaIsFrozenAndChangesCacheIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub := domain.Submission{UserID: 7, URLs: []string{"https://example.org/article"}}
+	sub := domain.Submission{UserID: 7, Text: "question"}
 	before, err := first.Prepare(sub)
 	if err != nil {
 		t.Fatal(err)
@@ -277,5 +293,24 @@ func TestPersonaIsFrozenAndChangesCacheIdentity(t *testing.T) {
 	}
 	if changed.CacheKey == before.CacheKey || !strings.Contains(second.DigestPrompt(), "second-persona") {
 		t.Fatal("replacing persona did not change prompts and cache identity")
+	}
+}
+
+func TestEmptyModelAnswerFailsSafely(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeResponse(w, 1, responseText("  \n "))
+	}))
+	defer server.Close()
+	engine, err := New(context.Background(), engineConfig(t, server.URL), nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submission, err := engine.Prepare(domain.Submission{Text: "Question"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Analyze(context.Background(), submission)
+	if err == nil || err.Error() != "empty analysis output" {
+		t.Fatalf("empty answer error=%v", err)
 	}
 }

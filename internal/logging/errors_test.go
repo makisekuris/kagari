@@ -40,19 +40,13 @@ func TestErrorFieldsAreUsefulAndDoNotExposeRawErrors(t *testing.T) {
 		{"unreadable", errors.New(noReadableContent), "no readable content"},
 		{"incomplete", errors.New("model response incomplete"), "model response incomplete"},
 		{"empty", io.EOF, "empty model response"},
+		{"empty_analysis", errors.New("empty analysis output"), "empty analysis output"},
+		{"page_budget", errors.New("page budget exhausted"), "page budget exhausted"},
 		{"unexpected_eof", fmt.Errorf("wrapped: %w", io.ErrUnexpectedEOF), "model stream ended unexpectedly"},
 		{"network_unexpected_eof", &net.OpError{Op: "read", Net: "tcp", Err: io.ErrUnexpectedEOF}, "model stream ended unexpectedly"},
-		{"citation", errors.New(`claim cites unread source "fixture_secret_body"`), "claim cites unread source"},
-		{"missing_required_fields", errors.New("analysis lacks title, overview or summary, or has too many tags"), "analysis lacks title, overview or summary, or has too many tags"},
-		{"category", errors.New("analysis returned an unknown category"), "analysis returned an unknown category"},
-		{"too_many_claims", errors.New("too many claims"), "too many claims"},
-		{"claim_lacks_fields", errors.New("claim lacks text or sources"), "claim lacks text or sources"},
 		{"response_failed", errors.New("model response failed"), "model response failed"},
 		{"sse", fmt.Errorf("wrapped: %w", errors.New("received error event: code=fixture_secret_body message=secret")), "model stream reported an error"},
-		{"read_role", errors.New("role must be primary, evidence or context"), "role must be primary, evidence or context"},
-		{"read_budget", errors.New("reading depth budget exhausted"), "reading depth budget exhausted"},
 		{"digest_limit", errors.New("digest input exceeds weekly.max_input_chars (120000)"), "digest input exceeds weekly.max_input_chars"},
-		{"digest_citation", errors.New(`citation (7, "fixture_secret_body") is not a usable input source`), "weekly review failed validation"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fields := ErrorFields(tc.err)

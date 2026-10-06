@@ -2,6 +2,7 @@ package reader
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -67,5 +68,65 @@ func TestReadXStatusHandlesUnavailableAndEmptyPosts(t *testing.T) {
 	source, err := xFixtureReader(t, http.StatusOK, emptyPost).Read(context.Background(), "https://x.com/jack/status/20")
 	if err == nil || source.Status != statusIncomplete {
 		t.Fatalf("empty post: source status=%q err=%v", source.Status, err)
+	}
+}
+
+func TestReadXAttachedShortLink(t *testing.T) {
+	for _, target := range []string{"https://example.test/article", "http://127.0.0.1/admin"} {
+		t.Run(target, func(t *testing.T) {
+			var requests []string
+			r := newReaderWithTransport(Options{}, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests = append(requests, req.URL.String())
+				switch req.URL.Host {
+				case "publish.x.com":
+					return response(req, http.StatusOK, "application/json", xOEmbedFixture), nil
+				case "t.co":
+					res := response(req, http.StatusFound, "text/html", "")
+					res.Header.Set("Location", target)
+					return res, nil
+				case "example.test":
+					return response(req, http.StatusOK, "text/html", `<html><head><title>Linked report</title></head><body><article><p>The attached report confirms that the bridge reopened after inspection.</p></article></body></html>`), nil
+				default:
+					t.Fatalf("unexpected request: %s", req.URL)
+					return nil, errors.New("unexpected request")
+				}
+			}))
+			post, err := r.Read(context.Background(), "https://x.com/jack/status/20")
+			if err != nil || len(post.Links) != 1 {
+				t.Fatalf("post links = %+v, err = %v", post.Links, err)
+			}
+			linked, err := r.Read(context.Background(), post.Links[0].URL)
+			if target == "http://127.0.0.1/admin" {
+				if !errors.Is(err, errUnsafeTarget) || linked.Status != statusRestricted || len(requests) != 2 {
+					t.Fatalf("unsafe attached redirect: source=%+v err=%v requests=%v", linked, err, requests)
+				}
+				return
+			}
+			if err != nil || linked.Status != statusOK || linked.RequestedURL != "https://t.co/abc" || linked.URL != target || linked.ID != sourceID(target) || !strings.Contains(linked.Content, "bridge reopened") || len(requests) != 3 {
+				t.Fatalf("attached article: source=%+v err=%v requests=%v", linked, err, requests)
+			}
+		})
+	}
+}
+
+func TestReadXFindsTextURLsOnlyInVerifiedParagraph(t *testing.T) {
+	fixture := strings.Replace(xOEmbedFixture, `here</a></p>`, `https://display.example/item</a>, then https://article.example/report. Also https://twitter.com/jack/status/21 <script>https://script.example/skip</script><style>https://style.example/skip</style></p>`, 1)
+	source, err := xFixtureReader(t, http.StatusOK, fixture).Read(context.Background(), "https://x.com/jack/status/20")
+	if err != nil || source.Status != statusOK || len(source.Links) != 2 {
+		t.Fatalf("X text links: source=%#v err=%v", source, err)
+	}
+	if source.Links[0].URL != "https://t.co/abc" || source.Links[1].URL != "https://article.example/report" || source.Links[1].Context != source.Content {
+		t.Fatalf("X text links/context = %#v", source.Links)
+	}
+}
+
+func TestReadXTextLinksUseAnchorLinkLimit(t *testing.T) {
+	fixture := strings.Replace(xOEmbedFixture, `here</a></p>`, `here</a> https://article.example/report</p>`, 1)
+	r := newReaderWithTransport(Options{MaxLinks: 1}, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return response(req, http.StatusOK, "application/json", fixture), nil
+	}))
+	source, err := r.Read(context.Background(), "https://x.com/jack/status/20")
+	if err == nil || source.Status != statusIncomplete || !source.Truncated || len(source.Links) != 1 || source.Links[0].URL != "https://t.co/abc" {
+		t.Fatalf("X text URL cap: source=%#v err=%v", source, err)
 	}
 }

@@ -29,7 +29,7 @@ func TestPublicationFansOutWithoutReanalysisAndFailureIsIsolated(t *testing.T) {
 	defer s.Close()
 	sub := domain.Submission{UserID: 7, ChatID: 7, CacheKey: "shared"}
 	payload, _ := json.Marshal(sub)
-	result := domain.Result{AnalysisVersion: agent.AnalysisVersion, CreatedAt: time.Now(), Analysis: domain.Analysis{Title: "文章", Overview: strings.Repeat("正文", 2000)}}
+	result := domain.Result{AnalysisVersion: agent.AnalysisVersion, CreatedAt: time.Now(), Body: strings.Repeat("正文", 2000)}
 	raw, _ := json.Marshal(result)
 	seed, _, err := s.Enqueue(ctx, "analyze", "cached", payload, 0)
 	if err != nil {

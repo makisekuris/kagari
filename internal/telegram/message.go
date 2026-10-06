@@ -76,8 +76,8 @@ func (c *Client) jobForUpdate(update *models.Update) (kind, key string, payload 
 		submission.Text = ""
 	}
 	prepared, prepareErr := c.prepare(submission)
-	if prepareErr != nil || len(prepared.URLs) == 0 {
-		payload, err = json.Marshal(domain.Command{UserID: message.From.ID, ChatID: message.Chat.ID, Text: "请发送包含链接的消息，可附上分析问题或备注。"})
+	if prepareErr != nil || (len(prepared.URLs) == 0 && strings.TrimSpace(prepared.Text+prepared.ForwardedText) == "") {
+		payload, err = json.Marshal(domain.Command{UserID: message.From.ID, ChatID: message.Chat.ID, Text: "请发送问题、转发内容或材料链接。"})
 		return "notice", key, payload, message.Chat.ID, message.Chat.ID, err
 	}
 	// 身份和权限属于提交者；公共目标群只决定结果发到哪里，不能替代 UserID。

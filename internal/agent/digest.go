@@ -4,21 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
 
-	"kagari/internal/digest"
 	"kagari/internal/domain"
 	"kagari/internal/logging"
 )
 
 // GenerateDigest renders the frozen digest snapshot in one tool-free model call.
-func (e *Engine) GenerateDigest(ctx context.Context, input domain.DigestInput) (review domain.DigestReview, usage domain.Usage, err error) {
+func (e *Engine) GenerateDigest(ctx context.Context, input domain.DigestInput) (review string, usage domain.Usage, err error) {
 	started := time.Now()
 	stage := "agent_setup"
 	modelCalled, usageReported := false, false
@@ -43,7 +41,7 @@ func (e *Engine) GenerateDigest(ctx context.Context, input domain.DigestInput) (
 
 	instruction := input.Instruction
 	if instruction == "" {
-		instruction = e.DigestPrompt()
+		return "", usage, fmt.Errorf("digest frozen instruction is required")
 	}
 	a, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name: "weekly_digest", Description: "按输入分析生成周报", Instruction: instruction,
@@ -61,19 +59,15 @@ func (e *Engine) GenerateDigest(ctx context.Context, input domain.DigestInput) (
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[*schema.AgenticMessage]{Agent: a, EnableStreaming: e.Config.Agent.Streaming})
 	stage = "model"
 	modelCalled = true
-	it := runner.Query(ctx, string(userJSON), adk.WithChatModelOptions([]model.Option{agenticopenai.WithResponsesText(digestFormat())}))
+	it := runner.Query(ctx, string(userJSON))
 	output, gotUsage, reported, runErr := e.consumeEvents(it, 1)
 	usage, usageReported = gotUsage, reported
 	if runErr != nil {
 		return review, usage, runErr
 	}
-	stage = "decode_digest"
-	if err := decode(output, &review); err != nil {
-		return review, usage, fmt.Errorf("invalid structured digest: %w", err)
-	}
-	stage = "validate_digest"
-	if err := digest.ValidateReview(input, review); err != nil {
-		return review, usage, err
+	review = strings.TrimSpace(output)
+	if review == "" {
+		return "", usage, fmt.Errorf("empty digest output")
 	}
 	return review, usage, nil
 }

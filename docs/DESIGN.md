@@ -2,74 +2,65 @@
 
 [返回 README](../README.md)
 
-## 系统边界
+## 职责
 
-Kagari 是 Go 单进程应用，使用本地 SQLite 保存提交、任务、分析、来源缓存、周报和各目标的投递状态。读取、模型分析、分发、队列和 Telegram 适配器都在一个进程内协作；CLI 和 Telegram 共用任务处理与存储路径。
+Kagari 使用 Eino TypedChatModelAgent 的模型—工具—模型循环。Typed 约束 Go 消息协议，最终回答是 Markdown；工具参数仍使用 JSON Schema。CLI 与 Telegram 共用 Worker，SQLite 保存任务、正文、来源、读取记录、冻结的周报材料和 outbox。
 
-项目使用 Eino typed agent 和 OpenAI Responses 兼容模型、标准库 HTTP、Readability、Telegram long polling、Viper、Zap 与 `database/sql`/`modernc.org/sqlite`。网页读取覆盖普通 HTTP 页面与公开 X 单帖 oEmbed。当前不支持任意搜索、登录或验证码绕过、付费墙绕过、全文镜像，也不会在网页读取失败后改用浏览器。
-
-## 模块职责
-
-| 模块 | 职责 |
+| 模块 | 负责 |
 | --- | --- |
-| `cmd/kagari` | CLI 命令分发与进程初始化 |
-| `internal/config` | 配置类型、默认值、环境覆盖与启动校验 |
-| `internal/reader` | URL 规范化、安全拨号、网页提取和 X oEmbed |
-| `internal/agent` | 单条分析、周报 Agent、工具调用、提示词与结构化结果校验 |
-| `internal/digest` | 整理周报输入、按 `CacheKey` 去重、检查条目分组与引用、渲染和旧报告兼容 |
-| `internal/store` | SQLite schema、任务队列、归档、缓存、投递 outbox 与维护查询 |
-| `internal/app` | Worker、命令权限、任务重试、投递与周报调度 |
-| `internal/distribution` | 根据渠道和地址生成投递计划、去重目标、调用渠道发送实现及统一发送错误契约 |
-| `internal/telegram` | Bot 客户端、long polling、update offset、消息解析和 Telegram 分发适配器 |
-| `internal/render` | 单条分析报告与 Telegram 消息分段 |
-| `internal/domain` | 提交、来源、分析、任务、投递和周报领域类型 |
+| agent | 问题与偏好输入、提示词、阅读会话、工具循环与模型用量 |
+| reader | HTTP、X oEmbed、正文/链接提取、DNS 固定 IP 校验、浏览器网络代理 |
+| browser | 每任务 Playwright MCP 连接、页面导航和可见内容快照 |
+| digest | 时间范围、材料去重、冻结输入、周报正文回放 |
+| store | schema、事务、队列、owner 范围的归档、缓存和 outbox |
+| app / distribution / telegram | 业务调用、权限、重试、调度、目标投递与消息接入 |
+| render | 正文显示与 UTF-16 消息分段 |
 
-## 单条分析数据流
+## 阅读调用链
 
-1. CLI 或 Telegram 将输入转换为 `Submission`。转发讨论文本作为独立来源保存，提交者的身份和权限仍由 Telegram 用户 ID 确定。
-2. Agent 规范化 URL，并以用户、输入、profile、提示词、模型和分析设置计算分析缓存键；收录时间不参与键的计算。
-3. Reader 读取已提交的链接。Agent 只能通过 `read_source` 追读已发现的链接；会话限制来源数、补读数和深度。
-4. 模型返回严格结构化结果。程序校验必填栏目、分类和来源引用后，才将结果作为成功分析发布。
-5. Worker 将渲染后的文章交给分发层，按入队时保存的渠道和地址生成投递计划。文章只生成一次，各渠道适配器负责分段与发送；结果、分段 outbox 和来源缓存原子写入 SQLite。
-6. 独立 delivery 状态机调用渠道适配器发送。顺序和唯一性按任务、渠道、地址、分段编号确定，一个目标失败不会阻塞其他目标。结果未知的发送不会自动重试，以避免静默重复消息。
+```mermaid
+flowchart LR
+  U[问题 / 文本 / URL] --> P[Prepare 与缓存身份]
+  P --> M[模型]
+  M --> H[read_url: HTTP]
+  M --> B[browse_url: Playwright MCP]
+  H --> O[正文 / 链接 / 失败观察]
+  B --> O
+  O --> M
+  M --> F[Markdown 正文]
+  F --> W[Worker: 结果 + 来源 + outbox 原子保存]
+```
 
-当前配置接入 Telegram 多目标，确认、命令回复和处理失败通知只回私聊。旧单目标配置与旧任务继续沿用原目标；启动时迁移 outbox，保留已有状态和消息编号。CLI 分析与周报命令继续只输出本地结果。分发层不依赖 Telegram 客户端，新渠道通过注册正文处理和发送函数接入；目前未实现其他渠道或内容分类路由。
+不在模型调用前抓取全部入口，不因单次 HTTP 失败结束分析。模型可选择合法 HTTP(S) URL；只有实际工具返回的正文才算读取依据。没有 URL 的问题也可提交。read_url 通过 HTTP GET 获取页面并提取正文与链接；启用浏览器后，browse_url 同时提供渲染页面读取。模型可直接选择任一工具或混用两者，HTTP 返回成功但正文不足时也可改用浏览器。用户问题、备注与 profile 指导任务；网页、转发材料与工具输出不能改变任务权限。
 
-分析结果分开保存来源事实、讨论者观点和评价。失败的读取可作为来源状态保留，但不能作为成功证据；每条结论的来源 ID 必须指向实际读取成功的来源。模型生成的栏目名称是展示文案，不改变证据含义。旧归档没有栏目字段时使用兼容默认值。
+每个会话按 `(URL, backend)` 保存观察与尝试次数，同 URL 可改用另一后端。失败、缓存命中和后端切换均消耗页面预算；重复工具调用复用本次观察。迭代数与任务时限控制完整循环。程序记录实际 Source、Reading、Usage 和 usage_reported，不要求模型填写固定分类、栏目字段、claim ID 或最终 JSON。
 
-分析缓存键包含基础提示词、人格与输出规则和分析版本。profile 或这些提示词变化会生成不同的缓存键；流式传输方式不参与键的计算。
+单条分析默认按标题与概述、关键要点、讨论者观点、评价、限制与不确定性、来源组织 Markdown。没有内容的栏目省略，标题随人格和阅读偏好调整；行文结构不限制阅读与补读顺序，也不要求固定字段。
 
-通用角色说明在 `internal/agent/prompt/main.go`，分析与周报输出规则分别在 `analysis.go` 和 `digest.go`；人格内容在 `persona.go`。`internal/agent/prompt/system_prompt/base.md` 和 `character.md` 是历史参考，程序未读取这两份文件。修改实际使用的 Go 提示词后需要重新构建；运行中的服务在启动时读取 `profile.md`，修改后需重启。周报重试继续使用首次处理时保存的指令与偏好。
+## 浏览器
 
-## 周报数据流
+`browser.enabled` 打开 browse_url。第一次使用时启动固定版本的 Playwright MCP，创建独立无头 Chrome；任务结束关闭 MCP、浏览器、代理和临时目录。浏览器只提供导航与快照读取，不开放执行代码或提交表单。快照是网页可见内容及链接；它不等于网页事实已被证实。
 
-周报先按用户和收录时间选择已完成分析，再对非空且相同的 `CacheKey` 只保留一条；没有缓存键的条目分别保留。Agent 只可合并内容重复的分析，仅主题相近的条目分别保留。每条输入必须且只能进入一个回顾项，引用必须来自该项对应的可用来源。程序保留并附加已知的来源缺失、截断和不确定性；校验能检查结构和引用归属，不能证明摘要与原文语义一致，也不能判断合并的条目是否确实重复。
+所有页面导航、重定向与子资源经本地代理，沿用 Reader 的公网 IP 检查和固定 IP 拨号。禁用非代理 UDP、QUIC 与 service worker。Playwright 的 allowed-origins 不能作为重定向或 DNS rebinding 的安全边界。显式的 allowed_non_public_cidrs 同时作用于两种读取后端。
 
-周报采用固定截止时间和首次处理时的材料快照。输入超限或模型输出无效会使本次尝试失败并保留快照，重试沿用同一输入。校验后的周报正文先持久化，再与完成状态及投递 outbox 一起提交；进程恢复时可回放已保存正文。相同版本、用户和精确时间范围只创建一个任务。不同版本分别创建任务，历史结果仍可读取。
+独立会话不继承个人 Chrome 或 Codex 浏览器登录态。登录页、付费墙、验证码和不存在的页面仍可能无法取得正文；工具必须保留真实失败或页面观察，不能宣称已经读取目标内容。搜索和交互式展开页面尚未接入。
 
-调度器从启用后的持久化游标补跑到期周期，不回填启用前的周期。每个历史周期使用各自的计划触发时间作为截止时间，而不是使用补跑时的当前时间。
+## 周报与可靠性
 
-## 可靠性与安全契约
+周报按 owner 和收录时间半开区间选择已完成记录，按非空 CacheKey 去重。首次处理冻结正文、来源状态、人格、profile 与截止时间；重试复用同一份材料，来源全文不重复传入模型。模型直接生成 Markdown，默认先写周期总览，再按实际主题分组，分别说明要点、观点与评价、限制和来源，可用简短收尾结束。空栏目省略，不要求固定分类或引用字段；事实与引用质量由提示词及人工评估约束。
 
-- Telegram update 入队后才推进持久化 offset；入队与 offset 更新在同一事务中完成。
-- 任务结果/outbox 原子保存，投递状态与任务状态分开管理。未知投递状态需要人工选择是否重发。
-- 任务失败时保留已取得的部分结果。处理上下文被取消时，任务重新排队，本次不计入尝试次数。普通失败按退避时间重试；尝试次数达到 `max_attempts` 后任务标记为失败，分析与周报任务在有通知目标时发送最终失败通知。上限包含首次尝试，手动重试会将尝试计数重置为 0。
-- Reader 对每个 DNS 结果和重定向目标重新执行公网地址校验，并直接连接已校验 IP，防止 DNS rebinding。只有显式配置的 CIDR 可放行指定非公网地址；混合公网和未放行地址的 DNS 结果仍会被拒绝。
-- 网页、转发文本和工具返回都视为不可信内容，不能改变模型权限或触发允许列表外的读取。
-- 本地归档包含提交内容与网页提取正文；日志也可能包含模型输出和部分阅读内容，需按私人资料保管。
+空材料不调用模型。输入超过字符上限、模型响应失败/截断或正文为空时失败并保留快照。成功正文先保存，再与任务完成状态和 outbox 原子提交，恢复可以直接回放。
 
-## 浏览器读取限制
+Telegram offset 与入队同事务提交。投递按任务/渠道/地址/分段保持顺序和唯一性；未知发送结果需人工重发。取消保存部分来源并重新排队，本次不计尝试次数；普通失败退避重试，上限包含首次尝试。owner 权限、处理器锁和这些可靠性约束保留。
 
-配置结构预留 `reader.browser_fallback` 的引擎、启动模式和远程 endpoint 字段，当前没有浏览器读取实现。`enabled: true` 会在启动校验时被拒绝。没有引入 Playwright 绑定、driver、浏览器二进制或其系统依赖。
+## 验证
 
-## 验证边界
+普通测试覆盖真实 Responses 协议往返、工具失败后继续、后端切换、预算、流式/截断/空输出、快照重试、取消保留材料、SQLite 与投递状态。opt-in 的 live_eval_test.go 使用当前模型：答案只存在于最后一页的随机值验证三层追读；另一用例使用真实 HTTP、Chrome 和 MCP 验证模型自主从 HTTP 切换到浏览器取得 JavaScript 内容。它们不承诺任意网站或登录页面都可读取。
 
-单元测试和本地模拟接口覆盖配置、URL 安全策略、Responses 工具往返、结构化结果、SQLite 状态转换、周报校验和消息投递状态。本地测试不能验证任意模型 endpoint、X 页面或 Telegram bot 的真实兼容性；外部联调需要部署者提供 endpoint、凭证、allowlist 和发送权限。
+## 资料
 
-## 参考资料
-
-- [Eino AgenticModel 指南](https://www.cloudwego.io/docs/eino/core_modules/components/agentic_chat_model_guide/)
-- [Eino Responses 适配器](https://github.com/cloudwego/eino-ext/tree/main/components/model/agenticopenai)
-- [go-telegram/bot](https://github.com/go-telegram/bot) 与 [Telegram getUpdates](https://core.telegram.org/bots/api#getupdates)
-- [go-readability](https://codeberg.org/readeck/go-readability/src/branch/v2)
-- [modernc SQLite](https://pkg.go.dev/modernc.org/sqlite)
+- [Eino ChatModelAgent](https://www.cloudwego.io/zh/docs/eino/core_modules/eino_adk/agent_implementation/chat_model/)
+- [OpenAI 工具调用](https://developers.openai.com/api/docs/guides/function-calling)
+- [OpenAI 结构化输出](https://developers.openai.com/api/docs/guides/structured-outputs)
+- [Playwright MCP](https://github.com/microsoft/playwright-mcp)
+- [官方 MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk)

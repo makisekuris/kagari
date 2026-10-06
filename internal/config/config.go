@@ -9,6 +9,7 @@ type Config struct {
 	} `mapstructure:"storage"`
 	Telegram    Telegram `mapstructure:"telegram"`
 	Reader      Reader   `mapstructure:"reader"`
+	Browser     Browser  `mapstructure:"browser"`
 	Agent       Agent    `mapstructure:"agent"`
 	Weekly      Weekly   `mapstructure:"weekly"`
 	ProfilePath string   `mapstructure:"profile_path"`
@@ -46,34 +47,26 @@ func (t Telegram) ChatIDs(fallback int64) []int64 {
 }
 
 type Reader struct {
-	Timeout               time.Duration   `mapstructure:"timeout"`
-	MaxBytes              int64           `mapstructure:"max_bytes"`
-	MaxContentChars       int             `mapstructure:"max_content_chars"`
-	MaxLinks              int             `mapstructure:"max_links"`
-	CacheTTL              time.Duration   `mapstructure:"cache_ttl"` // 来源缓存与已完成分析的复用时限；0 禁用复用。
-	AllowedNonPublicCIDRs []string        `mapstructure:"allowed_non_public_cidrs"`
-	BrowserFallback       BrowserFallback `mapstructure:"browser_fallback"`
+	Timeout               time.Duration `mapstructure:"timeout"`
+	MaxBytes              int64         `mapstructure:"max_bytes"`
+	MaxContentChars       int           `mapstructure:"max_content_chars"`
+	MaxLinks              int           `mapstructure:"max_links"`
+	CacheTTL              time.Duration `mapstructure:"cache_ttl"` // 来源缓存与已完成分析的复用时限；0 禁用复用。
+	AllowedNonPublicCIDRs []string      `mapstructure:"allowed_non_public_cidrs"`
 }
 
-type BrowserFallback struct {
-	Enabled bool `mapstructure:"enabled"`
-	// Engine 是浏览器引擎；chromium 不代表必须使用系统 Chrome。
-	Engine         string `mapstructure:"engine"`
-	Mode           string `mapstructure:"mode"`
-	ExecutablePath string `mapstructure:"executable_path"`
-	Endpoint       string `mapstructure:"endpoint"`
-	// Headless 只影响 launch；connect/cdp 连接远端浏览器时不生效。
-	Headless bool `mapstructure:"headless"`
+// Browser 启动独立的 Playwright MCP 会话；HTTP 读取和浏览器读取由模型选择。
+type Browser struct {
+	Enabled bool     `mapstructure:"enabled"`
+	Command string   `mapstructure:"command"`
+	Args    []string `mapstructure:"args"`
 }
 
 type Agent struct {
-	MaxSources      int           `mapstructure:"max_sources"`      // 包括入口、原文、补读和失败尝试。
-	MaxSupplemental int           `mapstructure:"max_supplemental"` // 核对事实和补充背景的页面数量上限（evidence/context）。
-	MaxDepth        int           `mapstructure:"max_depth"`        // 首个抓取页面为 0，追读每深入一次加 1。
-	MaxIterations   int           `mapstructure:"max_iterations"`
-	Timeout         time.Duration `mapstructure:"timeout"`
-	Categories      []string      `mapstructure:"categories"`
-	Streaming       bool          `mapstructure:"streaming"`
+	MaxSources    int           `mapstructure:"max_sources"` // 包括入口、原文、补读和失败尝试。
+	MaxIterations int           `mapstructure:"max_iterations"`
+	Timeout       time.Duration `mapstructure:"timeout"`
+	Streaming     bool          `mapstructure:"streaming"`
 }
 
 type Weekly struct {
@@ -85,11 +78,3 @@ type Weekly struct {
 }
 
 const DefaultWeeklyInputChars = 120000
-
-// InputLimit 兼容直接构造的旧配置；文件加载仍会写入默认值。
-func (w Weekly) InputLimit() int {
-	if w.MaxInputChars == 0 {
-		return DefaultWeeklyInputChars
-	}
-	return w.MaxInputChars
-}

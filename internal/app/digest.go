@@ -20,7 +20,7 @@ func (w *Worker) EnqueueDigest(ctx context.Context, request domain.DigestRequest
 	if !request.Start.Before(request.End) {
 		return 0, false, errors.New("start must be before end")
 	}
-	if request.Version != "" && request.Version != domain.DigestVersion {
+	if request.Version != domain.DigestVersion {
 		return 0, false, errors.New("unsupported digest version")
 	}
 	request.Version = domain.DigestVersion
@@ -38,7 +38,7 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 	if err := json.Unmarshal(job.Payload, &request); err != nil {
 		return report, "", err
 	}
-	if request.Version != "" && request.Version != domain.DigestVersion {
+	if request.Version != domain.DigestVersion {
 		return report, "", errors.New("unsupported digest version")
 	}
 	if len(job.Result) > 0 {
@@ -81,21 +81,18 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 	if report.Version != domain.DigestVersion || input.UserID != request.UserID || !input.Start.Equal(request.Start) || !input.Cutoff.Equal(request.End) {
 		return report, "", errors.New("digest snapshot does not match request")
 	}
-	if report.Review != nil {
-		if err := digest.ValidateReview(*input, *report.Review); err != nil {
-			return report, "", err
-		}
+	if report.Body != "" {
 		return report, digest.Render(report, input.Timezone), nil
 	}
 	if len(input.Entries) == 0 {
-		report.Review = &domain.DigestReview{Sections: []domain.DigestSection{}}
+		report.Body = "所选时间范围内暂无可汇总的新内容。"
 	} else {
 		raw, err := json.Marshal(input)
 		if err != nil {
 			return report, "", err
 		}
 		// ponytail: 以字符数限制输入大小；需要按 token 检查模型上下文上限时再接 tokenizer。
-		if limit := w.Config.Weekly.InputLimit(); utf8.RuneCount(raw) > limit {
+		if limit := w.Config.Weekly.MaxInputChars; utf8.RuneCount(raw) > limit {
 			return report, "", fmt.Errorf("digest input exceeds weekly.max_input_chars (%d)", limit)
 		}
 		engine, err := w.digestEngine(ctx, job)
@@ -110,10 +107,10 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 		if err != nil {
 			return report, "", err
 		}
-		report.Review = &review
+		report.Body = review
 	}
 	report.GeneratedAt = time.Now().UTC()
-	// 在 CompleteJob 前保存已校验正文；重启后回放它，再原子写入 outbox。
+	// 在 CompletePublication 前保存正文；重启后回放它，再原子写入 outbox。
 	if err := w.saveDigestProgress(ctx, job.ID, report); err != nil {
 		return report, "", err
 	}

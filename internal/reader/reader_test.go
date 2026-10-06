@@ -64,6 +64,43 @@ func TestReadArticleMetadataLinksAndShortText(t *testing.T) {
 	}
 }
 
+func TestReadArticleFindsVisibleTextURLs(t *testing.T) {
+	page := `<!doctype html><html><body><nav>https://navigation.example/skip</nav><article><p>See <a href="/short">https://display.example/item</a>, then https://Text.example:443/report?x=1#top, duplicated as https://text.example/report?x=1.</p><p>Far away context.</p><script>https://script.example/skip</script><style>https://style.example/skip</style></article></body></html>`
+	reader := newReaderWithTransport(Options{}, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return response(req, http.StatusOK, "text/html", page), nil
+	}))
+	source, err := reader.Read(context.Background(), "https://example.test/article")
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	want := []string{
+		"https://example.test/short",
+		"https://text.example/report?x=1",
+	}
+	if len(source.Links) != len(want) {
+		t.Fatalf("article links = %#v, want %d links", source.Links, len(want))
+	}
+	for i, link := range source.Links {
+		if link.URL != want[i] {
+			t.Fatalf("article link %d = %#v, want URL %q", i, link, want[i])
+		}
+	}
+	if source.Links[1].Text != "https://text.example/report?x=1" || !strings.Contains(source.Links[1].Context, "then https://Text.example:443/report") {
+		t.Fatalf("text URL label/context = %#v / %#v", source.Links[1].Text, source.Links[1].Context)
+	}
+}
+
+func TestReadArticleTextURLsShareLinkLimit(t *testing.T) {
+	page := `<html><body><article><p>https://first.example/item, then https://second.example/item.</p></article></body></html>`
+	reader := newReaderWithTransport(Options{MaxLinks: 1}, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return response(req, http.StatusOK, "text/html", page), nil
+	}))
+	source, err := reader.Read(context.Background(), "https://example.test/article")
+	if err == nil || source.Status != statusIncomplete || !source.Truncated || len(source.Links) != 1 || source.Links[0].URL != "https://first.example/item" {
+		t.Fatalf("text URL cap: source=%#v err=%v", source, err)
+	}
+}
+
 func TestNormalizeAndExtractURLs(t *testing.T) {
 	normalized, err := NormalizeURL(" HTTPS://BÜCHER.example:443/a?b=2&a=1#frag ")
 	if err != nil || normalized != "https://xn--bcher-kva.example/a?b=2&a=1" {
@@ -78,6 +115,10 @@ func TestNormalizeAndExtractURLs(t *testing.T) {
 	want := []string{"https://example.com/a_(b)?x=1"}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("ExtractURLs() = %#v, want %#v", got, want)
+	}
+	got = ExtractURLs("相关资料见 https://example.com/report。")
+	if len(got) != 1 || got[0] != "https://example.com/report" {
+		t.Fatalf("ExtractURLs() kept Chinese sentence punctuation: %#v", got)
 	}
 }
 

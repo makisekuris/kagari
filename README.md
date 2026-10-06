@@ -1,8 +1,8 @@
 # Kagari
 
-Kagari 是一个 Go 个人阅读助手。它从 CLI 或 Telegram 接收链接，读取网页与公开 X 单帖，生成带来源依据的分析，并保存到本地 SQLite。周报 Agent 可以回顾已保存的分析、合并重复内容并按分类整理。
+Kagari 是一个 Go 个人阅读助手。它从 CLI 或 Telegram 接收问题、转发文本和链接，由 Agent 自主读取页面、追读相关链接并生成 Markdown，来源和读取记录保存到 SQLite。周报基于归档正文回顾。
 
-Kagari is a personal reading assistant written in Go. It accepts links from the CLI or Telegram, reads web pages and public X posts, produces source-backed analysis, and stores it in local SQLite. A weekly digest agent can review saved analyses, merge duplicates, and group them by category.
+Kagari is a personal reading assistant written in Go. It accepts questions, forwarded text and links from the CLI or Telegram. An agent reads relevant pages and follows links, producing Markdown with archived sources and read records. Digests review saved prose.
 
 运行需要 Go 1.27；进程锁使用 `flock`，支持 macOS 和 Linux。模型 endpoint、Telegram bot 和频道权限由部署者配置。
 
@@ -113,9 +113,9 @@ Commands load `.env` from the current working directory; no `source` command is 
 
 ### 人格替换 / Persona injection
 
-调用方统一通过 `persona.Default()` 获取 `persona.PersonaRole` 接口，再分别注入 Agent 和 Telegram，不直接依赖具体人格类型。角色选择集中在 `internal/persona/main.go`；替换实现只需在这里切换，调用方不变。人格实现提供 `Prompt() string`（人格与语言风格）和 `AskChatID(int64) string`（带任务编号的收件回执），放在 `internal/persona/taffy/` 等子包中；通用任务规则和 JSON 输出格式保持独立。
+调用方统一通过 `persona.Default()` 获取 `persona.PersonaRole` 接口，再分别注入 Agent 和 Telegram，不直接依赖具体人格类型。角色选择集中在 `internal/persona/main.go`；替换实现只需在这里切换，调用方不变。人格实现提供 `Prompt() string`（人格与语言风格）和 `AskChatID(int64) string`（带任务编号的收件回执），放在 `internal/persona/taffy/` 等子包中；通用任务规则与 Markdown 文风要求保持独立。
 
-Callers obtain the `persona.PersonaRole` interface through `persona.Default()` and inject it into the Agent and Telegram without depending on a concrete persona type. Selection lives in `internal/persona/main.go`; switch implementations there without changing callers. Implementations provide `Prompt() string` for persona and language style, and `AskChatID(int64) string` for job acknowledgements, and live in subpackages such as `internal/persona/taffy/`. Common task rules and the JSON output format remain independent.
+Callers obtain the `persona.PersonaRole` interface through `persona.Default()` and inject it into the Agent and Telegram without depending on a concrete persona type. Selection lives in `internal/persona/main.go`; switch implementations there without changing callers. Implementations provide `Prompt() string` for persona and language style, and `AskChatID(int64) string` for job acknowledgements, and live in subpackages such as `internal/persona/taffy/`. Common task rules and Markdown style instructions remain independent.
 
 Engine 构造时读取 `profile.md` 并冻结人格提示词；分析缓存键包含完整分析提示词，周报重试使用任务保存的提示词快照。修改 `profile.md` 后，长期运行的 `run` 服务需重启；单次 `analyze` 和 `digest` 命令会在执行时读取当前文件。修改人格实现后需重新构建程序；运行中的服务还需重启。暂不支持运行时切换角色。
 
@@ -141,7 +141,7 @@ Place the global `-config` flag before the subcommand. These examples use the lo
 ```
 
 - `read URL` 读取单个 URL，不调用模型，也不创建任务。 / Reads one URL without calling the model or creating a job.
-- `analyze [-note TEXT] [-user ID] URL...` 分析一个或多个链接并归档结果。 / Analyzes one or more URLs and archives the result.
+- `analyze [-question TEXT] [-note TEXT] [-user ID] [URL...]` 探索问题或分析链接并归档正文。至少提供问题或链接。 / Explores a question or supplied URLs and archives the prose. Supply a question or a URL.
 - `run` 启动 Telegram long polling、任务处理、投递和启用后的周报调度。 / Starts Telegram polling, job processing, delivery, and enabled digest scheduling.
 - `digest [-user ID] [-cutoff RFC3339]` 默认回顾截止时间前七个日历日，包含开始时间、不包含截止时间。`-start` 与 `-end` 可指定日期范围，包含开始日期、不包含结束日期；必须同时提供且不能与 `-cutoff` 混用。 / By default, reviews the seven calendar days before the cutoff, including the start and excluding the cutoff. Use `-start` and `-end` together for a date range that includes the start date and excludes the end date; they cannot be combined with `-cutoff`.
 - `status ID` 查看任务和投递状态；`export ID` 输出任务 JSON。 / Shows job and delivery status; `export ID` prints the job JSON.
@@ -206,11 +206,11 @@ Clearing does not retract Telegram messages already sent. Job IDs may be reused 
 ## 行为与限制 / Behavior and limits
 
 - HTTP + Readability 读取网页，限制超时、响应大小、正文长度和链接数，并默认拒绝非公网地址。只有显式配置 `reader.allowed_non_public_cidrs` 才会放行指定网段。 / HTTP + Readability fetches web pages with timeout, response-size, content-length, and link limits. Non-public IPs are blocked by default; only explicitly configured CIDRs are allowed.
-- X 通过公开 oEmbed 读取可用的单条帖子。分析时先读取全部提交入口，再在页面数与深度限制内自动访问 X 正文中提取到的外部链接（包括 `t.co` 短链），将链接网页正文作为独立来源交给模型；访问失败或达到限制时保留说明。自动访问只追读一层，进一步追读由 Agent 按信息缺口决定。长帖、线程回复和链接卡片可能仍不完整。 / X posts are read through public oEmbed. Analysis reads all submitted entries first, then automatically follows external links extracted from the X post text, including `t.co` short links, within page and depth limits. Linked page text is supplied to the model as separate sources; fetch failures and reading limits are retained. Automatic follow-ups cover one level; the agent decides further reads based on information gaps. Long posts, threads, and link cards may still be incomplete.
-- 默认单次分析最多计入 6 个页面，其中用于核对事实或补充背景的页面最多 2 个；追读原文也计入页面总数。首次读取页面时，缓存命中和失败尝试也会计数；同一会话再次读取同一页面不重复计数。首个页面深度为 0，默认最多追读到深度 2、迭代 10 次；这些限制可在 `agent` 配置中调整。 / By default, an analysis counts up to 6 pages in total, including primary-source follow-ups, with up to 2 pages for checking facts or adding context. A page's first read counts even on a cache hit or fetch failure; rereading it in the same session does not count again. The first page has depth 0; the default maximum depth is 2, with up to 10 iterations. These limits are configurable under `agent`.
+- X 通过公开 oEmbed 读取单帖，并提取正文中的裸链接与短链。Agent 自主选择追读，未读内容不能当成已核实证据；oEmbed 可能缺少长帖、线程或链接卡片。 / X oEmbed provides public post text and extracted links. The agent chooses further reads; long posts, threads and link cards may be incomplete.
+- `read_url` 通过 HTTP GET 获取网页并提取正文与链接；启用 `browser.enabled` 后，`browse_url` 同时提供 Playwright MCP 的渲染页面读取。模型可选择或混用两个工具，HTTP 返回成功但正文不足时也可改用浏览器。浏览器需要 Node.js 18+ 和本机 Google Chrome；每个任务使用独立无头会话，不继承 Codex 或个人 Chrome 的登录状态。 / `read_url` fetches pages over HTTP GET and extracts text and links. With `browser.enabled`, `browse_url` is also available through Playwright MCP. The model can choose either tool or use both, including when HTTP succeeds but returns insufficient content. Requires Node.js 18+ and local Google Chrome. Each analysis gets an isolated headless browser without personal or Codex login state.
+- 默认每次分析最多 6 次不同的 `(URL, 后端)` 读取；首次命中缓存、失败和 HTTP 改用浏览器都计数，同后端同 URL 重读复用本次结果。默认最多 10 次模型迭代、3 分钟任务时限。 / The default is six distinct `(URL, backend)` reads, including cache hits, failures and backend changes; repeated calls reuse the task's observation. Ten model iterations and a three-minute task timeout bound each analysis.
 - 周报 `weekly.max_input_chars` 默认 120000；输入超过上限时任务失败并保留完整输入快照，不通过丢弃条目缩小输入。 / `weekly.max_input_chars` defaults to 120000; oversized digest jobs fail with the full input snapshot preserved, rather than dropping entries to fit.
 - `weekly.enabled` 默认关闭；启用后按 `weekly.timezone` 和配置的星期、时间调度，默认时区为 `Asia/Shanghai`。 / `weekly.enabled` defaults to false. When enabled, digests follow `weekly.timezone` and the configured weekday and time; the default timezone is `Asia/Shanghai`.
-- 网页读取失败后改用浏览器的功能尚未实现；`reader.browser_fallback.enabled: true` 会被拒绝。 / Browser fallback is not implemented; `reader.browser_fallback.enabled: true` is rejected.
 
 ## 日志与隐私 / Logs and privacy
 

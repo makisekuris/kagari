@@ -77,5 +77,5 @@ func digestRequest(args []string, now time.Time, timezone string) (request domai
 	if !start.Before(end) {
 		return request, errors.New("start must be before cutoff")
 	}
-	return domain.DigestRequest{UserID: *user, Start: start.UTC(), End: end.UTC()}, nil
+	return domain.DigestRequest{Version: domain.DigestVersion, UserID: *user, Start: start.UTC(), End: end.UTC()}, nil
 }
