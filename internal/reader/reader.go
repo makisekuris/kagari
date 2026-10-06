@@ -86,6 +86,13 @@ func (r *Reader) Read(ctx context.Context, rawURL string) (domain.Source, error)
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
+		if errors.Is(err, errUnverifiedXStatus) && resp != nil {
+			if target, targetErr := resp.Location(); targetErr == nil && isXStatusURL(target) {
+				redirected, readErr := r.Read(ctx, target.String())
+				redirected.RequestedURL = source.RequestedURL
+				return redirected, readErr
+			}
+		}
 		status := statusFailed
 		if errors.Is(err, errUnsafeTarget) || errors.Is(err, errUnverifiedXStatus) {
 			status = statusRestricted

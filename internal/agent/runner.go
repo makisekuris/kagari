@@ -35,7 +35,9 @@ func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schem
 		}
 		if variant.IsStreaming {
 			variant.MessageStream = schema.StreamReaderWithConvert(variant.MessageStream, func(part *schema.AgenticMessage) (*schema.AgenticMessage, error) {
-				e.logMessage(part, true, turn)
+				// Too noise be silent in without debug
+				// e.logMessage(part, true, turn)
+				fmt.Printf("%s", part)
 				return part, nil
 			})
 		}
@@ -46,6 +48,7 @@ func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schem
 		if !variant.IsStreaming {
 			e.logMessage(msg, false, turn)
 		}
+
 		if msg == nil || msg.Role != schema.AgenticRoleTypeAssistant {
 			continue
 		}

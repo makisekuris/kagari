@@ -104,7 +104,7 @@ Commands load `.env` from the current working directory; no `source` command is 
 | `storage.path` | `data/kagari.db` | SQLite 数据库 / SQLite database |
 | `profile_path` | `profile.md` | 阅读偏好和表达示例 / Reading preferences and style examples |
 | `max_attempts` | `6` | 包含首次尝试 / Includes the first attempt |
-| `agent.streaming` | `false` | 启用 Responses SSE 与实时日志 / Enables Responses SSE and live logs |
+| `agent.streaming` | `false` | 启用 Responses SSE / Enables Responses SSE |
 | `weekly.enabled` | `false` | 周报定时调度 / Scheduled weekly digests |
 | `weekly.max_input_chars` | `120000` | 周报完整模型输入字符上限 / Maximum serialized digest input size |
 
@@ -251,9 +251,9 @@ Clearing does not retract Telegram messages already sent. Job IDs may be reused 
 
 ## 日志与隐私 / Logs and privacy
 
-启用 `agent.streaming` 后，SSE 输出和工具参数会逐段写入 info 日志；非流式模式也会记录完整模型回复。日志可能包含提交内容或提取文本。SQLite 归档也包含提交和来源正文，请妥善保管本地日志和数据库。
+启用 `agent.streaming` 后，通过 SSE 接收模型输出；逐段 SSE 日志目前关闭。info 日志记录模型轮次、完整工具参数、工具结果摘要和 token 用量；非流式模式还会记录完整模型回复。日志可能包含提交内容或提取文本。SQLite 归档也包含提交和来源正文，请妥善保管本地日志和数据库。
 
-With `agent.streaming` enabled, SSE output and tool arguments are logged incrementally at info level. Non-streaming mode also logs the full model response. Logs may contain submitted text or extracted content. SQLite archives contain submissions and source text; protect local logs and database files.
+With `agent.streaming` enabled, model output is received over SSE; per-chunk SSE logs are currently disabled. Info logs record model turns, complete tool arguments, tool result previews, and token usage. Non-streaming mode also logs the full model response. Logs may contain submitted text or extracted content. SQLite archives contain submissions and source text; protect local logs and database files.
 
 本地测试和构建不能代替真实外部联调。模型 endpoint、X 页面和 Telegram bot 需要在目标部署环境分别验证。
 

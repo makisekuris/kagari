@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -60,6 +61,7 @@ func New(ctx context.Context, cfg config.Config, read func(context.Context, stri
 		BaseURL: cfg.Model.BaseURL, APIKey: cfg.Model.APIKey, Model: cfg.Model.Name,
 		Timeout: &cfg.Model.Timeout, MaxTokens: &cfg.Model.MaxOutputTokens, MaxRetries: &zero,
 		Store: &no, ParallelToolCalls: &no,
+		HTTPClient: &http.Client{Transport: responsesTransport{}},
 	})
 	if err != nil {
 		return nil, err
@@ -174,6 +176,7 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 		}
 		session.add(src)
 	}
+
 	readTool, err := utils.InferTool("read_url", "通过 HTTP GET 读取相关 URL 的正文和链接。与浏览器工具可同时使用；页面依赖 JavaScript 或 HTTP 内容不足时可改用浏览器。", func(ctx context.Context, r readRequest) (readReply, error) {
 		src, readErr := session.read(ctx, r.URL, httpBackend, e.Read)
 		if readErr != nil {
@@ -185,6 +188,7 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 		return result, err
 	}
 	tools := []tool.BaseTool{readTool}
+
 	if e.OpenBrowser != nil {
 		browserTool, toolErr := utils.InferTool("browse_url", "用 Playwright MCP 浏览器读取相关 URL 的渲染内容和链接。可直接选择此工具，也可在 HTTP 内容不足或读取失败时使用。", func(ctx context.Context, r readRequest) (readReply, error) {
 			read := func(ctx context.Context, url string) (domain.Source, error) {
@@ -211,6 +215,7 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 		}
 		tools = append(tools, browserTool)
 	}
+
 	a, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name: "reader", Description: "回答用户问题并按需读取资料", Instruction: e.analysisPrompt(), Model: e.Model, MaxIterations: e.Config.Agent.MaxIterations,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools, ExecuteSequentially: true}},
