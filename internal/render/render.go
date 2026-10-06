@@ -10,6 +10,9 @@ import (
 
 func Analysis(result domain.Result) string {
 	a := result.Analysis
+	if a.Headings == nil {
+		return "分析结果未完成：缺少展示标题。\n"
+	}
 	var b strings.Builder
 	for _, tag := range a.Tags {
 		tag = strings.Map(func(r rune) rune {
@@ -27,16 +30,7 @@ func Analysis(result domain.Result) string {
 	for i, s := range result.Sources {
 		refs[s.ID] = i + 1
 	}
-	headings := domain.AnalysisHeadings{
-		Summary:       "AI 摘要",
-		Discussion:    "讨论者观点",
-		Evaluation:    "Agent 评价",
-		Uncertainties: "未确认与限制",
-		Sources:       "原文与来源",
-	}
-	if a.Headings != nil {
-		headings = *a.Headings
-	}
+	headings := *a.Headings
 	for _, group := range []struct {
 		Title  string
 		Claims []domain.Claim
@@ -44,7 +38,9 @@ func Analysis(result domain.Result) string {
 		if len(group.Claims) == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "\n%s：\n", strings.TrimRight(strings.TrimSpace(group.Title), ":："))
+		if strings.TrimSpace(group.Title) != "" {
+			fmt.Fprintf(&b, "\n%s：\n", strings.TrimRight(strings.TrimSpace(group.Title), ":："))
+		}
 		for _, c := range group.Claims {
 			fmt.Fprintf(&b, "• %s", c.Text)
 			for _, id := range c.SourceIDs {

@@ -20,15 +20,17 @@ func (c *Client) acceptUpdate(ctx context.Context, update *models.Update) error 
 	if update == nil || update.ID <= 0 {
 		return errors.New("Telegram returned an unreadable update")
 	}
-	kind, key, payload, targetChatID, ackChatID, err := c.jobForUpdate(update)
+	kind, key, payload, ackChatID, err := c.jobForUpdate(update)
 	if err != nil {
 		return errors.New("Telegram update could not be prepared")
 	}
 	var targets []domain.DeliveryTarget
 	if kind == "analyze" {
 		targets = Targets(c.config.ChatIDs(ackChatID))
+	} else if ackChatID != 0 {
+		targets = Targets([]int64{ackChatID})
 	}
-	jobID, created, err := c.store.AcceptUpdate(ctx, update.ID, kind, key, payload, targetChatID, targets...)
+	jobID, created, err := c.store.AcceptUpdate(ctx, update.ID, kind, key, payload, targets)
 	if err != nil {
 		return errors.New("Telegram update could not be saved")
 	}
@@ -40,16 +42,16 @@ func (c *Client) acceptUpdate(ctx context.Context, update *models.Update) error 
 	return nil
 }
 
-func (c *Client) jobForUpdate(update *models.Update) (kind, key string, payload []byte, targetChatID, ackChatID int64, err error) {
+func (c *Client) jobForUpdate(update *models.Update) (kind, key string, payload []byte, ackChatID int64, err error) {
 	if update == nil || update.Message == nil {
-		return "", "", nil, 0, 0, nil
+		return "", "", nil, 0, nil
 	}
 	message := update.Message
 	if message.Chat.Type != models.ChatTypePrivate || message.From == nil {
-		return "", "", nil, 0, 0, nil
+		return "", "", nil, 0, nil
 	}
 	if _, allowed := c.allowed[message.From.ID]; !allowed {
-		return "", "", nil, 0, 0, nil
+		return "", "", nil, 0, nil
 	}
 	text, entities := message.Text, message.Entities
 	if text == "" {
@@ -58,7 +60,7 @@ func (c *Client) jobForUpdate(update *models.Update) (kind, key string, payload 
 	key = fmt.Sprintf("tg:%d", update.ID)
 	if isCommand(text) {
 		payload, err = json.Marshal(domain.Command{UserID: message.From.ID, ChatID: message.Chat.ID, Text: text})
-		return "command", key, payload, message.Chat.ID, message.Chat.ID, err
+		return "command", key, payload, message.Chat.ID, err
 	}
 	submission := domain.Submission{
 		UserID:     message.From.ID,
@@ -78,12 +80,10 @@ func (c *Client) jobForUpdate(update *models.Update) (kind, key string, payload 
 	prepared, prepareErr := c.prepare(submission)
 	if prepareErr != nil || len(prepared.URLs) == 0 {
 		payload, err = json.Marshal(domain.Command{UserID: message.From.ID, ChatID: message.Chat.ID, Text: "请发送包含链接的消息，可附上分析问题或备注。"})
-		return "notice", key, payload, message.Chat.ID, message.Chat.ID, err
+		return "notice", key, payload, message.Chat.ID, err
 	}
-	// 身份和权限属于提交者；公共目标群只决定结果发到哪里，不能替代 UserID。
-	targetChatID = c.config.ChatIDs(message.Chat.ID)[0]
 	payload, err = json.Marshal(prepared)
-	return "analyze", key, payload, targetChatID, message.Chat.ID, err
+	return "analyze", key, payload, message.Chat.ID, err
 }
 
 func isCommand(text string) bool {

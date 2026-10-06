@@ -29,20 +29,23 @@ func TestPublicationFansOutWithoutReanalysisAndFailureIsIsolated(t *testing.T) {
 	defer s.Close()
 	sub := domain.Submission{UserID: 7, ChatID: 7, CacheKey: "shared"}
 	payload, _ := json.Marshal(sub)
-	result := domain.Result{AnalysisVersion: agent.AnalysisVersion, CreatedAt: time.Now(), Analysis: domain.Analysis{Title: "文章", Overview: strings.Repeat("正文", 2000)}}
+	result := domain.Result{AnalysisVersion: agent.AnalysisVersion, CreatedAt: time.Now(), Analysis: domain.Analysis{
+		Title: "文章", Overview: strings.Repeat("正文", 2000),
+		Headings: &domain.AnalysisHeadings{Summary: "摘要", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"},
+	}}
 	raw, _ := json.Marshal(result)
-	seed, _, err := s.Enqueue(ctx, "analyze", "cached", payload, 0)
+	seed, _, err := s.Enqueue(ctx, "analyze", "cached", payload, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.StartJob(ctx, seed); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteJob(ctx, seed, raw, nil, nil); err != nil {
+	if err := s.CompletePublication(ctx, seed, raw, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	targets := telegram.Targets([]int64{7, -100123})
-	id, _, err := s.Enqueue(ctx, "analyze", "publication", payload, 7, targets...)
+	id, _, err := s.Enqueue(ctx, "analyze", "publication", payload, targets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +96,7 @@ func TestPublicationFansOutWithoutReanalysisAndFailureIsIsolated(t *testing.T) {
 	// 命令回复只投递到提交私聊，不使用文章分发目标。
 	w.Config.Telegram.TargetChatIDs = []int64{7, -100123}
 	command, _ := json.Marshal(domain.Command{UserID: 7, ChatID: 7, Text: "/help"})
-	commandID, _, err := s.Enqueue(ctx, "command", "help", command, 7)
+	commandID, _, err := s.Enqueue(ctx, "command", "help", command, telegram.Targets([]int64{7}))
 	if err != nil {
 		t.Fatal(err)
 	}

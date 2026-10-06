@@ -11,8 +11,7 @@ storage:
 telegram:
   # Use KAGARI_TELEGRAM_TOKEN for the credential.
   allowed_user_ids: []
-  target_chat_ids: [] # e.g. [123456789, -1001234567890] sends to your private chat and a channel.
-  target_chat_id: 0 # Legacy single target; used only when target_chat_ids is empty. 0 replies to the submitting private chat.
+  target_chat_ids: [] # Empty sends results to the submitting private chat; set multiple IDs to fan out.
 
 profile_path: profile.md
 log_level: info

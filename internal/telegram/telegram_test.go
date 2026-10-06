@@ -61,7 +61,7 @@ func (customReplyTemplate) AskChatID(jobID int64) string {
 }
 
 func baseConfig() config.Telegram {
-	return config.Telegram{Token: "123:fixture_secret", AllowedUserIDs: []int64{7}, TargetChatID: 900}
+	return config.Telegram{Token: "123:fixture_secret", AllowedUserIDs: []int64{7}, TargetChatIDs: []int64{900}}
 }
 
 func messageUpdate(id int64, msg string) string {
@@ -155,7 +155,7 @@ func TestPollPersistsBeforeAckExtractsUTF16AndDeduplicates(t *testing.T) {
 		{kind: "command", target: 7},
 	} {
 		job, err := st.ClaimJob(context.Background())
-		if err != nil || job == nil || job.Kind != want.kind || job.TargetChatID != want.target {
+		if err != nil || job == nil || job.Kind != want.kind || len(job.Targets) != 1 || job.Targets[0].Address != fmt.Sprint(want.target) {
 			t.Fatalf("job %d = (%+v, %v), want kind=%s target=%d", i, job, err, want.kind, want.target)
 		}
 		if i < 2 {
@@ -206,7 +206,7 @@ func TestAcceptUpdateUsesInjectedReplyAndDeduplicatesAck(t *testing.T) {
 		t.Fatalf("ack sends=%d chat=%q text=%q; want one injected ack to chat 7 for task 1", sends, ackChatID, ackText)
 	}
 	job, err := st.Job(context.Background(), 1)
-	if err != nil || job == nil || job.ID != 1 || job.TargetChatID != 900 {
+	if err != nil || job == nil || job.ID != 1 || len(job.Targets) != 1 || job.Targets[0].Address != "900" {
 		t.Fatalf("persisted job = (%+v, %v), want task 1 targeting chat 900", job, err)
 	}
 	// 同一条提交的文章目标可以包含频道；回执仍只发到原私聊。
@@ -244,9 +244,9 @@ func TestForwardedMessageSeparatesTaskAndThirdPartyText(t *testing.T) {
 		ForwardOrigin: &models.MessageOrigin{Type: models.MessageOriginTypeHiddenUser},
 		Text:          "third-party discussion https://example.org/post",
 	}
-	kind, _, payload, target, ack, err := client.jobForUpdate(&models.Update{ID: 1, Message: message})
-	if err != nil || kind != "analyze" || target != 900 || ack != 7 {
-		t.Fatalf("jobForUpdate() = (%q, %d, %d, %v)", kind, target, ack, err)
+	kind, _, payload, ack, err := client.jobForUpdate(&models.Update{ID: 1, Message: message})
+	if err != nil || kind != "analyze" || ack != 7 {
+		t.Fatalf("jobForUpdate() = (%q, %d, %v)", kind, ack, err)
 	}
 	var queued domain.Submission
 	if err := json.Unmarshal(payload, &queued); err != nil {
@@ -264,7 +264,7 @@ func TestForwardedMessageSeparatesTaskAndThirdPartyText(t *testing.T) {
 			SenderUser: models.User{ID: 7},
 		},
 	}
-	kind, _, payload, _, _, err = client.jobForUpdate(&models.Update{ID: 2, Message: message})
+	kind, _, payload, _, err = client.jobForUpdate(&models.Update{ID: 2, Message: message})
 	if err != nil || kind != "analyze" {
 		t.Fatalf("own forwarded message job = (%q, %v)", kind, err)
 	}

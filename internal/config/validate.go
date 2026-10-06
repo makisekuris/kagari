@@ -65,7 +65,7 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 	if _, err := time.Parse("15:04", c.Weekly.Time); err != nil {
 		return errors.New("weekly.time must be HH:MM")
 	}
-	if c.Weekly.InputLimit() < 1024 {
+	if c.Weekly.MaxInputChars < 1024 {
 		return errors.New("weekly.max_input_chars must be at least 1024")
 	}
 	if modelRequired {

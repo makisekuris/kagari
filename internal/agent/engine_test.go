@@ -210,10 +210,6 @@ func TestReadingPolicyAndEvidenceValidation(t *testing.T) {
 	if first.CacheKey == forwarded.CacheKey {
 		t.Fatal("forwarded source identity did not change cache key")
 	}
-	var legacy domain.Analysis
-	if err := decode(`{"relevance":"legacy preference"}`, &legacy); err != nil || legacy.Relevance != "legacy preference" {
-		t.Fatalf("legacy relevance decode = (%q, %v)", legacy.Relevance, err)
-	}
 }
 
 func TestAnalysisHeadingsValidation(t *testing.T) {

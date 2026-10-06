@@ -3,6 +3,7 @@ package digest
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"kagari/internal/domain"
@@ -10,11 +11,17 @@ import (
 
 // Prepare freezes the archive entries and instructions supplied to a weekly review.
 func Prepare(request domain.DigestRequest, asOf time.Time, timezone, profile, instruction string, entries []domain.ArchiveEntry) (domain.DigestInput, error) {
+	if request.Version != domain.DigestVersion {
+		return domain.DigestInput{}, fmt.Errorf("unsupported digest version")
+	}
 	if !request.Start.Before(request.End) {
 		return domain.DigestInput{}, fmt.Errorf("digest interval must have start before end")
 	}
 	if _, err := time.LoadLocation(timezone); err != nil {
 		return domain.DigestInput{}, fmt.Errorf("digest timezone: %w", err)
+	}
+	if strings.TrimSpace(instruction) == "" {
+		return domain.DigestInput{}, fmt.Errorf("digest instruction is required")
 	}
 
 	selected := make([]domain.ArchiveEntry, 0, len(entries))

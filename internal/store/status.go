@@ -56,11 +56,10 @@ type DeliveryStatus struct {
 }
 
 func (s *Store) DeliveryTargetCounts(ctx context.Context, jobID int64) ([]DeliveryStatus, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT channel,
-		CASE WHEN address='' THEN CAST(chat_id AS TEXT) ELSE address END,status,count(*)
+	rows, err := s.db.QueryContext(ctx, `SELECT channel,address,status,count(*)
 		FROM deliveries WHERE job_id=?
-		GROUP BY channel,CASE WHEN address='' THEN CAST(chat_id AS TEXT) ELSE address END,status
-		ORDER BY channel,CASE WHEN address='' THEN CAST(chat_id AS TEXT) ELSE address END,status`, jobID)
+		GROUP BY channel,address,status
+		ORDER BY channel,address,status`, jobID)
 	if err != nil {
 		return nil, err
 	}

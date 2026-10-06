@@ -13,7 +13,7 @@ import (
 	"kagari/internal/domain"
 )
 
-func (s *Store) Enqueue(ctx context.Context, kind, key string, payload []byte, targetChatID int64, targets ...domain.DeliveryTarget) (int64, bool, error) {
+func (s *Store) Enqueue(ctx context.Context, kind, key string, payload []byte, targets []domain.DeliveryTarget) (int64, bool, error) {
 	if kind == "" || key == "" {
 		return 0, false, errors.New("store: job kind and key are required")
 	}
@@ -25,7 +25,7 @@ func (s *Store) Enqueue(ctx context.Context, kind, key string, payload []byte, t
 		return 0, false, err
 	}
 	defer tx.Rollback()
-	id, created, err := enqueue(ctx, tx, kind, key, payload, targetChatID, time.Now().UTC(), targets...)
+	id, created, err := enqueue(ctx, tx, kind, key, payload, targets, time.Now().UTC())
 	if err != nil {
 		return 0, false, err
 	}
@@ -35,7 +35,7 @@ func (s *Store) Enqueue(ctx context.Context, kind, key string, payload []byte, t
 	return id, created, nil
 }
 
-func (s *Store) AcceptUpdate(ctx context.Context, updateID int64, kind, key string, payload []byte, targetChatID int64, targets ...domain.DeliveryTarget) (int64, bool, error) {
+func (s *Store) AcceptUpdate(ctx context.Context, updateID int64, kind, key string, payload []byte, targets []domain.DeliveryTarget) (int64, bool, error) {
 	if updateID < 0 {
 		return 0, false, errors.New("store: update id must be non-negative")
 	}
@@ -66,7 +66,7 @@ func (s *Store) AcceptUpdate(ctx context.Context, updateID int64, kind, key stri
 	var id int64
 	var created bool
 	if kind != "" {
-		id, created, err = enqueue(ctx, tx, kind, key, payload, targetChatID, time.Now().UTC(), targets...)
+		id, created, err = enqueue(ctx, tx, kind, key, payload, targets, time.Now().UTC())
 		if err != nil {
 			return 0, false, err
 		}
@@ -129,20 +129,6 @@ func (s *Store) ClaimJob(ctx context.Context) (*domain.Job, error) {
 	return job, nil
 }
 
-func (s *Store) CompleteJob(ctx context.Context, id int64, result []byte, messages []string, sources []domain.Source) error {
-	job, err := scanJob(s.db.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM jobs WHERE id=?`, id))
-	if err != nil {
-		return err
-	}
-	deliveries := make([]domain.Delivery, 0, len(job.Targets)*len(messages))
-	for _, target := range job.Targets {
-		for i, message := range messages {
-			deliveries = append(deliveries, domain.Delivery{Target: target, Part: i + 1, Text: message})
-		}
-	}
-	return s.CompletePublication(ctx, id, result, deliveries, sources)
-}
-
 func (s *Store) CompletePublication(ctx context.Context, id int64, result []byte, deliveries []domain.Delivery, sources []domain.Source) error {
 	if err := validJSON(result); err != nil {
 		return err
@@ -166,9 +152,6 @@ func (s *Store) CompletePublication(ctx context.Context, id int64, result []byte
 	now := timestamp(time.Now())
 	for _, delivery := range deliveries {
 		target := delivery.Target
-		if target.Channel == "" && target.Address == "" && delivery.ChatID != 0 {
-			target = domain.DeliveryTarget{Channel: "telegram", Address: strconv.FormatInt(delivery.ChatID, 10)}
-		}
 		if strings.TrimSpace(target.Channel) == "" || strings.TrimSpace(target.Address) == "" || delivery.Part < 1 {
 			return errors.New("store: delivery target and positive part are required")
 		}
@@ -180,8 +163,8 @@ func (s *Store) CompletePublication(ctx context.Context, id int64, result []byte
 				return errors.New("store: Telegram target must be a canonical nonzero chat ID")
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO deliveries(job_id,channel,address,chat_id,part,text,status,next_attempt_at)
-			VALUES(?,?,?,?,?,?,'pending',?)`, id, target.Channel, target.Address, chatID, delivery.Part, delivery.Text, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO deliveries(job_id,channel,address,part,text,status,next_attempt_at)
+			VALUES(?,?,?,?,?,'pending',?)`, id, target.Channel, target.Address, delivery.Part, delivery.Text, now); err != nil {
 			return err
 		}
 	}
@@ -249,7 +232,8 @@ func (s *Store) FailJob(ctx context.Context, id int64, result []byte, reason str
 		now := time.Now()
 		// A manual retry starts a new processing round and can produce a new final notice.
 		key := fmt.Sprintf("failed:%d:%s", id, timestamp(now))
-		if _, _, err := enqueue(ctx, tx, "notice", key, payload, notice.ChatID, now); err != nil {
+		target := domain.DeliveryTarget{Channel: "telegram", Address: strconv.FormatInt(notice.ChatID, 10)}
+		if _, _, err := enqueue(ctx, tx, "notice", key, payload, []domain.DeliveryTarget{target}, now); err != nil {
 			return err
 		}
 	}

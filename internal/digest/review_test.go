@@ -23,7 +23,7 @@ func TestPrepareFiltersDeduplicatesAndProjects(t *testing.T) {
 	first.Result.Analysis = domain.Analysis{
 		Headings: &domain.AnalysisHeadings{Summary: "heading"}, Title: "title", Overview: "overview",
 		Summary: []domain.Claim{{Text: "claim", SourceIDs: []string{"source-1"}}},
-		Tags:    []string{"tag"}, Uncertainties: []string{"uncertainty"},
+		Tags:    []string{"tag"},
 	}
 	first.Result.Sources = []domain.Source{{ID: "source-1", Title: "source", RequestedURL: "https://requested.example", URL: "https://final.example", Status: "ok", Content: "raw source body"}}
 	entries := []domain.ArchiveEntry{
@@ -37,7 +37,7 @@ func TestPrepareFiltersDeduplicatesAndProjects(t *testing.T) {
 		makeEntry(8, 7, start, "lower-bound"),
 		makeEntry(10, 7, end, "upper-bound"),
 	}
-	request := domain.DigestRequest{UserID: 7, Start: start, End: end}
+	request := domain.DigestRequest{UserID: 7, Start: start, End: end, Version: domain.DigestVersion}
 	asOf := end.Add(time.Hour)
 	input, err := Prepare(request, asOf, "UTC", "profile", "instruction", entries)
 	if err != nil {
@@ -94,6 +94,14 @@ func TestPrepareRejectsInvalidWindow(t *testing.T) {
 				t.Fatal("Prepare() error = nil")
 			}
 		})
+	}
+}
+
+func TestPrepareRequiresCurrentVersion(t *testing.T) {
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	request := domain.DigestRequest{UserID: 7, Start: base, End: base.Add(time.Hour)}
+	if _, err := Prepare(request, base, "UTC", "", "instruction", nil); err == nil {
+		t.Fatal("Prepare() accepted a versionless request")
 	}
 }
 
@@ -189,7 +197,7 @@ func TestRenderReviewUsesTrustedSourcesAndInputLimitations(t *testing.T) {
 	if err := ValidateReview(input, review); err != nil {
 		t.Fatal(err)
 	}
-	text := Render(Report{Version: domain.DigestVersion, Input: &input, Review: &review}, "UTC")
+	text := Render(Report{Version: domain.DigestVersion, Input: &input, Review: &review})
 	for _, want := range []string{
 		"本周回顾（3条）", "覆盖区间：从 2024-03-04 09:00（含）至 2024-03-11 09:00（不含）（America/New_York）",
 		"Opening text", "【Highlights】", "First item", "Second review", "Closing text",
@@ -212,16 +220,20 @@ func TestRenderReviewUsesTrustedSourcesAndInputLimitations(t *testing.T) {
 
 func TestRenderIncompleteReviewIsNotAnEmptyReview(t *testing.T) {
 	input := domain.DigestInput{Timezone: "UTC", Start: time.Now().Add(-time.Hour), Cutoff: time.Now(), Entries: []domain.DigestEntry{{JobID: 1}}}
-	text := Render(Report{Version: domain.DigestVersion, Input: &input}, "UTC")
+	text := Render(Report{Version: domain.DigestVersion, Input: &input})
 	if !strings.Contains(text, "周报生成未完成：尚未生成回顾内容") || strings.Contains(text, "本周回顾（0条）") || strings.Contains(text, "本周期没有") {
 		t.Fatalf("nil review looked like a valid empty week: %s", text)
 	}
-	withoutInput := Render(Report{Version: domain.DigestVersion}, "UTC")
+	withoutInput := Render(Report{Version: domain.DigestVersion})
 	if !strings.Contains(withoutInput, "周报生成未完成：尚无已保存的回顾材料") || strings.Contains(withoutInput, "本周回顾（0条）") {
 		t.Fatalf("missing input was not reported: %s", withoutInput)
 	}
+	versionless := Render(Report{Input: &input, Review: &domain.DigestReview{}})
+	if !strings.Contains(versionless, "周报版本不受支持") {
+		t.Fatalf("versionless report was rendered: %s", versionless)
+	}
 	invalid := domain.DigestReview{Sections: []domain.DigestSection{{Name: "bad"}}}
-	invalidText := Render(Report{Version: domain.DigestVersion, Input: &input, Review: &invalid}, "UTC")
+	invalidText := Render(Report{Version: domain.DigestVersion, Input: &input, Review: &invalid})
 	if !strings.Contains(invalidText, "未通过校验") || strings.Contains(invalidText, "本周回顾（0条）") {
 		t.Fatalf("invalid review was rendered as a snapshot: %s", invalidText)
 	}
@@ -230,8 +242,8 @@ func TestRenderIncompleteReviewIsNotAnEmptyReview(t *testing.T) {
 func TestRenderEmptyReviewIsExplicit(t *testing.T) {
 	input := domain.DigestInput{Timezone: "Asia/Shanghai", Start: time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC), Cutoff: time.Date(2024, 2, 5, 0, 0, 0, 0, time.UTC)}
 	review := domain.DigestReview{}
-	text := Render(Report{Version: domain.DigestVersion, Input: &input, Review: &review}, "UTC")
-	if !strings.Contains(text, "本周回顾（0条）") || !strings.Contains(text, "所选时间范围内暂无可汇总的新内容") || !strings.Contains(text, "覆盖区间：从 2024-02-01 08:00（含）至 2024-02-05 08:00（不含）（Asia/Shanghai）") || strings.Contains(text, "本周") || strings.Contains(text, "周报生成未完成") {
+	text := Render(Report{Version: domain.DigestVersion, Input: &input, Review: &review})
+	if !strings.Contains(text, "本周回顾（0条）") || !strings.Contains(text, "所选时间范围内暂无可汇总的新内容") || !strings.Contains(text, "覆盖区间：从 2024-02-01 08:00（含）至 2024-02-05 08:00（不含）（Asia/Shanghai）") || strings.Contains(text, "周报生成未完成") {
 		t.Fatalf("empty review was not rendered explicitly: %s", text)
 	}
 }

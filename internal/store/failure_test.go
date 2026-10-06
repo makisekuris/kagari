@@ -11,7 +11,7 @@ import (
 func TestFailureEvidenceAndFinalNoticeAreAtomic(t *testing.T) {
 	s := testStore(t, ":memory:")
 	ctx := context.Background()
-	id, _, err := s.Enqueue(ctx, "analyze", "failure", []byte(`{"user_id":7,"chat_id":7}`), 900)
+	id, _, err := s.Enqueue(ctx, "analyze", "failure", []byte(`{"user_id":7,"chat_id":7}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestFailureEvidenceAndFinalNoticeAreAtomic(t *testing.T) {
 	if err := s.FailJob(ctx, id, final, "exhausted", 2, retryAt, notice); err == nil {
 		t.Fatal("completed failure transition accepted twice")
 	}
-	if err := s.db.QueryRow(`SELECT count(*) FROM jobs WHERE kind='notice' AND target_chat_id=7`).Scan(&count); err != nil || count != 1 {
+	if err := s.db.QueryRow(`SELECT count(*) FROM jobs WHERE kind='notice' AND json_extract(targets,'$[0].address')='7'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("expected one private terminal notice: %d, %v", count, err)
 	}
 	if err := s.RetryJob(ctx, id); err != nil {

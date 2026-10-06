@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
@@ -41,12 +43,11 @@ func (e *Engine) GenerateDigest(ctx context.Context, input domain.DigestInput) (
 		}
 	}()
 
-	instruction := input.Instruction
-	if instruction == "" {
-		instruction = e.DigestPrompt()
+	if strings.TrimSpace(input.Instruction) == "" {
+		return review, usage, errors.New("digest instruction is required")
 	}
 	a, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
-		Name: "weekly_digest", Description: "按输入分析生成周报", Instruction: instruction,
+		Name: "weekly_digest", Description: "按输入分析生成周报", Instruction: input.Instruction,
 		Model: e.Model, MaxIterations: 1,
 	})
 	if err != nil {

@@ -79,11 +79,11 @@ func TestProcessJobRetriesModelAndNotifiesOnlyExhaustion(t *testing.T) {
 				t.Fatal(err)
 			}
 			payload, _ := json.Marshal(sub)
-			id, _, err := s.Enqueue(ctx, "analyze", "selected", payload, 900)
+			id, _, err := s.Enqueue(ctx, "analyze", "selected", payload, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			unrelatedID, _, err := s.Enqueue(ctx, "notice", "unrelated", []byte(`{"text":"queued"}`), 0)
+			unrelatedID, _, err := s.Enqueue(ctx, "notice", "unrelated", []byte(`{"text":"queued"}`), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -156,7 +156,7 @@ func TestProcessJobRetriesModelAndNotifiesOnlyExhaustion(t *testing.T) {
 			}
 			if tc.terminal {
 				notice, err := s.ClaimJob(ctx)
-				if err != nil || notice == nil || notice.Kind != "notice" || notice.TargetChatID != 7 {
+				if err != nil || notice == nil || notice.Kind != "notice" || len(notice.Targets) != 1 || notice.Targets[0].Address != "7" {
 					t.Fatalf("missing private final notice: %+v, %v", notice, err)
 				}
 				var command domain.Command
@@ -195,7 +195,7 @@ func TestCanceledAnalysisPreservesEvidenceWithoutFinalNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload, _ := json.Marshal(sub)
-	id, _, err := s.Enqueue(context.Background(), "analyze", "cancel", payload, 900)
+	id, _, err := s.Enqueue(context.Background(), "analyze", "cancel", payload, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

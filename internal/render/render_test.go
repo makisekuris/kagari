@@ -1,7 +1,6 @@
 package render
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -22,13 +21,19 @@ func TestChunksPreserveEmojiAndText(t *testing.T) {
 	}
 }
 
-func TestAnalysisHidesEmptyDiscussionAndLegacyRelevance(t *testing.T) {
+func TestAnalysisHidesEmptyDiscussion(t *testing.T) {
 	text := Analysis(domain.Result{Analysis: domain.Analysis{
-		Title: "标题", Overview: "概述", Relevance: "legacy preference",
-		Headings: &domain.AnalysisHeadings{Summary: "摘要", Discussion: "空讨论标题", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"},
+		Title: "标题", Overview: "概述",
+		Headings: &domain.AnalysisHeadings{Summary: "摘要", Discussion: "空讨论标题", Evaluation: "评价", Sources: "来源"},
 	}})
-	if strings.Contains(text, "legacy preference") || strings.Contains(text, "关注点") || strings.Contains(text, "讨论者观点") || strings.Contains(text, "空讨论标题") {
-		t.Fatalf("rendered legacy relevance or empty discussion: %s", text)
+	if strings.Contains(text, "关注点") || strings.Contains(text, "讨论者观点") || strings.Contains(text, "空讨论标题") {
+		t.Fatalf("rendered empty discussion: %s", text)
+	}
+}
+
+func TestAnalysisReportsMissingHeadings(t *testing.T) {
+	if text := Analysis(domain.Result{Analysis: domain.Analysis{Title: "标题"}}); !strings.Contains(text, "缺少展示标题") {
+		t.Fatalf("missing headings were not reported: %s", text)
 	}
 }
 
@@ -57,20 +62,5 @@ func TestAnalysisUsesModelHeadings(t *testing.T) {
 	}
 	if strings.Contains(text, "自定义摘要：：") || strings.Contains(text, "AI 摘要") || strings.Contains(text, "Agent 评价") {
 		t.Fatalf("model headings were replaced or duplicated: %s", text)
-	}
-}
-
-func TestAnalysisRendersLegacyJSONWithoutHeadings(t *testing.T) {
-	var result domain.Result
-	err := json.Unmarshal([]byte(`{"analysis":{"title":"旧档案","overview":"旧概述","summary":[{"text":"旧结论","source_ids":["s1"]}],"discussion":[],"evaluation":[],"uncertainties":["旧限制"]},"sources":[{"id":"s1","title":"旧来源","url":"https://example.com","status":"ok"}]}`), &result)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	text := Analysis(result)
-	for _, want := range []string{"AI 摘要：\n• 旧结论 [1]", "未确认与限制：\n• 旧限制", "原文与来源：\n[1] 旧来源", "https://example.com"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("rendered output missing %q: %s", want, text)
-		}
 	}
 }

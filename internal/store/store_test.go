@@ -2,11 +2,11 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -36,9 +36,17 @@ func submission(userID int64, key string, received time.Time) domain.Submission 
 	return domain.Submission{UserID: userID, ChatID: userID + 100, Text: key, ReceivedAt: received, CacheKey: key}
 }
 
+func telegramTargets(ids ...int64) []domain.DeliveryTarget {
+	targets := make([]domain.DeliveryTarget, 0, len(ids))
+	for _, id := range ids {
+		targets = append(targets, domain.DeliveryTarget{Channel: "telegram", Address: strconv.FormatInt(id, 10)})
+	}
+	return targets
+}
+
 func completeSubmission(t *testing.T, s *Store, sub domain.Submission) int64 {
 	t.Helper()
-	id, created, err := s.Enqueue(context.Background(), "analyze", sub.Text, mustJSON(t, sub), sub.ChatID)
+	id, created, err := s.Enqueue(context.Background(), "analyze", sub.Text, mustJSON(t, sub), telegramTargets(sub.ChatID))
 	if err != nil || !created {
 		t.Fatalf("Enqueue() = (%d, %v, %v)", id, created, err)
 	}
@@ -46,7 +54,7 @@ func completeSubmission(t *testing.T, s *Store, sub domain.Submission) int64 {
 	if err != nil || job == nil || job.ID != id {
 		t.Fatalf("ClaimJob() = (%+v, %v), want job %d", job, err, id)
 	}
-	if err := s.CompleteJob(context.Background(), id, mustJSON(t, domain.Result{Analysis: domain.Analysis{Title: sub.Text}}), nil, nil); err != nil {
+	if err := s.CompletePublication(context.Background(), id, mustJSON(t, domain.Result{Analysis: domain.Analysis{Title: sub.Text}}), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -55,7 +63,7 @@ func completeSubmission(t *testing.T, s *Store, sub domain.Submission) int64 {
 func TestRestartAndPrivateDatabaseFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data", "jobs.sqlite")
 	s := testStore(t, path)
-	id, created, err := s.Enqueue(context.Background(), "analyze", "one", []byte(`{"cache_key":"one"}`), 7)
+	id, created, err := s.Enqueue(context.Background(), "analyze", "one", []byte(`{"cache_key":"one"}`), nil)
 	if err != nil || !created {
 		t.Fatalf("Enqueue() = (%d, %v, %v)", id, created, err)
 	}
@@ -86,7 +94,7 @@ func TestAcceptUpdateEnqueueOffsetAreAtomicAndDeduplicated(t *testing.T) {
 	if _, err := s.db.Exec(`CREATE TRIGGER stop_enqueue BEFORE INSERT ON jobs BEGIN SELECT RAISE(ABORT, 'blocked'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.AcceptUpdate(ctx, 20, "analyze", "failed", []byte(`{"cache_key":"failed"}`), 1); err == nil {
+	if _, _, err := s.AcceptUpdate(ctx, 20, "analyze", "failed", []byte(`{"cache_key":"failed"}`), nil); err == nil {
 		t.Fatal("AcceptUpdate() succeeded despite rejecting insert trigger")
 	}
 	if offset, err := s.Offset(ctx); err != nil || offset != 0 {
@@ -95,18 +103,18 @@ func TestAcceptUpdateEnqueueOffsetAreAtomicAndDeduplicated(t *testing.T) {
 	if _, err := s.db.Exec(`DROP TRIGGER stop_enqueue`); err != nil {
 		t.Fatal(err)
 	}
-	id, created, err := s.AcceptUpdate(ctx, 20, "analyze", "same", []byte(`{"cache_key":"same"}`), 1)
+	id, created, err := s.AcceptUpdate(ctx, 20, "analyze", "same", []byte(`{"cache_key":"same"}`), nil)
 	if err != nil || !created || id == 0 {
 		t.Fatalf("AcceptUpdate() = (%d, %v, %v)", id, created, err)
 	}
-	if gotID, gotCreated, err := s.AcceptUpdate(ctx, 20, "analyze", "same", []byte(`{"cache_key":"same"}`), 1); err != nil || gotCreated || gotID != 0 {
+	if gotID, gotCreated, err := s.AcceptUpdate(ctx, 20, "analyze", "same", []byte(`{"cache_key":"same"}`), nil); err != nil || gotCreated || gotID != 0 {
 		t.Fatalf("duplicate update = (%d, %v, %v), want skipped", gotID, gotCreated, err)
 	}
-	gotID, gotCreated, err := s.AcceptUpdate(ctx, 21, "analyze", "same", []byte(`{"cache_key":"same"}`), 1)
+	gotID, gotCreated, err := s.AcceptUpdate(ctx, 21, "analyze", "same", []byte(`{"cache_key":"same"}`), nil)
 	if err != nil || gotCreated || gotID != id {
 		t.Fatalf("idempotent job = (%d, %v, %v), want (%d,false,nil)", gotID, gotCreated, err, id)
 	}
-	if _, created, err := s.AcceptUpdate(ctx, 22, "", "", nil, 1); err != nil || created {
+	if _, created, err := s.AcceptUpdate(ctx, 22, "", "", nil, nil); err != nil || created {
 		t.Fatalf("ignored update = (created %v, %v)", created, err)
 	}
 	if offset, err := s.Offset(ctx); err != nil || offset != 23 {
@@ -117,7 +125,7 @@ func TestAcceptUpdateEnqueueOffsetAreAtomicAndDeduplicated(t *testing.T) {
 func TestRetryRecoveryAndOrderedUncertainDeliveries(t *testing.T) {
 	s := testStore(t, ":memory:")
 	ctx := context.Background()
-	id, _, err := s.Enqueue(ctx, "analyze", "retry", []byte(`{"cache_key":"retry"}`), 42)
+	id, _, err := s.Enqueue(ctx, "analyze", "retry", []byte(`{"cache_key":"retry"}`), telegramTargets(42))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +152,10 @@ func TestRetryRecoveryAndOrderedUncertainDeliveries(t *testing.T) {
 		{RequestedURL: "https://example.com/start", URL: "https://example.com/final", Status: "ok", Title: "cached"},
 		{URL: "https://example.com/failure", Status: "error", Title: "not cached"},
 	}
-	if err := s.CompleteJob(ctx, id, mustJSON(t, domain.Result{Analysis: domain.Analysis{Title: "done"}}), []string{"first", "second"}, sources); err != nil {
+	target := telegramTargets(42)[0]
+	if err := s.CompletePublication(ctx, id, mustJSON(t, domain.Result{Analysis: domain.Analysis{Title: "done"}}), []domain.Delivery{
+		{Target: target, Part: 1, Text: "first"}, {Target: target, Part: 2, Text: "second"},
+	}, sources); err != nil {
 		t.Fatal(err)
 	}
 	cached, err := s.CachedSource(ctx, "https://example.com/start")
@@ -171,7 +182,7 @@ func TestRetryRecoveryAndOrderedUncertainDeliveries(t *testing.T) {
 	if err != nil || first == nil || first.Part != 1 {
 		t.Fatalf("retried delivery = (%+v, %v), want part 1", first, err)
 	}
-	if err := s.SentDelivery(ctx, first.ID, 1001); err != nil {
+	if err := s.SentDeliveryReceipt(ctx, first.ID, "1001"); err != nil {
 		t.Fatal(err)
 	}
 	second, err := s.ClaimDelivery(ctx)
@@ -196,20 +207,20 @@ func TestRetryRecoveryAndOrderedUncertainDeliveries(t *testing.T) {
 func TestRecoverMarksSendingDeliveryUncertain(t *testing.T) {
 	s := testStore(t, ":memory:")
 	ctx := context.Background()
-	id, _, err := s.Enqueue(ctx, "analyze", "recover", []byte(`{"cache_key":"recover"}`), 1)
+	id, _, err := s.Enqueue(ctx, "analyze", "recover", []byte(`{"cache_key":"recover"}`), telegramTargets(1))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ClaimJob(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteJob(ctx, id, []byte(`{}`), []string{"message"}, nil); err != nil {
+	if err := s.CompletePublication(ctx, id, []byte(`{}`), []domain.Delivery{{Target: telegramTargets(1)[0], Part: 1, Text: "message"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ClaimDelivery(ctx); err != nil {
 		t.Fatal(err)
 	}
-	activeID, _, err := s.Enqueue(ctx, "analyze", "active", []byte(`{"cache_key":"active"}`), 1)
+	activeID, _, err := s.Enqueue(ctx, "analyze", "active", []byte(`{"cache_key":"active"}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +243,7 @@ func TestMultiTargetPublicationSnapshotOrderingAndRetry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "multi-target.sqlite")
 	targets := []domain.DeliveryTarget{{Channel: "telegram", Address: "101"}, {Channel: "telegram", Address: "-100202"}}
 	s := testStore(t, path)
-	id, created, err := s.Enqueue(ctx, "analyze", "multi", []byte(`{"cache_key":"multi"}`), 101, targets...)
+	id, created, err := s.Enqueue(ctx, "analyze", "multi", []byte(`{"cache_key":"multi"}`), targets)
 	if err != nil || !created {
 		t.Fatalf("Enqueue() = (%d, %v, %v)", id, created, err)
 	}
@@ -261,7 +272,7 @@ func TestMultiTargetPublicationSnapshotOrderingAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	a1, err := s.ClaimDelivery(ctx)
-	if err != nil || a1 == nil || a1.Target != targets[0] || a1.ChatID != 101 || a1.Part != 1 {
+	if err != nil || a1 == nil || a1.Target != targets[0] || a1.Part != 1 {
 		t.Fatalf("first claim = (%+v, %v), want target A part 1", a1, err)
 	}
 	if err := s.FailDelivery(ctx, a1.ID, "blocked", 1, time.Now(), false); err != nil {
@@ -289,7 +300,7 @@ func TestMultiTargetPublicationSnapshotOrderingAndRetry(t *testing.T) {
 	if err != nil || b2 == nil || b2.Target != targets[1] || b2.Part != 2 {
 		t.Fatalf("target B second claim = (%+v, %v)", b2, err)
 	}
-	if err := s.SentDelivery(ctx, b2.ID, 2002); err != nil {
+	if err := s.SentDeliveryReceipt(ctx, b2.ID, "2002"); err != nil {
 		t.Fatal(err)
 	}
 	if next, err := s.ClaimDelivery(ctx); err != nil || next != nil {
@@ -325,7 +336,7 @@ func TestMultiTargetPublicationSnapshotOrderingAndRetry(t *testing.T) {
 func TestAcceptUpdatePersistsTargetSnapshot(t *testing.T) {
 	s := testStore(t, ":memory:")
 	targets := []domain.DeliveryTarget{{Channel: "telegram", Address: "11"}, {Channel: "telegram", Address: "-10022"}}
-	id, created, err := s.AcceptUpdate(context.Background(), 0, "analyze", "update", []byte(`{}`), 11, targets...)
+	id, created, err := s.AcceptUpdate(context.Background(), 0, "analyze", "update", []byte(`{}`), targets)
 	if err != nil || !created {
 		t.Fatalf("AcceptUpdate() = (%d, %v, %v)", id, created, err)
 	}
@@ -338,7 +349,7 @@ func TestAcceptUpdatePersistsTargetSnapshot(t *testing.T) {
 func TestCompletePublicationRollsBackOnDuplicateOutboxPart(t *testing.T) {
 	s := testStore(t, ":memory:")
 	ctx := context.Background()
-	id, _, err := s.Enqueue(ctx, "analyze", "rollback", []byte(`{}`), 7)
+	id, _, err := s.Enqueue(ctx, "analyze", "rollback", []byte(`{}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,140 +374,6 @@ func TestCompletePublicationRollsBackOnDuplicateOutboxPart(t *testing.T) {
 	}
 	if source, err := s.CachedSource(ctx, "https://cached.example"); err != nil || source != nil {
 		t.Fatalf("failed completion cached source: (%+v, %v)", source, err)
-	}
-}
-
-const legacySchema = `
-CREATE TABLE jobs (
-	id INTEGER PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL, payload BLOB NOT NULL, result BLOB,
-	target_chat_id INTEGER NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending','processing','completed','failed')),
-	attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', next_attempt_at TEXT NOT NULL,
-	created_at TEXT NOT NULL, UNIQUE(kind,key)
-);
-CREATE TABLE deliveries (
-	id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, chat_id INTEGER NOT NULL,
-	part INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending','sending','sent','failed','uncertain')),
-	attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', next_attempt_at TEXT NOT NULL, message_id INTEGER,
-	UNIQUE(job_id,part)
-);
-CREATE INDEX deliveries_claim ON deliveries(status,next_attempt_at,id);
-CREATE INDEX deliveries_order ON deliveries(job_id,part,status);
-INSERT INTO jobs(id,kind,key,payload,result,target_chat_id,status,attempts,last_error,next_attempt_at,created_at)
-	VALUES(5,'analyze','legacy','{}','{"done":true}',77,'completed',2,'','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
-`
-
-func openLegacyDatabase(t *testing.T, path string) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(legacySchema); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	return db
-}
-
-func TestMigrationPreservesLegacyOutboxAndMessageIDs(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.sqlite")
-	db := openLegacyDatabase(t, path)
-	if _, err := db.Exec(`INSERT INTO deliveries(id,job_id,chat_id,part,text,status,attempts,last_error,next_attempt_at,message_id) VALUES
-		(31,5,77,1,'sent text','sent',1,'','2026-01-01T00:00:00Z',901),
-		(32,5,77,2,'uncertain text','uncertain',3,'outcome unknown','2026-01-02T00:00:00Z','opaque:32')`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s := testStore(t, path)
-	job, err := s.Job(context.Background(), 5)
-	wantTarget := []domain.DeliveryTarget{{Channel: "telegram", Address: "77"}}
-	if err != nil || job == nil || !reflect.DeepEqual(job.Targets, wantTarget) || job.Status != "completed" || string(job.Result) != `{"done":true}` {
-		t.Fatalf("migrated job = (%+v, %v)", job, err)
-	}
-	rows, err := s.db.Query(`SELECT id,job_id,channel,address,chat_id,part,text,status,attempts,last_error,next_attempt_at,message_id FROM deliveries ORDER BY id`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	type savedDelivery struct {
-		id, jobID, chatID, part, attempts            int64
-		channel, address, text, status, reason, next string
-		messageID                                    any
-	}
-	var saved []savedDelivery
-	for rows.Next() {
-		var delivery savedDelivery
-		if err := rows.Scan(&delivery.id, &delivery.jobID, &delivery.channel, &delivery.address, &delivery.chatID, &delivery.part,
-			&delivery.text, &delivery.status, &delivery.attempts, &delivery.reason, &delivery.next, &delivery.messageID); err != nil {
-			t.Fatal(err)
-		}
-		saved = append(saved, delivery)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if len(saved) != 2 || saved[0].id != 31 || saved[0].channel != "telegram" || saved[0].address != "77" || saved[0].chatID != 77 || saved[0].status != "sent" || saved[0].attempts != 1 || saved[0].messageID != "901" ||
-		saved[1].id != 32 || saved[1].text != "uncertain text" || saved[1].status != "uncertain" || saved[1].attempts != 3 || saved[1].reason != "outcome unknown" || saved[1].messageID != "opaque:32" {
-		t.Fatalf("migration changed legacy deliveries: %+v", saved)
-	}
-	var fkViolations int
-	if err := s.db.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check`).Scan(&fkViolations); err != nil || fkViolations != 0 {
-		t.Fatalf("foreign key check = (%d, %v)", fkViolations, err)
-	}
-}
-
-func TestMigrationRollsBackOnInvalidLegacyOutbox(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "broken-legacy.sqlite")
-	db := openLegacyDatabase(t, path)
-	if _, err := db.Exec(`PRAGMA foreign_keys=OFF; INSERT INTO deliveries(id,job_id,chat_id,part,text,status,next_attempt_at) VALUES(90,999,7,1,'orphan','pending','2026-01-01T00:00:00Z')`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if migrated, err := New(path); err == nil {
-		_ = migrated.Close()
-		t.Fatal("migration accepted orphan legacy delivery")
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	columns := func(table string) map[string]bool {
-		t.Helper()
-		rows, err := db.Query("PRAGMA table_info(" + table + ")")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer rows.Close()
-		found := map[string]bool{}
-		for rows.Next() {
-			var cid, notNull, primaryKey int
-			var name, dataType string
-			var defaultValue sql.NullString
-			if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
-				t.Fatal(err)
-			}
-			found[name] = true
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
-		}
-		return found
-	}
-	if columns("jobs")["targets"] || columns("deliveries")["channel"] || columns("deliveries")["address"] {
-		t.Fatal("failed migration left a partial schema")
-	}
-	var count int
-	if err := db.QueryRow(`SELECT count(*) FROM deliveries WHERE id=90 AND job_id=999`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("legacy outbox changed after rollback: count=%d err=%v", count, err)
-	}
-	var tempTables int
-	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='deliveries_new'`).Scan(&tempTables); err != nil || tempTables != 0 {
-		t.Fatalf("temporary migration table remains: count=%d err=%v", tempTables, err)
 	}
 }
 
@@ -533,11 +410,11 @@ func TestStatsCountsAnalyzeSubmissionsByStatus(t *testing.T) {
 	ctx := context.Background()
 	start := time.Now().UTC().Truncate(time.Second)
 	end := start.Add(time.Hour)
-	_, _, err := s.Enqueue(ctx, "analyze", "pending", mustJSON(t, submission(5, "p", start)), 5)
+	_, _, err := s.Enqueue(ctx, "analyze", "pending", mustJSON(t, submission(5, "p", start)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	failedID, _, err := s.Enqueue(ctx, "analyze", "failed", mustJSON(t, submission(5, "f", start.Add(time.Minute))), 5)
+	failedID, _, err := s.Enqueue(ctx, "analyze", "failed", mustJSON(t, submission(5, "f", start.Add(time.Minute))), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

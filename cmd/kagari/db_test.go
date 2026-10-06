@@ -23,7 +23,8 @@ func seedDebugDB(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, _, err := db.Enqueue(ctx, "analyze", "completed", []byte(`{"user_id":1}`), 7)
+	target := []domain.DeliveryTarget{{Channel: "telegram", Address: "7"}}
+	id, _, err := db.Enqueue(ctx, "analyze", "completed", []byte(`{"user_id":1}`), target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,13 +33,13 @@ func seedDebugDB(t *testing.T) string {
 		t.Fatalf("ClaimJob() = (%+v, %v), want job %d", job, err, id)
 	}
 	source := domain.Source{RequestedURL: "https://example.test/a", URL: "https://example.test/a", Status: "ok"}
-	if err := db.CompleteJob(ctx, id, []byte(`{}`), []string{"stored delivery"}, []domain.Source{source}); err != nil {
+	if err := db.CompletePublication(ctx, id, []byte(`{}`), []domain.Delivery{{Target: target[0], Part: 1, Text: "stored delivery"}}, []domain.Source{source}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := db.Enqueue(ctx, "analyze", "pending", []byte(`{"user_id":2}`), 7); err != nil {
+	if _, _, err := db.Enqueue(ctx, "analyze", "pending", []byte(`{"user_id":2}`), nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := db.AcceptUpdate(ctx, 41, "", "", nil, 0); err != nil {
+	if _, _, err := db.AcceptUpdate(ctx, 41, "", "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {

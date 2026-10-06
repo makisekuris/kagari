@@ -121,7 +121,7 @@ func run() error {
 			return err
 		}
 		raw, _ := json.Marshal(sub)
-		id, _, err := s.Enqueue(ctx, "analyze", "cli:"+sub.CacheKey+":"+strconv.FormatInt(sub.ReceivedAt.UnixNano(), 10), raw, 0)
+		id, _, err := s.Enqueue(ctx, "analyze", "cli:"+sub.CacheKey+":"+strconv.FormatInt(sub.ReceivedAt.UnixNano(), 10), raw, nil)
 		if err != nil {
 			return err
 		}
