@@ -277,6 +277,36 @@ func TestForwardedMessageSeparatesTaskAndThirdPartyText(t *testing.T) {
 	}
 }
 
+func TestArchiveCommandsUseAllowlistedPrivateSenderAsOwner(t *testing.T) {
+	client := testClient(t, testStore(t), baseConfig(), func(sub domain.Submission) (domain.Submission, error) { return sub, nil }, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("unexpected Telegram request: %s", req.URL)
+		return nil, errors.New("unexpected request")
+	}))
+	for _, text := range []string{"/archive@kagari_bot 2", "/archive_show@kagari_bot 42", "/archive_delete@kagari_bot 42 confirm"} {
+		message := &models.Message{From: &models.User{ID: 7}, Chat: models.Chat{ID: 7, Type: models.ChatTypePrivate}, Text: text}
+		kind, _, payload, target, _, err := client.jobForUpdate(&models.Update{ID: 7, Message: message})
+		if err != nil || kind != "command" || target != 7 {
+			t.Fatalf("jobForUpdate(%q) = (%q, %d, %v)", text, kind, target, err)
+		}
+		var command domain.Command
+		if err := json.Unmarshal(payload, &command); err != nil {
+			t.Fatal(err)
+		}
+		if command.UserID != 7 || command.ChatID != 7 || command.Text != text {
+			t.Fatalf("queued command = (%+v), want private sender 7 and original text %q", command, text)
+		}
+	}
+	for _, message := range []*models.Message{
+		{From: &models.User{ID: 8}, Chat: models.Chat{ID: 8, Type: models.ChatTypePrivate}, Text: "/archive"},
+		{From: &models.User{ID: 7}, Chat: models.Chat{ID: -100, Type: models.ChatTypeGroup}, Text: "/archive"},
+	} {
+		kind, _, _, _, _, err := client.jobForUpdate(&models.Update{ID: 8, Message: message})
+		if err != nil || kind != "" {
+			t.Fatalf("unauthorized/group archive command became a job: kind=%q err=%v", kind, err)
+		}
+	}
+}
+
 func TestPollConfirmsGroupAndUnauthorizedUpdatesWithoutJobs(t *testing.T) {
 	st := testStore(t)
 	updates := `{"ok":true,"result":[{"update_id":1,"message":{"message_id":1,"from":{"id":7},"chat":{"id":-100,"type":"group"},"date":1,"text":"https://example.com"}},{"update_id":2,"message":{"message_id":2,"from":{"id":8},"chat":{"id":8,"type":"private"},"date":1,"text":"https://example.com"}}]}`

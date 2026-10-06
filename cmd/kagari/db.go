@@ -47,7 +47,7 @@ func runDB(ctx context.Context, path string, args []string, out io.Writer) error
 		return errors.New("database command output is required")
 	}
 	if len(args) == 0 {
-		return errors.New("usage: kagari db {info|list|clear}")
+		return errors.New("usage: kagari db {info|list|clear|archive}")
 	}
 	if isDBHelp(args[0]) && len(args) == 1 {
 		return writeDBHelp(out, "")
@@ -65,8 +65,10 @@ func runDB(ctx context.Context, path string, args []string, out io.Writer) error
 		return runDBList(ctx, path, args[1:], out)
 	case "clear":
 		return runDBClear(ctx, path, args[1:], out)
+	case "archive":
+		return runDBArchive(ctx, path, args[1:], out)
 	default:
-		return fmt.Errorf("unknown db command %q; usage: kagari db {info|list|clear}", args[0])
+		return fmt.Errorf("unknown db command %q; usage: kagari db {info|list|clear|archive}", args[0])
 	}
 }
 
@@ -216,8 +218,16 @@ func writeDBHelp(out io.Writer, command string) error {
 		usage = "usage: kagari db list [-limit 20] [-offset 0] TABLE\n"
 	case "clear":
 		usage = "usage: kagari db clear [-scope cache|data|all] -yes\n"
+	case "archive":
+		usage = "usage: kagari db archive {list|show|delete}\n"
+	case "archive list":
+		usage = "usage: kagari db archive list -user ID [-limit 20] [-offset 0]\n"
+	case "archive show":
+		usage = "usage: kagari db archive show -user ID TASK_ID\n"
+	case "archive delete":
+		usage = "usage: kagari db archive delete -user ID -yes TASK_ID\n"
 	default:
-		usage = "usage: kagari db {info|list|clear}\n"
+		usage = "usage: kagari db {info|list|clear|archive}\n"
 	}
 	_, err := io.WriteString(out, usage)
 	return err

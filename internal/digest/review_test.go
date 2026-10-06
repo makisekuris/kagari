@@ -231,7 +231,7 @@ func TestRenderEmptyReviewIsExplicit(t *testing.T) {
 	input := domain.DigestInput{Timezone: "Asia/Shanghai", Start: time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC), Cutoff: time.Date(2024, 2, 5, 0, 0, 0, 0, time.UTC)}
 	review := domain.DigestReview{}
 	text := Render(Report{Version: domain.DigestVersion, Input: &input, Review: &review}, "UTC")
-	if !strings.Contains(text, "本周回顾（0条）") || !strings.Contains(text, "所选时间范围内暂无可汇总的新内容") || !strings.Contains(text, "覆盖区间：从 2024-02-01 08:00（含）至 2024-02-05 08:00（不含）（Asia/Shanghai）") || strings.Contains(text, "本周") || strings.Contains(text, "周报生成未完成") {
+	if !strings.Contains(text, "本周回顾（0条）") || !strings.Contains(text, "所选时间范围内暂无可汇总的新内容") || !strings.Contains(text, "覆盖区间：从 2024-02-01 08:00（含）至 2024-02-05 08:00（不含）（Asia/Shanghai）") || strings.Contains(text, "周报生成未完成") {
 		t.Fatalf("empty review was not rendered explicitly: %s", text)
 	}
 }

@@ -93,7 +93,7 @@ func isCommand(text string) bool {
 	}
 	command := strings.SplitN(fields[0], "@", 2)[0]
 	switch command {
-	case "/start", "/help", "/status", "/retry", "/retry_delivery", "/weekly":
+	case "/start", "/help", "/status", "/retry", "/retry_delivery", "/weekly", "/archive", "/archive_show", "/archive_delete":
 		return true
 	default:
 		return false

@@ -28,6 +28,9 @@ func (w *Worker) command(ctx context.Context, c domain.Command) string {
 	if cmd == "/start" || cmd == "/help" {
 		return help
 	}
+	if cmd == "/archive" || cmd == "/archive_show" || cmd == "/archive_delete" {
+		return w.archiveCommand(ctx, c, cmd, fields)
+	}
 	if cmd == "/weekly" {
 		loc, _ := time.LoadLocation(w.Config.Weekly.Timezone)
 		start, end := digest.Window(time.Now(), loc)
@@ -118,4 +121,4 @@ func (w *Worker) Status(ctx context.Context, id int64) (string, error) {
 	return text, nil
 }
 
-const help = "直接发送或转发含链接的消息，附上你的阅读关注点。\n/status 任务号：查看处理和投递状态\n/retry 任务号：重试处理失败的任务\n/retry_delivery 任务号：重发失败或结果不确定的消息（可能重复）\n/weekly：回顾截至现在的一周内容\n/weekly YYYY-MM-DD YYYY-MM-DD：按收录日期回顾，结束日期不包含"
+const help = "直接发送或转发含链接的消息，附上你的阅读关注点。\n/status 任务号：查看处理和投递状态\n/retry 任务号：重试处理失败的任务\n/retry_delivery 任务号：重发失败或结果不确定的消息（可能重复）\n/archive [页码]：查看已完成分析归档（每页 10 条）\n/archive_show 任务号：查看提交内容、备注、链接和完整分析\n/archive_delete 任务号：预览删除影响；发送 /archive_delete 任务号 confirm 确认\n/weekly：回顾截至现在的一周内容\n/weekly YYYY-MM-DD YYYY-MM-DD：按收录日期回顾，结束日期不包含"

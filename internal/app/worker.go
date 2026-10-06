@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/openai/openai-go/v3"
-	"go.uber.org/zap"
 	"kagari/internal/agent"
 	"kagari/internal/config"
 	"kagari/internal/distribution"
@@ -17,6 +15,9 @@ import (
 	"kagari/internal/render"
 	"kagari/internal/store"
 	"kagari/internal/telegram"
+
+	"github.com/openai/openai-go/v3"
+	"go.uber.org/zap"
 )
 
 type Worker struct {

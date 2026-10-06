@@ -155,9 +155,29 @@ CLI 的 `analyze` 和 `digest` 会启动任务处理器，不能与 `run` 或另
 
 CLI `analyze` and `digest` start a processor and must not run alongside `run` or another processing CLI command. Status, export, and retry commands can run while the service is active.
 
-Telegram 只接收允许列表中用户的私聊消息。确认、命令回复和处理失败通知发回私聊；分析与周报结果默认发回提交私聊。配置 `telegram.target_chat_ids` 可将同一结果分发到多个聊天或频道，bot 需要相应发言权限。列表非空时优先于旧配置 `telegram.target_chat_id`；列表为空时继续使用旧配置，单目标为 `0` 时回复提交私聊。支持 `/help`、`/status ID`、`/retry ID`、`/retry_delivery ID`、`/weekly` 和 `/weekly START END`。
+Telegram 只接收允许列表中用户的私聊消息。确认、命令回复和处理失败通知发回私聊；分析与周报结果默认发回提交私聊。配置 `telegram.target_chat_ids` 可将同一结果分发到多个聊天或频道，bot 需要相应发言权限。列表非空时优先于旧配置 `telegram.target_chat_id`；列表为空时继续使用旧配置，单目标为 `0` 时回复提交私聊。支持 `/help`、`/status ID`、`/retry ID`、`/retry_delivery ID`、`/weekly`、`/weekly START END` 和下述归档命令。
 
-Telegram accepts private messages from users on the allowlist. Acknowledgements, command replies, and processing failure notices stay in private chat. Analysis and digest results default to the submitting chat. Set `telegram.target_chat_ids` to distribute the same result to multiple chats or channels; the bot needs posting permission. A nonempty list takes precedence over the legacy `telegram.target_chat_id`; an empty list uses that legacy setting, with `0` falling back to private chat. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, and `/weekly START END`.
+Telegram accepts private messages from users on the allowlist. Acknowledgements, command replies, and processing failure notices stay in private chat. Analysis and digest results default to the submitting chat. Set `telegram.target_chat_ids` to distribute the same result to multiple chats or channels; the bot needs posting permission. A nonempty list takes precedence over the legacy `telegram.target_chat_id`; an empty list uses that legacy setting, with `0` falling back to private chat. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, `/weekly START END`, and the archive commands below.
+
+私聊 bot 可分页查看自己的归档、读取详情并确认删除。用户身份取自 Telegram 发送者，不接受用户 ID 参数。
+
+In a private bot chat, browse your archives, read details, and confirm deletion. Ownership comes from the Telegram sender; commands do not accept a user ID.
+
+```text
+/archive
+/archive 2
+/archive_show 17
+/archive_delete 17
+/archive_delete 17 confirm
+```
+
+`/archive [页码]` 默认第一页，每页 10 条，按任务号从大到小列出已完成分析，保留重复收录；收录日期使用 `weekly.timezone`。`/archive_show` 展示原始提交、备注、链接和完整分析报告。`/archive_delete ID` 先展示归档标题和删除范围，带 `confirm` 的命令才执行删除。正在发送消息的归档会拒绝删除，请等待投递结束后重试。删除范围与 CLI 相同：删除归档及关联投递记录，保留共享缓存和已有周报快照，也不会撤回已发送消息。
+
+`/archive [PAGE]` defaults to page 1, with 10 completed analyses per page in descending job ID order, including duplicate submissions; submission dates use `weekly.timezone`. `/archive_show` displays the original submission, notes, links, and full analysis report. `/archive_delete ID` first displays the archive title and deletion scope; deletion requires the command with `confirm`. An archive with an active message send cannot be deleted; retry after delivery finishes. As with the CLI, deletion removes the archive and its deliveries while preserving shared cache and existing digest snapshots, and does not retract sent messages.
+
+归档命令使用现有任务队列和投递流程，因此分析任务执行时命令回复可能延迟。回复发回发起命令的私聊，不使用分析结果的公共投递目标。
+
+Archive commands use the existing job queue and delivery flow, so an analysis in progress may delay replies. Replies go to the private chat where the command was sent, rather than the public analysis delivery target.
 
 ```yaml
 telegram:
@@ -183,6 +203,22 @@ The `db` command only opens an existing database; it never creates or initialize
 ./bin/kagari -config config.yaml db list meta
 ./bin/kagari -config config.yaml db list update_state
 ```
+
+按用户管理已归档分析。归档是已完成的 `analyze` 任务，归属依据原始提交的 `user_id`。必须显式传 `-user`；CLI 提交未指定用户时归属用户 `0`。列表按任务号从大到小分页，保留重复收录，并输出原始提交和完整分析结果（含来源正文）。分页默认 20 条，最多 100 条；所有选项写在任务号之前。
+
+Manage archived analyses by user. Archives are completed `analyze` jobs, owned by the original submission's `user_id`. An explicit `-user` is required; CLI submissions without a user belong to user `0`. Lists are paginated by descending job ID, preserve duplicate submissions, and include the original submission and complete analysis result with source text. The default page size is 20, with a maximum of 100. Place flags before the task ID.
+
+```sh
+./bin/kagari -config config.yaml db archive list -user 123456 -limit 20 -offset 0
+./bin/kagari -config config.yaml db archive show -user 123456 17
+
+# 停止处理器后删除指定用户的一条归档 / Stop processors before deleting one archive
+./bin/kagari -config config.yaml db archive delete -user 123456 -yes 17
+```
+
+`list` 和 `show` 使用只读连接，可在服务运行时执行。`delete` 需要 `-yes` 和处理器锁，会在同一事务中删除匹配用户及任务号的归档和关联投递记录；用户不匹配、任务未完成或任务类型不是分析时拒绝删除。删除后，新建周报的输入不再包含该记录；已有周报及其输入快照、共享来源缓存、调度元数据和 Telegram offset 会保留。删除不会撤回已发送的 Telegram 消息；任务号可能重用。
+
+`list` and `show` use read-only connections and can run while the service is active. `delete` requires `-yes` and the processor lock, and removes the archive matching both user and task ID along with its deliveries in one transaction. It rejects an owner mismatch, an incomplete task, or a task that is not an analysis. New digests exclude the deleted record; existing digests and input snapshots, shared source cache, scheduler metadata, and Telegram offset remain. Deletion does not retract sent Telegram messages; task IDs may be reused.
 
 清理前停止 `run` 或其他处理型命令。清理需要显式传 `-yes`，会事务性删除数据但保留数据库结构：
 
