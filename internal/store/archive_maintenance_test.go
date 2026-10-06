@@ -12,8 +12,8 @@ import (
 
 func seedArchiveJob(t *testing.T, s *Store, kind, key string, sub domain.Submission, status string, result []byte) int64 {
 	t.Helper()
-	raw, err := s.db.ExecContext(context.Background(), `INSERT INTO jobs(kind,key,payload,result,target_chat_id,status,next_attempt_at,created_at)
-		VALUES(?,?,?,?,?,?,?,?)`, kind, key, mustJSON(t, sub), result, sub.ChatID, status, timestamp(time.Now()), timestamp(time.Now()))
+	raw, err := s.db.ExecContext(context.Background(), `INSERT INTO jobs(kind,key,payload,result,targets,status,next_attempt_at,created_at)
+		VALUES(?,?,?,?,?,?,?,?)`, kind, key, mustJSON(t, sub), result, `[]`, status, timestamp(time.Now()), timestamp(time.Now()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,10 @@ func TestListArchivePaginationDuplicatesAndOwner(t *testing.T) {
 	secondID := completeSubmission(t, s, second)
 	otherID := completeSubmission(t, s, submission(17, "other", at))
 	rich := domain.Result{
-		Analysis: domain.Analysis{Title: "second full result"},
+		Analysis: domain.Analysis{
+			Headings: &domain.AnalysisHeadings{Summary: "摘要", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"},
+			Title:    "second full result",
+		},
 		Sources:  []domain.Source{{URL: "https://example.test/source", Status: "ok", Content: "evidence text"}},
 		Readings: []domain.Reading{{SourceID: "source-1", Role: "evidence", Question: "verify claim"}},
 	}
@@ -143,7 +146,7 @@ func TestDeleteArchiveEntryIsScopedAndPreservesSharedData(t *testing.T) {
 		jobID int64
 		part  int
 	}{{targetID, 1}, {targetID, 2}, {siblingID, 1}, {otherID, 1}, {digestID, 1}} {
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO deliveries(job_id,chat_id,part,text,status,next_attempt_at) VALUES(?,7,?,'part','sent',?)`, delivery.jobID, delivery.part, timestamp(at)); err != nil {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO deliveries(job_id,channel,address,part,text,status,next_attempt_at) VALUES(?,'telegram','7',?,'part','sent',?)`, delivery.jobID, delivery.part, timestamp(at)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -204,7 +207,7 @@ func TestDeleteArchiveEntryRollsBackAndRefusesReadOnly(t *testing.T) {
 	ctx := context.Background()
 	path, source := maintenanceFixture(t)
 	id := seedArchiveJob(t, source, "analyze", "rollback", submission(0, "rollback", time.Now()), "completed", []byte(`{}`))
-	if _, err := source.db.ExecContext(ctx, `INSERT INTO deliveries(job_id,chat_id,part,text,status,next_attempt_at) VALUES(?,7,1,'part','sent',?)`, id, timestamp(time.Now())); err != nil {
+	if _, err := source.db.ExecContext(ctx, `INSERT INTO deliveries(job_id,channel,address,part,text,status,next_attempt_at) VALUES(?,'telegram','7',1,'part','sent',?)`, id, timestamp(time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := source.db.ExecContext(ctx, `CREATE TRIGGER block_archive_job_delete BEFORE DELETE ON jobs BEGIN SELECT RAISE(ABORT,'blocked'); END`); err != nil {
@@ -246,7 +249,7 @@ func TestDeleteArchiveEntryWaitsForActiveSender(t *testing.T) {
 	ctx := context.Background()
 	_, s := maintenanceFixture(t)
 	id := seedArchiveJob(t, s, "analyze", "active-delivery", submission(7, "active-delivery", time.Now()), "completed", []byte(`{}`))
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO deliveries(job_id,chat_id,part,text,status,next_attempt_at) VALUES(?,7,1,'part','pending',?)`, id, timestamp(time.Now())); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO deliveries(job_id,channel,address,part,text,status,next_attempt_at) VALUES(?,'telegram','7',1,'part','pending',?)`, id, timestamp(time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	delivery, err := s.ClaimDelivery(ctx)
@@ -259,7 +262,7 @@ func TestDeleteArchiveEntryWaitsForActiveSender(t *testing.T) {
 	if entry, err := s.ArchiveEntry(ctx, 7, id); err != nil || entry == nil {
 		t.Fatalf("active sender lost its archive: (%+v, %v)", entry, err)
 	}
-	if err := s.SentDelivery(ctx, delivery.ID, 71); err != nil {
+	if err := s.SentDeliveryReceipt(ctx, delivery.ID, "71"); err != nil {
 		t.Fatalf("sender could not finish after rejected deletion: %v", err)
 	}
 	if deleted, err := s.DeleteArchiveEntry(ctx, 7, id); err != nil || deleted["jobs"] != 1 || deleted["deliveries"] != 1 {

@@ -65,7 +65,7 @@ func Due(now, enabledAt time.Time, cfg config.Weekly) ([]domain.DigestRequest, e
 	requests := make([]domain.DigestRequest, 0)
 	for !trigger.After(now) {
 		start, end := Window(trigger, loc)
-		requests = append(requests, domain.DigestRequest{Start: start, End: end})
+		requests = append(requests, domain.DigestRequest{Start: start, End: end, Version: domain.DigestVersion})
 		day = day.AddDate(0, 0, 7)
 		trigger = scheduledAt(day, hour, minute, loc)
 	}

@@ -87,7 +87,7 @@ func (c *Client) Poll(ctx context.Context) error {
 					return errors.New("Telegram returned an unreadable update")
 				}
 				// 即使内容无法读取，也按无来源的 update 原子推进 offset，避免重复阻塞轮询。
-				if _, _, err := c.store.AcceptUpdate(ctx, *malformed.ID, "", "", nil, 0); err != nil {
+				if _, _, err := c.store.AcceptUpdate(ctx, *malformed.ID, "", "", nil, nil); err != nil {
 					return errors.New("Telegram update could not be saved")
 				}
 				c.log.Warn("discarded unreadable Telegram update", zap.Int64("update_id", *malformed.ID))

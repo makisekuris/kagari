@@ -22,24 +22,27 @@ func TestArchiveCommandsCompleteThroughPrivateOutbox(t *testing.T) {
 	defer s.Close()
 	sub := domain.Submission{UserID: 7, ChatID: 7, Text: "original submission", ReceivedAt: time.Now()}
 	payload, _ := json.Marshal(sub)
-	id, _, err := s.Enqueue(ctx, "analyze", "archive", payload, -100)
+	id, _, err := s.Enqueue(ctx, "analyze", "archive", payload, []domain.DeliveryTarget{{Channel: "telegram", Address: "-100"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.StartJob(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	result, _ := json.Marshal(domain.Result{Analysis: domain.Analysis{Title: "private archive title", Overview: "saved report"}})
-	if err := s.CompleteJob(ctx, id, result, nil, nil); err != nil {
+	result, _ := json.Marshal(domain.Result{Analysis: domain.Analysis{
+		Headings: &domain.AnalysisHeadings{Summary: "摘要", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"},
+		Title:    "private archive title", Overview: "saved report",
+	}})
+	if err := s.CompletePublication(ctx, id, result, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	w := &Worker{Store: s, Config: config.Config{Telegram: config.Telegram{TargetChatID: -100}}}
+	w := &Worker{Store: s, Config: config.Config{Telegram: config.Telegram{TargetChatIDs: []int64{-100}}}}
 	sequence := 0
 	command := func(userID int64, text string) string {
 		t.Helper()
 		sequence++
 		payload, _ := json.Marshal(domain.Command{UserID: userID, ChatID: userID, Text: text})
-		jobID, _, err := s.Enqueue(ctx, "command", fmt.Sprintf("command:%d", sequence), payload, userID)
+		jobID, _, err := s.Enqueue(ctx, "command", fmt.Sprintf("command:%d", sequence), payload, []domain.DeliveryTarget{{Channel: "telegram", Address: fmt.Sprint(userID)}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -55,10 +58,10 @@ func TestArchiveCommandsCompleteThroughPrivateOutbox(t *testing.T) {
 			t.Fatalf("command outcome = %+v, %v", job, err)
 		}
 		delivery, err := s.ClaimDelivery(ctx)
-		if err != nil || delivery == nil || delivery.JobID != jobID || delivery.ChatID != userID {
+		if err != nil || delivery == nil || delivery.JobID != jobID || delivery.Target.Channel != "telegram" || delivery.Target.Address != fmt.Sprint(userID) {
 			t.Fatalf("private reply delivery = %+v, %v", delivery, err)
 		}
-		if err := s.SentDelivery(ctx, delivery.ID, int64(sequence)); err != nil {
+		if err := s.SentDeliveryReceipt(ctx, delivery.ID, fmt.Sprint(sequence)); err != nil {
 			t.Fatal(err)
 		}
 		return delivery.Text

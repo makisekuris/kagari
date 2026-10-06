@@ -155,9 +155,9 @@ CLI 的 `analyze` 和 `digest` 会启动任务处理器，不能与 `run` 或另
 
 CLI `analyze` and `digest` start a processor and must not run alongside `run` or another processing CLI command. Status, export, and retry commands can run while the service is active.
 
-Telegram 只接收允许列表中用户的私聊消息。确认、命令回复和处理失败通知发回私聊；分析与周报结果默认发回提交私聊。配置 `telegram.target_chat_ids` 可将同一结果分发到多个聊天或频道，bot 需要相应发言权限。列表非空时优先于旧配置 `telegram.target_chat_id`；列表为空时继续使用旧配置，单目标为 `0` 时回复提交私聊。支持 `/help`、`/status ID`、`/retry ID`、`/retry_delivery ID`、`/weekly`、`/weekly START END` 和下述归档命令。
+Telegram 只接收允许列表中用户的私聊消息。确认、命令回复和处理失败通知发回提交私聊。分析与周报结果默认发回提交私聊；配置非空的 `telegram.target_chat_ids` 后，同一结果会分发到列表中的所有聊天或频道，bot 需要相应发言权限。列表为空时仍回发提交私聊。支持 `/help`、`/status ID`、`/retry ID`、`/retry_delivery ID`、`/weekly`、`/weekly START END` 和下述归档命令。
 
-Telegram accepts private messages from users on the allowlist. Acknowledgements, command replies, and processing failure notices stay in private chat. Analysis and digest results default to the submitting chat. Set `telegram.target_chat_ids` to distribute the same result to multiple chats or channels; the bot needs posting permission. A nonempty list takes precedence over the legacy `telegram.target_chat_id`; an empty list uses that legacy setting, with `0` falling back to private chat. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, `/weekly START END`, and the archive commands below.
+Telegram accepts private messages from users on the allowlist. Acknowledgements, command replies, and processing failure notices go to the submitting private chat. Analysis and digest results default to the submitting chat; a nonempty `telegram.target_chat_ids` list sends each result to every listed chat or channel, where the bot needs posting permission. An empty list keeps results in the submitting private chat. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, `/weekly START END`, and the archive commands below.
 
 私聊 bot 可分页查看自己的归档、读取详情并确认删除。用户身份取自 Telegram 发送者，不接受用户 ID 参数。
 

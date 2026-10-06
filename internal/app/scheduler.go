@@ -34,7 +34,7 @@ func schedule(ctx context.Context, w *Worker, now time.Time) error {
 		for _, userID := range w.Config.Telegram.AllowedUserIDs {
 			request.UserID = userID
 			chatIDs := w.Config.Telegram.ChatIDs(userID)
-			if _, _, err := w.EnqueueDigest(ctx, request, chatIDs[0], telegram.Targets(chatIDs)...); err != nil {
+			if _, _, err := w.EnqueueDigest(ctx, request, telegram.Targets(chatIDs)); err != nil {
 				return err
 			}
 		}

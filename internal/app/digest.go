@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -16,21 +17,20 @@ import (
 	"kagari/internal/domain"
 )
 
-func (w *Worker) EnqueueDigest(ctx context.Context, request domain.DigestRequest, target int64, targets ...domain.DeliveryTarget) (int64, bool, error) {
+func (w *Worker) EnqueueDigest(ctx context.Context, request domain.DigestRequest, targets []domain.DeliveryTarget) (int64, bool, error) {
 	if !request.Start.Before(request.End) {
 		return 0, false, errors.New("start must be before end")
 	}
-	if request.Version != "" && request.Version != domain.DigestVersion {
+	if request.Version != domain.DigestVersion {
 		return 0, false, errors.New("unsupported digest version")
 	}
-	request.Version = domain.DigestVersion
 	// 版本、用户和精确时间范围共同组成任务键，同一请求只入队一次。
 	key := fmt.Sprintf("%s:%d:%s:%s", request.Version, request.UserID, request.Start.UTC().Format(time.RFC3339Nano), request.End.UTC().Format(time.RFC3339Nano))
 	raw, err := json.Marshal(request)
 	if err != nil {
 		return 0, false, err
 	}
-	return w.Store.Enqueue(ctx, "digest", key, raw, target, targets...)
+	return w.Store.Enqueue(ctx, "digest", key, raw, targets)
 }
 
 func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report digest.Report, text string, err error) {
@@ -38,12 +38,15 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 	if err := json.Unmarshal(job.Payload, &request); err != nil {
 		return report, "", err
 	}
-	if request.Version != "" && request.Version != domain.DigestVersion {
+	if request.Version != domain.DigestVersion {
 		return report, "", errors.New("unsupported digest version")
 	}
 	if len(job.Result) > 0 {
 		if err := json.Unmarshal(job.Result, &report); err != nil {
 			return report, "", fmt.Errorf("decode digest snapshot: %w", err)
+		}
+		if report.Version != domain.DigestVersion || report.Input == nil || strings.TrimSpace(report.Input.Instruction) == "" {
+			return report, "", errors.New("invalid digest snapshot")
 		}
 	}
 	if report.Input == nil {
@@ -78,14 +81,14 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 		}
 	}
 	input := report.Input
-	if report.Version != domain.DigestVersion || input.UserID != request.UserID || !input.Start.Equal(request.Start) || !input.Cutoff.Equal(request.End) {
+	if report.Version != domain.DigestVersion || strings.TrimSpace(input.Instruction) == "" || input.UserID != request.UserID || !input.Start.Equal(request.Start) || !input.Cutoff.Equal(request.End) {
 		return report, "", errors.New("digest snapshot does not match request")
 	}
 	if report.Review != nil {
 		if err := digest.ValidateReview(*input, *report.Review); err != nil {
 			return report, "", err
 		}
-		return report, digest.Render(report, input.Timezone), nil
+		return report, digest.Render(report), nil
 	}
 	if len(input.Entries) == 0 {
 		report.Review = &domain.DigestReview{Sections: []domain.DigestSection{}}
@@ -95,7 +98,7 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 			return report, "", err
 		}
 		// ponytail: 以字符数限制输入大小；需要按 token 检查模型上下文上限时再接 tokenizer。
-		if limit := w.Config.Weekly.InputLimit(); utf8.RuneCount(raw) > limit {
+		if limit := w.Config.Weekly.MaxInputChars; utf8.RuneCount(raw) > limit {
 			return report, "", fmt.Errorf("digest input exceeds weekly.max_input_chars (%d)", limit)
 		}
 		engine, err := w.digestEngine(ctx, job)
@@ -113,11 +116,11 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 		report.Review = &review
 	}
 	report.GeneratedAt = time.Now().UTC()
-	// 在 CompleteJob 前保存已校验正文；重启后回放它，再原子写入 outbox。
+	// 在 CompletePublication 前保存已校验正文；重启后回放它，再原子写入 outbox。
 	if err := w.saveDigestProgress(ctx, job.ID, report); err != nil {
 		return report, "", err
 	}
-	return report, digest.Render(report, input.Timezone), nil
+	return report, digest.Render(report), nil
 }
 
 func (w *Worker) saveDigestProgress(ctx context.Context, id int64, report digest.Report) error {

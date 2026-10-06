@@ -36,7 +36,7 @@ func addCommandArchive(t *testing.T, s *store.Store, userID int64, key, title st
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, created, err := s.Enqueue(ctx, "analyze", fmt.Sprintf("archive:%d:%s", userID, key), payload, sub.ChatID)
+	id, created, err := s.Enqueue(ctx, "analyze", fmt.Sprintf("archive:%d:%s", userID, key), payload, []domain.DeliveryTarget{{Channel: "telegram", Address: fmt.Sprint(sub.ChatID)}})
 	if err != nil || !created {
 		t.Fatalf("Enqueue() = (%d, %v, %v)", id, created, err)
 	}
@@ -45,13 +45,16 @@ func addCommandArchive(t *testing.T, s *store.Store, userID int64, key, title st
 	}
 	source := domain.Source{ID: "article", URL: "https://shared.example/article", RequestedURL: "https://shared.example/article", Status: "ok", Title: title, Content: "来源正文"}
 	result, err := json.Marshal(domain.Result{
-		Analysis: domain.Analysis{Title: title, Overview: "分析概述 " + key, Summary: []domain.Claim{{Text: "报告事实 " + key, SourceIDs: []string{"article"}}}},
-		Sources:  []domain.Source{source},
+		Analysis: domain.Analysis{
+			Headings: &domain.AnalysisHeadings{Summary: "摘要", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"},
+			Title:    title, Overview: "分析概述 " + key, Summary: []domain.Claim{{Text: "报告事实 " + key, SourceIDs: []string{"article"}}},
+		},
+		Sources: []domain.Source{source},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteJob(ctx, id, result, []string{"分析投递"}, []domain.Source{source}); err != nil {
+	if err := s.CompletePublication(ctx, id, result, []domain.Delivery{{Target: domain.DeliveryTarget{Channel: "telegram", Address: fmt.Sprint(sub.ChatID)}, Part: 1, Text: "分析投递"}}, []domain.Source{source}); err != nil {
 		t.Fatal(err)
 	}
 	return id

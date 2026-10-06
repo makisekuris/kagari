@@ -24,11 +24,11 @@ func maintenanceFixture(t *testing.T) (string, *Store) {
 func seedMaintenanceRows(t *testing.T, s *Store) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO jobs(kind,key,payload,result,target_chat_id,status,next_attempt_at,created_at)
-		VALUES('analyze','one',? ,NULL,7,'completed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, []byte(`{"cache_key":"one","n":9007199254740993}`)); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO jobs(kind,key,payload,result,targets,status,next_attempt_at,created_at)
+		VALUES('analyze','one',? ,NULL,'[]','completed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, []byte(`{"cache_key":"one","n":9007199254740993}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO deliveries(job_id,chat_id,part,text,status,next_attempt_at) VALUES(1,7,1,'part','sent','2026-01-01T00:00:00Z')`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO deliveries(job_id,channel,address,part,text,status,next_attempt_at) VALUES(1,'telegram','7',1,'part','sent','2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO source_cache(url,source,cached_at) VALUES
@@ -202,11 +202,11 @@ func TestClearScopesForeignKeysAndReuse(t *testing.T) {
 				t.Fatalf("all clear scope mismatch: %+v", info.Tables)
 			}
 			if scope != "cache" {
-				if _, err := s.db.ExecContext(ctx, `INSERT INTO deliveries(job_id,chat_id,part,text,status,next_attempt_at) VALUES(999,7,1,'orphan','pending','2026-01-01T00:00:00Z')`); err == nil {
+				if _, err := s.db.ExecContext(ctx, `INSERT INTO deliveries(job_id,channel,address,part,text,status,next_attempt_at) VALUES(999,'telegram','7',1,'orphan','pending','2026-01-01T00:00:00Z')`); err == nil {
 					t.Fatal("foreign-key check allowed orphan delivery")
 				}
 			}
-			if _, _, err := s.Enqueue(ctx, "notice", "after-clear", []byte(`{}`), 7); err != nil {
+			if _, _, err := s.Enqueue(ctx, "notice", "after-clear", []byte(`{}`), nil); err != nil {
 				t.Fatalf("store not reusable after %s clear: %v", scope, err)
 			}
 		})

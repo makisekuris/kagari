@@ -70,7 +70,7 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacyPayload, _ := json.Marshal(legacy)
-	legacyID, _, err := s.Enqueue(ctx, "analyze", "legacy", legacyPayload, 0)
+	legacyID, _, err := s.Enqueue(ctx, "analyze", "legacy", legacyPayload, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacyResult, _ := json.Marshal(domain.Result{Analysis: domain.Analysis{Title: "旧答案引用了用户提示词"}, AnalysisVersion: "source-boundaries-v1", CreatedAt: now})
-	if err := s.CompleteJob(ctx, legacyID, legacyResult, nil, nil); err != nil {
+	if err := s.CompletePublication(ctx, legacyID, legacyResult, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var firstID int64
@@ -88,7 +88,7 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 			t.Fatal(err)
 		}
 		raw, _ := json.Marshal(sub)
-		id, _, err := s.Enqueue(ctx, "analyze", string(rune('a'+i)), raw, 7)
+		id, _, err := s.Enqueue(ctx, "analyze", string(rune('a'+i)), raw, telegram.Targets([]int64{7}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -116,8 +116,9 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	if headings := entries[0].Result.Analysis.Headings; headings == nil || headings.Evaluation != "taffy锐评" {
 		t.Fatalf("archive lost generated headings: %+v", headings)
 	}
-	request := domain.DigestRequest{UserID: 7, Start: now.Add(-time.Hour), End: now.Add(time.Hour)}
-	id, created, err := w.EnqueueDigest(ctx, request, 7)
+	request := domain.DigestRequest{UserID: 7, Start: now.Add(-time.Hour), End: now.Add(time.Hour), Version: domain.DigestVersion}
+	targets := telegram.Targets([]int64{7})
+	id, created, err := w.EnqueueDigest(ctx, request, targets)
 	if err != nil || !created {
 		t.Fatal(err)
 	}
@@ -136,7 +137,7 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	if report.Input == nil || len(report.Input.Entries) != 1 || report.Review == nil || digest.Count(*report.Review) != 1 || requests.Load() != 2 {
 		t.Fatalf("digest generation %+v", report)
 	}
-	duplicate, created, err := w.EnqueueDigest(ctx, request, 7)
+	duplicate, created, err := w.EnqueueDigest(ctx, request, targets)
 	if err != nil || created || duplicate != id {
 		t.Fatal("digest period duplicated")
 	}
@@ -199,7 +200,7 @@ func TestScheduleRestartCatchupIsIdempotent(t *testing.T) {
 			break
 		}
 		count++
-		if job.Kind != "digest" || job.TargetChatID != 7 || !reflect.DeepEqual(job.Targets, telegram.Targets([]int64{7, -100123})) {
+		if job.Kind != "digest" || len(job.Targets) != 2 || !reflect.DeepEqual(job.Targets, telegram.Targets([]int64{7, -100123})) {
 			t.Fatal("wrong scheduled job")
 		}
 	}

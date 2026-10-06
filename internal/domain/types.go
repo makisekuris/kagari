@@ -74,7 +74,7 @@ type AnalysisHeadings struct {
 
 // Analysis 区分来源事实、讨论者观点和 Agent 判断，避免周报混淆三者。
 type Analysis struct {
-	Headings      *AnalysisHeadings `json:"headings,omitempty"` // nil 兼容旧归档。
+	Headings      *AnalysisHeadings `json:"headings,omitempty"`
 	Title         string            `json:"title"`
 	Overview      string            `json:"overview"`
 	Summary       []Claim           `json:"summary"`
@@ -82,7 +82,6 @@ type Analysis struct {
 	Evaluation    []Claim           `json:"evaluation"`
 	Category      string            `json:"category"`
 	Tags          []string          `json:"tags"`
-	Relevance     string            `json:"relevance"`
 	Uncertainties []string          `json:"uncertainties"`
 }
 
@@ -111,7 +110,6 @@ type Job struct {
 	Key           string
 	Payload       json.RawMessage
 	Result        json.RawMessage
-	TargetChatID  int64
 	Targets       []DeliveryTarget // 入队时保存，处理和重试不读取当前分发配置。
 	Status        string
 	Attempts      int
@@ -130,7 +128,6 @@ type DeliveryTarget struct {
 type Delivery struct {
 	ID       int64
 	JobID    int64
-	ChatID   int64
 	Target   DeliveryTarget
 	Part     int
 	Text     string

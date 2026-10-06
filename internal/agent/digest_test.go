@@ -111,7 +111,7 @@ func TestGenerateDigestReturnsUsageWhenResponseIsIncomplete(t *testing.T) {
 	}))
 	defer server.Close()
 	e := newDigestTestEngine(t, server.URL)
-	_, usage, err := e.GenerateDigest(context.Background(), domain.DigestInput{})
+	_, usage, err := e.GenerateDigest(context.Background(), domain.DigestInput{Instruction: "test instruction"})
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("err=%v", err)
 	}
@@ -151,7 +151,7 @@ func TestGenerateDigestConsumesStreamingResponse(t *testing.T) {
 	}))
 	defer server.Close()
 	e := newDigestTestEngineWithStreaming(t, server.URL, true)
-	_, usage, err := e.GenerateDigest(context.Background(), domain.DigestInput{})
+	_, usage, err := e.GenerateDigest(context.Background(), domain.DigestInput{Instruction: e.DigestPrompt()})
 	if err != nil {
 		t.Fatal(err)
 	}

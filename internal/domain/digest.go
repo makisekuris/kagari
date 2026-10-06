@@ -5,12 +5,12 @@ import "time"
 const DigestVersion = "weekly-review-v1"
 
 // DigestRequest 按用户和收录时间半开区间 [Start, End) 选择已完成分析。
-// End 是调用方捕获的截止时间；空 Version 兼容升级前已入队的任务。
+// Version 标识本次周报的输入与输出契约。
 type DigestRequest struct {
 	UserID  int64     `json:"user_id"`
 	Start   time.Time `json:"start"`
 	End     time.Time `json:"end"`
-	Version string    `json:"version,omitempty"`
+	Version string    `json:"version"`
 }
 
 // DigestInput 是首次处理时冻结的模型输入，不包含密钥、聊天路由和来源全文。

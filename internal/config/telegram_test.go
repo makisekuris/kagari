@@ -8,7 +8,6 @@ import (
 
 func TestTelegramTargetsConfig(t *testing.T) {
 	t.Chdir(t.TempDir())
-	t.Setenv("KAGARI_TELEGRAM_TARGET_CHAT_ID", "0")
 	t.Setenv("KAGARI_TELEGRAM_TARGET_CHAT_IDS", "")
 	if err := os.WriteFile("config.yaml", []byte("telegram:\n  target_chat_ids: [7, -100123]\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -34,8 +33,7 @@ func TestTelegramTargetsConfig(t *testing.T) {
 		want   []int64
 	}{
 		{Telegram{}, []int64{9}},
-		{Telegram{TargetChatID: -100123}, []int64{-100123}},
-		{Telegram{TargetChatID: -100123, TargetChatIDs: []int64{7, -100456}}, []int64{7, -100456}},
+		{Telegram{TargetChatIDs: []int64{7, -100456}}, []int64{7, -100456}},
 	} {
 		if got := tc.config.ChatIDs(9); !reflect.DeepEqual(got, tc.want) {
 			t.Fatalf("ChatIDs = %v, want %v", got, tc.want)
@@ -45,7 +43,7 @@ func TestTelegramTargetsConfig(t *testing.T) {
 
 func TestTelegramTargetsYAML(t *testing.T) {
 	t.Chdir(t.TempDir())
-	for _, name := range []string{"KAGARI_TELEGRAM_TARGET_CHAT_ID", "KAGARI_TELEGRAM_TARGET_CHAT_IDS"} {
+	for _, name := range []string{"KAGARI_TELEGRAM_TARGET_CHAT_IDS"} {
 		old, present := os.LookupEnv(name)
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)

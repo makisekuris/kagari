@@ -332,6 +332,7 @@ func validConfigForTest() Config {
 	c.Agent.MaxIterations = 10
 	c.Agent.Timeout = 3 * time.Minute
 	c.Agent.Categories = []string{"AI"}
+	c.Weekly.MaxInputChars = DefaultWeeklyInputChars
 	c.Weekly.Timezone = "UTC"
 	c.Weekly.Time = "09:00"
 	c.MaxAttempts = 3

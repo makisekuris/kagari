@@ -68,7 +68,7 @@ func archiveDigestEntry(t *testing.T, s *store.Store, key string, at time.Time) 
 	t.Helper()
 	ctx := context.Background()
 	request, _ := json.Marshal(domain.Submission{UserID: 7, ReceivedAt: at, CacheKey: key})
-	id, _, err := s.Enqueue(ctx, "analyze", key, request, 0)
+	id, _, err := s.Enqueue(ctx, "analyze", key, request, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func archiveDigestEntry(t *testing.T, s *store.Store, key string, at time.Time) 
 		t.Fatal(err)
 	}
 	result, _ := json.Marshal(domain.Result{Analysis: domain.Analysis{Title: "工程实践", Overview: "归档概述", Category: "工程", Summary: []domain.Claim{{Text: "归档事实", SourceIDs: []string{"source"}}}}, Sources: []domain.Source{{ID: "source", URL: "https://example.org/" + key, Status: "ok", Content: "全文不应传入周报模型"}}, CreatedAt: at})
-	if err := s.CompleteJob(ctx, id, result, nil, nil); err != nil {
+	if err := s.CompletePublication(ctx, id, result, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -129,8 +129,9 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	}
 	e.Profile = "初始表达偏好"
 	worker := &Worker{Store: s, Engine: e, Config: cfg, Log: zap.NewNop()}
-	request := domain.DigestRequest{UserID: 7, Start: now.AddDate(0, 0, -7), End: now}
-	id, _, err := worker.EnqueueDigest(ctx, request, 900)
+	request := domain.DigestRequest{UserID: 7, Start: now.AddDate(0, 0, -7), End: now, Version: domain.DigestVersion}
+	targets := []domain.DeliveryTarget{{Channel: "telegram", Address: "900"}}
+	id, _, err := worker.EnqueueDigest(ctx, request, targets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +189,7 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	if err != nil || counts["pending"] != 1 {
 		t.Fatalf("outbox: %v %v", counts, err)
 	}
-	if duplicate, created, err := worker.EnqueueDigest(ctx, request, 900); err != nil || created || duplicate != id {
+	if duplicate, created, err := worker.EnqueueDigest(ctx, request, targets); err != nil || created || duplicate != id {
 		t.Fatalf("request lost idempotency: %d %v %v", duplicate, created, err)
 	}
 	if _, err := worker.ProcessJob(ctx, id); err != nil || len(inputs) != 2 {
@@ -217,14 +218,14 @@ func TestDigestEmptyAndInputLimitDoNotCallModel(t *testing.T) {
 			archiveDigestEntry(t, s, "article", now.Add(-time.Hour))
 		}
 		worker := &Worker{Store: s, Config: cfg, Log: zap.NewNop()}
-		id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{UserID: 7, Start: now.AddDate(0, 0, -7), End: now}, 0)
+		id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{UserID: 7, Start: now.AddDate(0, 0, -7), End: now, Version: domain.DigestVersion}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		job, err := worker.ProcessJob(ctx, id)
 		if empty {
 			var report digest.Report
-			if err != nil || json.Unmarshal(job.Result, &report) != nil || !strings.HasPrefix(digest.Render(report, cfg.Weekly.Timezone), "本周回顾（0条）") {
+			if err != nil || json.Unmarshal(job.Result, &report) != nil || !strings.HasPrefix(digest.Render(report), "本周回顾（0条）") {
 				t.Fatalf("empty digest requires model: %+v %v", job, err)
 			}
 		} else if err == nil || job.Status != "failed" || !strings.Contains(job.LastError, "max_input_chars") {
@@ -255,7 +256,7 @@ func TestDigestRejectsMissingEntriesWithoutPublishing(t *testing.T) {
 	now := time.Now()
 	archiveDigestEntry(t, s, "article", now.Add(-time.Hour))
 	worker := &Worker{Store: s, Config: cfg, Log: zap.NewNop(), Persona: digestTestPersona("worker-injected-persona")}
-	id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{UserID: 7, Start: now.AddDate(0, 0, -7), End: now}, 900)
+	id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{UserID: 7, Start: now.AddDate(0, 0, -7), End: now, Version: domain.DigestVersion}, []domain.DeliveryTarget{{Channel: "telegram", Address: "900"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +276,7 @@ func TestDigestRejectsMissingEntriesWithoutPublishing(t *testing.T) {
 		t.Fatalf("invalid output entered outbox: %v %v", counts, err)
 	}
 	notice, err := s.ClaimJob(ctx)
-	if err != nil || notice == nil || notice.Kind != "notice" || notice.TargetChatID != 7 {
+	if err != nil || notice == nil || notice.Kind != "notice" || len(notice.Targets) != 1 || notice.Targets[0].Address != "7" {
 		t.Fatalf("failed digest needs a private retry notice: %+v %v", notice, err)
 	}
 }

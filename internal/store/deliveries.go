@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"kagari/internal/domain"
@@ -21,7 +20,7 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*domain.Delivery, error) {
 	err = tx.QueryRowContext(ctx, `SELECT d.id FROM deliveries d
 		WHERE d.status='pending' AND d.next_attempt_at<=?
 		AND NOT EXISTS (SELECT 1 FROM deliveries p WHERE p.job_id=d.job_id AND p.channel=d.channel
-			AND CASE WHEN p.address='' THEN CAST(p.chat_id AS TEXT) ELSE p.address END = CASE WHEN d.address='' THEN CAST(d.chat_id AS TEXT) ELSE d.address END
+			AND p.address=d.address
 			AND p.part<d.part AND p.status<>'sent')
 		ORDER BY d.id LIMIT 1`, timestamp(time.Now())).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -33,8 +32,7 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*domain.Delivery, error) {
 	if _, err := tx.ExecContext(ctx, `UPDATE deliveries SET status='sending',attempts=attempts+1 WHERE id=? AND status='pending'`, id); err != nil {
 		return nil, err
 	}
-	delivery, err := scanDelivery(tx.QueryRowContext(ctx, `SELECT id,job_id,chat_id,channel,
-		CASE WHEN address='' THEN CAST(chat_id AS TEXT) ELSE address END,part,text,status,attempts FROM deliveries WHERE id=?`, id))
+	delivery, err := scanDelivery(tx.QueryRowContext(ctx, `SELECT id,job_id,channel,address,part,text,status,attempts FROM deliveries WHERE id=?`, id))
 	if err != nil {
 		return nil, err
 	}
@@ -46,13 +44,9 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*domain.Delivery, error) {
 
 func scanDelivery(row interface{ Scan(...any) error }) (*domain.Delivery, error) {
 	var delivery domain.Delivery
-	err := row.Scan(&delivery.ID, &delivery.JobID, &delivery.ChatID, &delivery.Target.Channel, &delivery.Target.Address,
+	err := row.Scan(&delivery.ID, &delivery.JobID, &delivery.Target.Channel, &delivery.Target.Address,
 		&delivery.Part, &delivery.Text, &delivery.Status, &delivery.Attempts)
 	return &delivery, err
-}
-
-func (s *Store) SentDelivery(ctx context.Context, id, messageID int64) error {
-	return s.SentDeliveryReceipt(ctx, id, strconv.FormatInt(messageID, 10))
 }
 
 func (s *Store) SentDeliveryReceipt(ctx context.Context, id int64, messageID string) error {

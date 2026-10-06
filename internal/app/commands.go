@@ -16,7 +16,7 @@ import (
 
 func (w *Worker) notice(ctx context.Context, key string, userID, chatID int64, text string) (int64, bool, error) {
 	raw, _ := json.Marshal(domain.Command{UserID: userID, ChatID: chatID, Text: text})
-	return w.Store.Enqueue(ctx, "notice", key, raw, chatID)
+	return w.Store.Enqueue(ctx, "notice", key, raw, telegram.Targets([]int64{chatID}))
 }
 
 func (w *Worker) command(ctx context.Context, c domain.Command) string {
@@ -48,7 +48,8 @@ func (w *Worker) command(ctx context.Context, c domain.Command) string {
 			return "用法：/weekly 或 /weekly 开始日期 结束日期（结束日期不包含）"
 		}
 		chatIDs := w.Config.Telegram.ChatIDs(c.ChatID)
-		id, created, err := w.EnqueueDigest(ctx, domain.DigestRequest{UserID: c.UserID, Start: start, End: end}, chatIDs[0], telegram.Targets(chatIDs)...)
+		request := domain.DigestRequest{UserID: c.UserID, Start: start, End: end, Version: domain.DigestVersion}
+		id, created, err := w.EnqueueDigest(ctx, request, telegram.Targets(chatIDs))
 		if err != nil {
 			return "周报排队失败：请检查日期范围"
 		}

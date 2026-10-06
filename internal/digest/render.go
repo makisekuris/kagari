@@ -8,6 +8,15 @@ import (
 	"kagari/internal/domain"
 )
 
+func Render(report Report) string {
+	if report.Version != domain.DigestVersion {
+		return "周报生成未完成：周报版本不受支持。\n"
+	}
+	return renderReview(report)
+}
+
+func oneLine(value string) string { return strings.Join(strings.Fields(value), " ") }
+
 func renderReview(report Report) string {
 	if report.Input == nil {
 		return "周报生成未完成：尚无已保存的回顾材料。\n"
