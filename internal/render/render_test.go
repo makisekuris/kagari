@@ -21,46 +21,9 @@ func TestChunksPreserveEmojiAndText(t *testing.T) {
 	}
 }
 
-func TestAnalysisHidesEmptyDiscussion(t *testing.T) {
-	text := Analysis(domain.Result{Analysis: domain.Analysis{
-		Title: "标题", Overview: "概述",
-		Headings: &domain.AnalysisHeadings{Summary: "摘要", Discussion: "空讨论标题", Evaluation: "评价", Sources: "来源"},
-	}})
-	if strings.Contains(text, "关注点") || strings.Contains(text, "讨论者观点") || strings.Contains(text, "空讨论标题") {
-		t.Fatalf("rendered empty discussion: %s", text)
-	}
-}
-
-func TestAnalysisReportsMissingHeadings(t *testing.T) {
-	if text := Analysis(domain.Result{Analysis: domain.Analysis{Title: "标题"}}); !strings.Contains(text, "缺少展示标题") {
-		t.Fatalf("missing headings were not reported: %s", text)
-	}
-}
-
-func TestAnalysisUsesModelHeadings(t *testing.T) {
-	text := Analysis(domain.Result{
-		Analysis: domain.Analysis{
-			Title: "标题", Overview: "概述",
-			Headings: &domain.AnalysisHeadings{
-				Summary: " 自定义摘要： ", Discussion: "自定义讨论", Evaluation: "自定义评价",
-				Uncertainties: "自定义限制：", Sources: "自定义来源",
-			},
-			Summary:       []domain.Claim{{Text: "摘要结论", SourceIDs: []string{"s1"}}},
-			Discussion:    []domain.Claim{{Text: "讨论观点"}},
-			Evaluation:    []domain.Claim{{Text: "评价结论"}},
-			Uncertainties: []string{"尚未确认"},
-		},
-		Sources: []domain.Source{{ID: "s1", Title: "来源标题", URL: "https://example.com", Status: "ok"}},
-	})
-	for _, want := range []string{
-		"自定义摘要：\n• 摘要结论 [1]", "自定义讨论：\n• 讨论观点", "自定义评价：\n• 评价结论",
-		"自定义限制：\n• 尚未确认", "自定义来源：\n[1] 来源标题", "https://example.com",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("rendered output missing %q: %s", want, text)
-		}
-	}
-	if strings.Contains(text, "自定义摘要：：") || strings.Contains(text, "AI 摘要") || strings.Contains(text, "Agent 评价") {
-		t.Fatalf("model headings were replaced or duplicated: %s", text)
+func TestAnalysisPreservesMarkdown(t *testing.T) {
+	body := "## 我的判断\n\n正文 [原文](https://example.org)"
+	if Analysis(domain.Result{Body: body}) != body {
+		t.Fatal("model prose was altered")
 	}
 }

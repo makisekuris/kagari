@@ -48,7 +48,7 @@ func (w *Worker) command(ctx context.Context, c domain.Command) string {
 			return "用法：/weekly 或 /weekly 开始日期 结束日期（结束日期不包含）"
 		}
 		chatIDs := w.Config.Telegram.ChatIDs(c.ChatID)
-		request := domain.DigestRequest{UserID: c.UserID, Start: start, End: end, Version: domain.DigestVersion}
+		request := domain.DigestRequest{Version: domain.DigestVersion, UserID: c.UserID, Start: start, End: end}
 		id, created, err := w.EnqueueDigest(ctx, request, telegram.Targets(chatIDs))
 		if err != nil {
 			return "周报排队失败：请检查日期范围"
@@ -122,4 +122,4 @@ func (w *Worker) Status(ctx context.Context, id int64) (string, error) {
 	return text, nil
 }
 
-const help = "直接发送或转发含链接的消息，附上你的阅读关注点。\n/status 任务号：查看处理和投递状态\n/retry 任务号：重试处理失败的任务\n/retry_delivery 任务号：重发失败或结果不确定的消息（可能重复）\n/archive [页码]：查看已完成分析归档（每页 10 条）\n/archive_show 任务号：查看提交内容、备注、链接和完整分析\n/archive_delete 任务号：预览删除影响；发送 /archive_delete 任务号 confirm 确认\n/weekly：回顾截至现在的一周内容\n/weekly YYYY-MM-DD YYYY-MM-DD：按收录日期回顾，结束日期不包含"
+const help = "发送问题、转发文本或材料链接，附上你的阅读关注点。\n/status 任务号：查看处理和投递状态\n/retry 任务号：重试处理失败的任务\n/retry_delivery 任务号：重发失败或结果不确定的消息（可能重复）\n/archive [页码]：查看已完成分析归档（每页 10 条）\n/archive_show 任务号：查看提交内容、备注、链接和完整分析\n/archive_delete 任务号：预览删除影响；发送 /archive_delete 任务号 confirm 确认\n/weekly：回顾截至现在的一周内容\n/weekly YYYY-MM-DD YYYY-MM-DD：按收录日期回顾，结束日期不包含"

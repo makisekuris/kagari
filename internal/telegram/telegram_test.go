@@ -123,7 +123,7 @@ func TestPollPersistsBeforeAckExtractsUTF16AndDeduplicates(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- client.Poll(ctx) }()
 
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3; i++ {
 		select {
 		case <-ackedOffsets:
 		case <-time.After(3 * time.Second):
@@ -142,8 +142,8 @@ func TestPollPersistsBeforeAckExtractsUTF16AndDeduplicates(t *testing.T) {
 	if offset, err := st.Offset(context.Background()); err != nil || offset != 14 {
 		t.Fatalf("persisted offset = (%d, %v), want 14", offset, err)
 	}
-	if sendCalls != 2 || prepareCalls != 4 {
-		t.Fatalf("sends=%d prepare calls=%d, want 2 and 4", sendCalls, prepareCalls)
+	if sendCalls != 3 || prepareCalls != 4 {
+		t.Fatalf("sends=%d prepare calls=%d, want 3 and 4", sendCalls, prepareCalls)
 	}
 	for i, want := range []struct {
 		kind   string
@@ -151,14 +151,14 @@ func TestPollPersistsBeforeAckExtractsUTF16AndDeduplicates(t *testing.T) {
 	}{
 		{kind: "analyze", target: 900},
 		{kind: "analyze", target: 900},
-		{kind: "notice", target: 7},
+		{kind: "analyze", target: 900},
 		{kind: "command", target: 7},
 	} {
 		job, err := st.ClaimJob(context.Background())
 		if err != nil || job == nil || job.Kind != want.kind || len(job.Targets) != 1 || job.Targets[0].Address != fmt.Sprint(want.target) {
 			t.Fatalf("job %d = (%+v, %v), want kind=%s target=%d", i, job, err, want.kind, want.target)
 		}
-		if i < 2 {
+		if i < 3 {
 			var sub domain.Submission
 			if err := json.Unmarshal(job.Payload, &sub); err != nil {
 				t.Fatal(err)
@@ -168,6 +168,9 @@ func TestPollPersistsBeforeAckExtractsUTF16AndDeduplicates(t *testing.T) {
 			}
 			if i == 1 && (sub.Text != "😀 Read" || len(sub.URLs) != 1 || sub.URLs[0] != "https://hidden.example/post" || sub.ReceivedAt.Unix() != 1700000001) {
 				t.Fatalf("caption text_link submission = %#v", sub)
+			}
+			if i == 2 && (sub.Text != "hello" || len(sub.URLs) != 0) {
+				t.Fatalf("text-only question rejected: %+v", sub)
 			}
 		}
 	}

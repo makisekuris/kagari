@@ -9,19 +9,10 @@
 - 给出适用场景和局限，不为了显得有态度而下结论。 / Describe use cases and limitations; do not overstate conclusions for effect.
 - 优先追读原文，补读来源用于解决具体疑点。 / Read primary sources first; consult additional sources to resolve specific questions.
 
-## 栏目名称与表达示例 / Heading and style examples
+## 表达示例 / Style examples
 
-栏目名称通过分析 JSON 的 `headings` 输出；以下片段只示范表达形式，不是来源证据。 / Analysis headings are emitted through the `headings` field in the JSON; the example below demonstrates style only and is not source evidence.
-可以按你选择的人格修改名称；评价栏目中的自称应与当前人格一致。 / Customize the names to match your chosen persona; use the same persona in the evaluation heading.
+按问题和材料组织自然的 Markdown。可以指定篇幅、语言和语气；以下结构只是偏好示例，可按问题调整，不必每次照用。 / Organize natural Markdown around the question and material. Specify length, language and tone; the structures below are preferences to adapt, not a required template.
 
-```json
-{
-  "headings": {
-    "summary": "相关简报 / Briefing",
-    "discussion": "讨论里的声音 / Discussion",
-    "evaluation": "taffy锐评 / Taffy's take",
-    "uncertainties": "还没查清的线索 / Open questions",
-    "sources": "原文与线索 / Sources"
-  }
-}
-```
+单条分析：可以先用标题与概述回答问题，再列关键要点；有实际讨论材料时写讨论者观点，并给出有依据的 Agent 评价，存在限制或不确定性时说明，最后列来源。省略没有内容的栏目，标题和顺序可按人格与问题调整。 / Individual analysis: Start with a title and overview, then key points; include discussion views and the Agent's assessment when supported, explain limitations or uncertainty when present, and finish with sources. Omit empty sections and adapt headings and order to the persona and question.
+
+周报：可以先作周期总览，再按实际主题分组；各主题按材料写关键要点、观点差异或评价、限制和来源，需要时用简短结尾。 / Weekly digest: Start with a period overview, then group by actual topic; cover key points, differing views or assessment, limitations, and sources as supported, with a short closing when useful.

@@ -268,6 +268,9 @@ func extractXLinks(paragraph *html.Node, base *url.URL, limit int) ([]domain.Lin
 		if n == nil || truncated {
 			return
 		}
+		if n.Type == html.ElementNode && (n.Data == "script" || n.Data == "style") {
+			return
+		}
 		if n.Type == html.ElementNode && n.Data == "a" {
 			for _, attr := range n.Attr {
 				if !strings.EqualFold(attr.Key, "href") || strings.TrimSpace(attr.Val) == "" {
@@ -281,16 +284,15 @@ func extractXLinks(paragraph *html.Node, base *url.URL, limit int) ([]domain.Lin
 				if isXOrTwitterHost(u.Hostname()) {
 					break
 				}
-				if _, ok := seen[target]; ok {
-					break
-				}
-				if len(links) >= limit {
-					truncated = true
-					break
-				}
-				seen[target] = struct{}{}
-				links = append(links, domain.Link{URL: target, Text: excerpt(nodeText(n), 200), Context: excerpt(content, 400)})
+				links, truncated = appendLink(links, seen, target, nodeText(n), content, limit)
 				break
+			}
+			return
+		}
+		if n.Type == html.TextNode {
+			links, truncated = appendTextURLs(links, n.Data, content, limit, true, seen)
+			if truncated {
+				return
 			}
 		}
 		for child := n.FirstChild; child != nil; child = child.NextSibling {

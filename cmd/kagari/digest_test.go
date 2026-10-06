@@ -40,7 +40,7 @@ func TestDigestCutoffAndLocalReplay(t *testing.T) {
 	if err := runDigest(context.Background(), worker, args, &first); err != nil {
 		t.Fatal(err)
 	}
-	if err := runDigest(context.Background(), worker, args, &second); err != nil || first.String() != second.String() || !strings.HasPrefix(second.String(), "本周回顾（0条）") {
+	if err := runDigest(context.Background(), worker, args, &second); err != nil || first.String() != second.String() || !strings.HasPrefix(second.String(), "所选时间范围内暂无") {
 		t.Fatalf("local replay: %q %q %v", first.String(), second.String(), err)
 	}
 }

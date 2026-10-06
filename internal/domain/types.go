@@ -45,44 +45,11 @@ type Source struct {
 	Truncated    bool       `json:"truncated"`
 }
 
-// Reading 记录一次阅读决策，多个入口可指向同一 Source。
-// entry 是提交入口，primary 追读原文，evidence 核对事实，context 补充背景；
-// Question 保留补读目的，Depth 从第一个抓取页面的 0 开始计算。
+// Reading 记录一次实际读取尝试；同一 URL 可通过不同后端重试。
 type Reading struct {
 	SourceID string `json:"source_id"`
-	ParentID string `json:"parent_id"`
 	URL      string `json:"url"`
-	Question string `json:"question"`
-	Role     string `json:"role"`
-	Depth    int    `json:"depth"`
-}
-
-// Claim 的 SourceIDs 必须指向本次已读取的可用来源；保存引用不代表已自动证明结论正确。
-type Claim struct {
-	Text      string   `json:"text"`
-	SourceIDs []string `json:"source_ids"`
-}
-
-// AnalysisHeadings 是模型按人格和阅读偏好生成的展示文案，不改变对应内容的证据语义。
-type AnalysisHeadings struct {
-	Summary       string `json:"summary"`
-	Discussion    string `json:"discussion"`
-	Evaluation    string `json:"evaluation"`
-	Uncertainties string `json:"uncertainties"`
-	Sources       string `json:"sources"`
-}
-
-// Analysis 区分来源事实、讨论者观点和 Agent 判断，避免周报混淆三者。
-type Analysis struct {
-	Headings      *AnalysisHeadings `json:"headings,omitempty"`
-	Title         string            `json:"title"`
-	Overview      string            `json:"overview"`
-	Summary       []Claim           `json:"summary"`
-	Discussion    []Claim           `json:"discussion"`
-	Evaluation    []Claim           `json:"evaluation"`
-	Category      string            `json:"category"`
-	Tags          []string          `json:"tags"`
-	Uncertainties []string          `json:"uncertainties"`
+	Backend  string `json:"backend"`
 }
 
 type Usage struct {
@@ -91,14 +58,15 @@ type Usage struct {
 	TotalTokens  int `json:"total_tokens"`
 }
 
-// Result 同时保存可发布的分析和其依据。分析失败时也可能包含 Sources/Readings，
-// 由任务状态决定它是最终结果还是供诊断与重试使用的部分结果。
+// Result 保存 Markdown 回复及其阅读记录。失败任务也可能包含部分结果，
+// 由任务状态决定 Body 是否可发布。
 type Result struct {
-	Analysis        Analysis  `json:"analysis"`
+	Body            string    `json:"body,omitempty"`
 	AnalysisVersion string    `json:"analysis_version,omitempty"`
 	Sources         []Source  `json:"sources"`
 	Readings        []Reading `json:"readings"`
 	Usage           Usage     `json:"usage"`
+	UsageReported   bool      `json:"usage_reported"`
 	CreatedAt       time.Time `json:"created_at"`
 }
 

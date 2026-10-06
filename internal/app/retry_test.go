@@ -29,9 +29,8 @@ func TestProcessJobRetriesModelAndNotifiesOnlyExhaustion(t *testing.T) {
 	}{
 		{"http_recovers", "http", 2, false},
 		{"http_exhausts", "http", 6, true},
-		{"invalid_json_recovers", "json", 1, false},
-		{"invalid_json_exhausts", "json", 6, true},
-		{"invalid_citation_recovers", "citation", 1, false},
+		{"empty_output_recovers", "empty", 1, false},
+		{"empty_output_exhausts", "empty", 6, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -44,14 +43,9 @@ func TestProcessJobRetriesModelAndNotifiesOnlyExhaustion(t *testing.T) {
 					_, _ = w.Write([]byte(`{"error":{"message":"fixture_secret_body","type":"forbidden"}}`))
 					return
 				}
-				a := domain.Analysis{Title: "文章", Overview: "事实", Summary: []domain.Claim{{Text: "事实", SourceIDs: []string{"article"}}}, Category: "工程"}
-				a.Headings = &domain.AnalysisHeadings{Summary: "事实", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"}
-				if failed && tc.failure == "citation" {
-					a.Summary[0].SourceIDs = []string{"unread"}
-				}
-				raw, _ := json.Marshal(a)
-				if failed && tc.failure == "json" {
-					raw = []byte(`{"title"c:"fixture_secret_body"}`)
+				raw := []byte("## 文章\n事实")
+				if failed && tc.failure == "empty" {
+					raw = nil
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_retry", "object": "response", "status": "completed", "model": "test", "output": []any{map[string]any{"type": "message", "id": "msg_retry", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": string(raw), "annotations": []any{}}}}}})
 			}))
@@ -181,15 +175,42 @@ func TestCanceledAnalysisPreservesEvidenceWithoutFinalNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.MaxAttempts = 1
+	cfg.ProfilePath = t.TempDir() + "/missing"
+	var modelRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if modelRequests.Add(1) != 1 {
+			t.Errorf("unexpected model request")
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "resp_cancel", "object": "response", "status": "completed", "model": "test",
+			"output": []any{map[string]any{"type": "function_call", "id": "fc_cancel", "call_id": "call_cancel", "name": "read_url", "arguments": `{"url":"https://example.org/article"}`}},
+		})
+	}))
+	defer server.Close()
+	cfg.Model.BaseURL, cfg.Model.APIKey, cfg.Model.Name = server.URL+"/v1", "fake", "test"
 	s, err := store.New(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	e := &agent.Engine{Config: cfg, Read: func(_ context.Context, u string) (domain.Source, error) {
+	var reads atomic.Int32
+	e, err := agent.New(ctx, cfg, func(_ context.Context, u string) (domain.Source, error) {
+		reads.Add(1)
+		if u != "https://example.org/article" {
+			t.Errorf("unexpected read URL %q", u)
+		}
 		cancel()
-		return domain.Source{ID: "partial", URL: u, Content: "保留的片段", Status: "failed"}, context.Canceled
-	}}
+		return domain.Source{ID: "partial", URL: u, RequestedURL: u, Content: "保留的片段", Status: "incomplete"}, context.Canceled
+	}, s.CachedSource, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sub, err := e.Prepare(domain.Submission{UserID: 7, ChatID: 7, URLs: []string{"https://example.org/article"}})
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +225,14 @@ func TestCanceledAnalysisPreservesEvidenceWithoutFinalNotice(t *testing.T) {
 		t.Fatalf("cancellation was lost: %v", err)
 	}
 	job, err := s.Job(context.Background(), id)
-	if err != nil || job.Status != "pending" || job.Attempts != 0 || !strings.Contains(string(job.Result), "保留的片段") {
+	if err != nil || job == nil {
+		t.Fatalf("interrupted job could not be loaded: %+v, %v", job, err)
+	}
+	var partial domain.Result
+	if err := json.Unmarshal(job.Result, &partial); err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != "pending" || job.Attempts != 0 || len(partial.Sources) != 1 || partial.Sources[0].ID != "partial" || partial.Sources[0].Content != "保留的片段" || reads.Load() != 1 || modelRequests.Load() != 1 {
 		t.Fatalf("interrupted task lost evidence or retry budget: %+v, %v", job, err)
 	}
 	if next, err := s.ClaimJob(context.Background()); err != nil || next == nil || next.ID != id {

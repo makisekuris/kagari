@@ -102,6 +102,8 @@ func describeError(err error) errorInfo {
 		switch message {
 		case noReadableContent:
 			return errorInfo{reason: "no readable content", kind: "read_error"}
+		case "empty analysis output", "empty digest output":
+			return errorInfo{reason: message, kind: "empty_response"}
 		case "model response failed":
 			return errorInfo{reason: message, kind: "model_response_error"}
 		case "model response incomplete":
@@ -110,20 +112,12 @@ func describeError(err error) errorInfo {
 			return errorInfo{reason: "model configuration incomplete", kind: "configuration_error"}
 		case "unsupported digest version", "digest snapshot does not match request":
 			return errorInfo{reason: message, kind: "digest_snapshot_error"}
-		case "analysis lacks title, overview or summary, or has too many tags", "analysis returned an unknown category", "too many claims", "claim lacks text or sources", "expected a single JSON object":
-			return errorInfo{reason: message, kind: "analysis_validation_error"}
-		case "role must be primary, evidence or context", "a concrete reading question is required", "URL must occur in the specified successfully read parent source", "URL was not submitted", "reading depth budget exhausted", "page budget exhausted", "supplemental reading budget exhausted":
+		case "page budget exhausted":
 			return errorInfo{reason: message, kind: "reading_policy_error"}
 		}
 		switch {
 		case strings.HasPrefix(message, "digest input exceeds weekly.max_input_chars"):
 			return errorInfo{reason: "digest input exceeds weekly.max_input_chars", kind: "digest_input_limit"}
-		case strings.HasPrefix(message, "review "), strings.HasPrefix(message, "section name must "), strings.HasPrefix(message, "citation "), strings.HasPrefix(message, "duplicate review job id "), strings.HasPrefix(message, "duplicate citation "), strings.HasPrefix(message, "duplicate input job id "):
-			return errorInfo{reason: "weekly review failed validation", kind: "digest_validation_error"}
-		case strings.HasPrefix(message, "claim cites unread source "):
-			return errorInfo{reason: "claim cites unread source", kind: "analysis_validation_error"}
-		case strings.HasPrefix(message, "json: unknown field "):
-			return errorInfo{reason: "JSON response contains an unknown field", kind: "analysis_validation_error"}
 		case strings.HasPrefix(message, "received error event:"):
 			return errorInfo{reason: "model stream reported an error", kind: "model_stream_error"}
 		}

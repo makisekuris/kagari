@@ -24,24 +24,43 @@ import (
 func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	ctx := context.Background()
 	var requests atomic.Int32
+	const finalAnalysis = "## 原文简报喵\n原文事实\n\n## taffy锐评\n适合当前需求"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 			return
 		}
-		a := domain.Analysis{Title: "文章标题", Overview: "原文事实", Summary: []domain.Claim{{Text: "原文事实", SourceIDs: []string{"article"}}}, Discussion: []domain.Claim{}, Evaluation: []domain.Claim{{Text: "适合当前需求", SourceIDs: []string{"article"}}}, Category: "工程", Tags: []string{"Go"}, Uncertainties: []string{}}
-		a.Headings = &domain.AnalysisHeadings{Summary: "原文简报喵", Discussion: "讨论", Evaluation: "taffy锐评", Uncertainties: "限制", Sources: "来源"}
-		var output any = a
-		properties := body["text"].(map[string]any)["format"].(map[string]any)["schema"].(map[string]any)["properties"].(map[string]any)
-		if properties["sections"] != nil {
+		call := requests.Add(1)
+		var output []any
+		switch call {
+		case 1:
+			tools, ok := body["tools"].([]any)
+			if !ok || len(tools) == 0 {
+				t.Errorf("analysis request did not expose read_url: %v", body["tools"])
+			}
+			output = []any{map[string]any{"type": "function_call", "id": "fc_app_read", "call_id": "call_app_read", "name": "read_url", "arguments": `{"url":"https://example.org/article"}`}}
+		case 2:
+			input, _ := json.Marshal(body["input"])
+			if !strings.Contains(string(input), "function_call_output") || !strings.Contains(string(input), "正文应被保存到本地") {
+				t.Errorf("analysis final turn lacks the read result: %s", input)
+			}
+			output = []any{map[string]any{"type": "message", "id": "msg_analysis", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": finalAnalysis, "annotations": []any{}}}}}
+		case 3:
+			if tools, ok := body["tools"].([]any); ok && len(tools) != 0 {
+				t.Errorf("weekly digest exposed tools: %v", tools)
+			}
 			input := digestModelInput(t, body)
-			output = digestModelReview(input)
+			if len(input.Entries) != 1 || input.Entries[0].Body != finalAnalysis || len(input.Entries[0].Sources) != 1 || !input.Entries[0].Sources[0].Usable {
+				t.Errorf("weekly digest input omitted archived analysis or source metadata: %+v", input.Entries)
+			}
+			output = []any{map[string]any{"type": "message", "id": "msg_digest", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "## 本周阅读\n这些材料介绍了同一项工程实践喵。", "annotations": []any{}}}}}
+		default:
+			t.Errorf("unexpected model request %d", call)
+			output = []any{map[string]any{"type": "message", "id": "msg_unexpected", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "unexpected", "annotations": []any{}}}}}
 		}
-		raw, _ := json.Marshal(output)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_app", "object": "response", "status": "completed", "model": "test", "output": []any{map[string]any{"type": "message", "id": "msg_app", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": string(raw), "annotations": []any{}}}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_app", "object": "response", "status": "completed", "model": "test", "output": output})
 	}))
 	defer server.Close()
 	cfg, err := config.Load("")
@@ -57,7 +76,9 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	var reads atomic.Int32
 	e, err := agent.New(ctx, cfg, func(_ context.Context, u string) (domain.Source, error) {
+		reads.Add(1)
 		return domain.Source{ID: "article", URL: u, RequestedURL: u, Status: "ok", Content: "正文应被保存到本地", FetchedAt: time.Now()}, nil
 	}, s.CachedSource, nil)
 	if err != nil {
@@ -65,22 +86,6 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	}
 	w := &Worker{Store: s, Engine: e, Config: cfg, Log: zap.NewNop()}
 	now := time.Now().UTC()
-	legacy, err := e.Prepare(domain.Submission{UserID: 7, ChatID: 7, URLs: []string{"https://example.org/article"}, ReceivedAt: now.Add(-48 * time.Hour)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyPayload, _ := json.Marshal(legacy)
-	legacyID, _, err := s.Enqueue(ctx, "analyze", "legacy", legacyPayload, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.StartJob(ctx, legacyID); err != nil {
-		t.Fatal(err)
-	}
-	legacyResult, _ := json.Marshal(domain.Result{Analysis: domain.Analysis{Title: "旧答案引用了用户提示词"}, AnalysisVersion: "source-boundaries-v1", CreatedAt: now})
-	if err := s.CompletePublication(ctx, legacyID, legacyResult, nil, nil); err != nil {
-		t.Fatal(err)
-	}
 	var firstID int64
 	for i := 0; i < 2; i++ {
 		sub, err := e.Prepare(domain.Submission{UserID: 7, ChatID: 7, URLs: []string{"https://example.org/article"}, ReceivedAt: now.Add(time.Duration(i) * time.Second)})
@@ -103,22 +108,18 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if requests.Load() != 1 {
-		t.Fatal("identical submission did not reuse analysis")
+	if requests.Load() != 2 || reads.Load() != 1 {
+		t.Fatalf("analysis did not preserve its read and reuse the cached result: model turns=%d reads=%d", requests.Load(), reads.Load())
 	}
 	entries, err := s.Entries(ctx, 7, now.Add(-time.Hour), now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Result.Sources[0].Content != "正文应被保存到本地" {
+	if len(entries) != 1 || entries[0].Result.Body != finalAnalysis || len(entries[0].Result.Sources) != 1 || entries[0].Result.Sources[0].Content != "正文应被保存到本地" {
 		t.Fatal("archive dedup/evidence missing")
 	}
-	if headings := entries[0].Result.Analysis.Headings; headings == nil || headings.Evaluation != "taffy锐评" {
-		t.Fatalf("archive lost generated headings: %+v", headings)
-	}
-	request := domain.DigestRequest{UserID: 7, Start: now.Add(-time.Hour), End: now.Add(time.Hour), Version: domain.DigestVersion}
-	targets := telegram.Targets([]int64{7})
-	id, created, err := w.EnqueueDigest(ctx, request, targets)
+	request := domain.DigestRequest{Version: domain.DigestVersion, UserID: 7, Start: now.Add(-time.Hour), End: now.Add(time.Hour)}
+	id, created, err := w.EnqueueDigest(ctx, request, telegram.Targets([]int64{7}))
 	if err != nil || !created {
 		t.Fatal(err)
 	}
@@ -134,10 +135,10 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	if err := json.Unmarshal(job.Result, &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Input == nil || len(report.Input.Entries) != 1 || report.Review == nil || digest.Count(*report.Review) != 1 || requests.Load() != 2 {
+	if report.Input == nil || len(report.Input.Entries) != 1 || report.Body == "" || requests.Load() != 3 {
 		t.Fatalf("digest generation %+v", report)
 	}
-	duplicate, created, err := w.EnqueueDigest(ctx, request, targets)
+	duplicate, created, err := w.EnqueueDigest(ctx, request, telegram.Targets([]int64{7}))
 	if err != nil || created || duplicate != id {
 		t.Fatal("digest period duplicated")
 	}
@@ -146,7 +147,7 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	}
 	sendCtx, cancel := context.WithCancel(ctx)
 	if err := deliver(sendCtx, w, distribution.Dispatcher{"telegram": telegram.Adapter(func(_ context.Context, _ int64, text string) (int64, error) {
-		if !strings.Contains(text, "原文简报喵：") || !strings.Contains(text, "taffy锐评：") || strings.Contains(text, "AI 摘要：") || strings.Contains(text, "Agent 评价：") {
+		if !strings.Contains(text, "原文简报喵") || !strings.Contains(text, "taffy锐评") || strings.Contains(text, "AI 摘要：") || strings.Contains(text, "Agent 评价：") {
 			t.Errorf("delivery replaced model headings: %s", text)
 		}
 		cancel()
@@ -200,7 +201,7 @@ func TestScheduleRestartCatchupIsIdempotent(t *testing.T) {
 			break
 		}
 		count++
-		if job.Kind != "digest" || len(job.Targets) != 2 || !reflect.DeepEqual(job.Targets, telegram.Targets([]int64{7, -100123})) {
+		if job.Kind != "digest" || !reflect.DeepEqual(job.Targets, telegram.Targets([]int64{7, -100123})) {
 			t.Fatal("wrong scheduled job")
 		}
 	}

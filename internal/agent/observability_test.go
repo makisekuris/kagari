@@ -36,10 +36,8 @@ func TestAgentMessagesAndLiveSSE(t *testing.T) {
 				return nil
 			}))
 			var calls atomic.Int32
-			args := `{"url":"https://example.org/article","parent_source_id":"root","question":"读取原文","role":"primary"}`
-			analysis := domain.Analysis{Title: "标题", Overview: "事实", Summary: []domain.Claim{{Text: "事实", SourceIDs: []string{"article"}}}, Category: "工程"}
-			analysis.Headings = &domain.AnalysisHeadings{Summary: "事实", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"}
-			raw, _ := json.Marshal(analysis)
+			args := `{"url":"https://example.org/article"}`
+			raw := "## 答案\n原文支持这个结论。"
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request map[string]any
 				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -52,13 +50,13 @@ func TestAgentMessagesAndLiveSSE(t *testing.T) {
 				call := calls.Add(1)
 				var item map[string]any
 				if call == 1 {
-					item = map[string]any{"type": "function_call", "id": "fc_1", "call_id": "read_1", "name": "read_source", "arguments": args, "status": "completed"}
+					item = map[string]any{"type": "function_call", "id": "fc_1", "call_id": "read_1", "name": "read_url", "arguments": args, "status": "completed"}
 				} else {
 					input, _ := json.Marshal(request["input"])
 					if !strings.Contains(string(input), `"call_id":"read_1"`) || !strings.Contains(string(input), "function_call_output") {
 						t.Error("tool result lost call_id")
 					}
-					item = map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": string(raw), "annotations": []any{}}}}
+					item = map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": raw, "annotations": []any{}}}}
 				}
 				response := map[string]any{"id": fmt.Sprintf("resp_%d", call), "object": "response", "status": "completed", "model": "fixture", "output": []any{item}, "usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18, "input_tokens_details": map[string]any{"cached_tokens": 3}, "output_tokens_details": map[string]any{"reasoning_tokens": 2}}}
 				if !streaming {
@@ -79,7 +77,7 @@ func TestAgentMessagesAndLiveSSE(t *testing.T) {
 				if call == 1 {
 					send("response.output_item.added", map[string]any{"output_index": 0, "item": map[string]any{"id": "reason_1", "type": "reasoning", "summary": []any{}}})
 					send("response.reasoning_summary_text.delta", map[string]any{"output_index": 0, "summary_index": 0, "item_id": "reason_1", "delta": "需要阅读原文"})
-					added := map[string]any{"type": "function_call", "id": "fc_1", "call_id": "read_1", "name": "read_source", "arguments": "", "status": "in_progress"}
+					added := map[string]any{"type": "function_call", "id": "fc_1", "call_id": "read_1", "name": "read_url", "arguments": "", "status": "in_progress"}
 					send("response.output_item.added", map[string]any{"output_index": 1, "item": added})
 					send("response.function_call_arguments.delta", map[string]any{"output_index": 1, "item_id": "fc_1", "delta": args[:35]})
 					// 服务端等待第一段日志，再发送剩余内容；缓冲到结束才打日志会失败。
@@ -91,7 +89,8 @@ func TestAgentMessagesAndLiveSSE(t *testing.T) {
 					send("response.function_call_arguments.delta", map[string]any{"output_index": 1, "item_id": "fc_1", "delta": args[35:]})
 					send("response.output_item.done", map[string]any{"output_index": 1, "item": item})
 				} else {
-					for _, delta := range []string{string(raw[:20]), string(raw[20:])} {
+					cut := strings.Index(raw, "原文")
+					for _, delta := range []string{raw[:cut], raw[cut:]} {
 						send("response.output_text.delta", map[string]any{"output_index": 0, "content_index": 0, "item_id": "msg_1", "delta": delta})
 					}
 				}
@@ -106,20 +105,17 @@ func TestAgentMessagesAndLiveSSE(t *testing.T) {
 			cfg.Model.BaseURL, cfg.Model.APIKey, cfg.Model.Name = server.URL+"/v1", "credential_fixture", "fixture"
 			cfg.ProfilePath = t.TempDir() + "/missing"
 			engine, err := New(context.Background(), cfg, func(_ context.Context, u string) (domain.Source, error) {
-				if u == "https://example.org/root" {
-					return domain.Source{ID: "root", URL: u, Status: "ok", Content: "入口", Links: []domain.Link{{URL: "https://example.org/article"}}}, nil
-				}
-				return domain.Source{ID: "article", URL: u, Status: "ok", Content: strings.Repeat("完整原文 ", 100)}, nil
+				return domain.Source{ID: "article", URL: u, RequestedURL: u, Status: "ok", Content: strings.Repeat("完整原文 ", 100)}, nil
 			}, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			engine.Log = logger
-			result, err := engine.Analyze(context.Background(), domain.Submission{URLs: []string{"https://example.org/root"}})
+			result, err := engine.Analyze(context.Background(), domain.Submission{Text: "读取这篇文章", URLs: []string{"https://example.org/article"}})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if calls.Load() != 2 || len(result.Readings) != 2 || result.Usage.TotalTokens != 36 || result.Analysis.Title != "标题" {
+			if calls.Load() != 2 || len(result.Readings) != 1 || result.Usage.TotalTokens != 36 || result.Body != raw {
 				t.Fatalf("wrong tool round trip: %+v calls=%d", result, calls.Load())
 			}
 			for _, name := range []string{"agent reason", "agent toolcall", "agent toolcall result", "agent token usage", "agent analyze finished"} {
@@ -128,7 +124,7 @@ func TestAgentMessagesAndLiveSSE(t *testing.T) {
 				}
 			}
 			toolCall := logs.FilterMessage("agent toolcall").All()[0].ContextMap()
-			if toolCall["call_id"] != "read_1" || toolCall["name"] != "read_source" || toolCall["arguments"] != args {
+			if toolCall["call_id"] != "read_1" || toolCall["name"] != "read_url" || toolCall["arguments"] != args {
 				t.Errorf("partial/missing tool call: %v", toolCall)
 			}
 			for _, entry := range logs.FilterMessage("agent toolcall result").All() {
@@ -172,23 +168,21 @@ func TestReadFailureAndPreviewLogs(t *testing.T) {
 	}
 	core, logs := observer.New(zapcore.InfoLevel)
 	cfg, _ := config.Load("")
-	engine := &Engine{Config: cfg, Log: zap.New(core), Read: func(_ context.Context, u string) (domain.Source, error) {
+	engine := &Engine{Config: cfg, Log: zap.New(core)}
+	session := newSession(engine)
+	source, err := session.read(context.Background(), "https://github.com/loro-dev/loro?token=secret", httpBackend, func(_ context.Context, u string) (domain.Source, error) {
 		return domain.Source{URL: u, Status: "restricted", Reason: "URL resolves to a non-public address"}, errors.New("unsafe target")
-	}}
-	result, err := engine.Analyze(context.Background(), domain.Submission{URLs: []string{"https://github.com/loro-dev/loro?token=secret"}})
-	if err == nil || result.Usage.TotalTokens != 0 {
-		t.Fatalf("unreadable source was accepted: %+v %v", result, err)
+	})
+	if err != nil || source.Status != "restricted" || len(session.readings) != 1 {
+		t.Fatalf("failed read was not preserved as an observation: %+v %+v %v", source, session.readings, err)
 	}
-	failed := logs.FilterMessage("agent read_source failed").All()
+	failed := logs.FilterMessage("agent read_url failed").All()
 	if len(failed) != 1 || failed[0].ContextMap()["source_reason"] != "URL resolves to a non-public address" || strings.Contains(failed[0].ContextMap()["url"].(string), "secret") {
 		t.Fatalf("missing/unsafe read error log: %+v", failed)
 	}
-	if logs.FilterMessage("agent analyze finished").Len() != 0 || logs.FilterMessage("agent analyze failed").All()[0].ContextMap()["stage"] != "read_sources" {
-		t.Fatal("failed run logged success or wrong stage")
-	}
-	base, _ := engine.Prepare(domain.Submission{URLs: []string{"https://example.org/root"}})
+	base, _ := engine.Prepare(domain.Submission{Text: "question"})
 	engine.Config.Agent.Streaming = true
-	stream, _ := engine.Prepare(domain.Submission{URLs: []string{"https://example.org/root"}})
+	stream, _ := engine.Prepare(domain.Submission{Text: "question"})
 	if base.CacheKey != stream.CacheKey {
 		t.Error("stream setting changed analysis identity")
 	}

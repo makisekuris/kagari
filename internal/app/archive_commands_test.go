@@ -45,10 +45,7 @@ func addCommandArchive(t *testing.T, s *store.Store, userID int64, key, title st
 	}
 	source := domain.Source{ID: "article", URL: "https://shared.example/article", RequestedURL: "https://shared.example/article", Status: "ok", Title: title, Content: "来源正文"}
 	result, err := json.Marshal(domain.Result{
-		Analysis: domain.Analysis{
-			Headings: &domain.AnalysisHeadings{Summary: "摘要", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"},
-			Title:    title, Overview: "分析概述 " + key, Summary: []domain.Claim{{Text: "报告事实 " + key, SourceIDs: []string{"article"}}},
-		},
+		Body:    fmt.Sprintf("# %s\n\n## 概述\n分析概述 %s\n\n## 事实\n报告事实 %s [来源](%s)", title, key, key, source.URL),
 		Sources: []domain.Source{source},
 	})
 	if err != nil {

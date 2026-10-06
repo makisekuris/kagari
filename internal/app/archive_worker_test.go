@@ -29,10 +29,7 @@ func TestArchiveCommandsCompleteThroughPrivateOutbox(t *testing.T) {
 	if _, err := s.StartJob(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	result, _ := json.Marshal(domain.Result{Analysis: domain.Analysis{
-		Headings: &domain.AnalysisHeadings{Summary: "摘要", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"},
-		Title:    "private archive title", Overview: "saved report",
-	}})
+	result, _ := json.Marshal(domain.Result{Body: "# private archive title\n\nsaved report"})
 	if err := s.CompletePublication(ctx, id, result, nil, nil); err != nil {
 		t.Fatal(err)
 	}

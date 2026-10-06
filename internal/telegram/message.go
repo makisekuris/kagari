@@ -78,8 +78,8 @@ func (c *Client) jobForUpdate(update *models.Update) (kind, key string, payload 
 		submission.Text = ""
 	}
 	prepared, prepareErr := c.prepare(submission)
-	if prepareErr != nil || len(prepared.URLs) == 0 {
-		payload, err = json.Marshal(domain.Command{UserID: message.From.ID, ChatID: message.Chat.ID, Text: "请发送包含链接的消息，可附上分析问题或备注。"})
+	if prepareErr != nil || (len(prepared.URLs) == 0 && strings.TrimSpace(prepared.Text+prepared.ForwardedText) == "") {
+		payload, err = json.Marshal(domain.Command{UserID: message.From.ID, ChatID: message.Chat.ID, Text: "请发送问题、转发内容或材料链接。"})
 		return "notice", key, payload, message.Chat.ID, err
 	}
 	payload, err = json.Marshal(prepared)

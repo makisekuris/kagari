@@ -36,19 +36,16 @@ func TestListArchivePaginationDuplicatesAndOwner(t *testing.T) {
 	secondID := completeSubmission(t, s, second)
 	otherID := completeSubmission(t, s, submission(17, "other", at))
 	rich := domain.Result{
-		Analysis: domain.Analysis{
-			Headings: &domain.AnalysisHeadings{Summary: "摘要", Discussion: "讨论", Evaluation: "评价", Uncertainties: "限制", Sources: "来源"},
-			Title:    "second full result",
-		},
+		Body:     "## second full result",
 		Sources:  []domain.Source{{URL: "https://example.test/source", Status: "ok", Content: "evidence text"}},
-		Readings: []domain.Reading{{SourceID: "source-1", Role: "evidence", Question: "verify claim"}},
+		Readings: []domain.Reading{{SourceID: "source-1", Backend: "browser"}},
 	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE jobs SET result=? WHERE id=?`, mustJSON(t, rich), secondID); err != nil {
 		t.Fatal(err)
 	}
 
 	page, err := s.ListArchive(ctx, 0, 1, 0)
-	if err != nil || len(page) != 1 || page[0].JobID != secondID || page[0].Submission.UserID != 0 || len(page[0].Result.Sources) != 1 || page[0].Result.Sources[0].Content != "evidence text" || len(page[0].Result.Readings) != 1 || page[0].Result.Readings[0].Question != "verify claim" {
+	if err != nil || len(page) != 1 || page[0].JobID != secondID || page[0].Submission.UserID != 0 || len(page[0].Result.Sources) != 1 || page[0].Result.Sources[0].Content != "evidence text" || len(page[0].Result.Readings) != 1 || page[0].Result.Body != "## second full result" || page[0].Result.Readings[0].Backend != "browser" {
 		t.Fatalf("first page = (%+v, %v)", page, err)
 	}
 	page, err = s.ListArchive(ctx, 0, 2, 1)

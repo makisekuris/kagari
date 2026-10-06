@@ -84,14 +84,11 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 	if report.Version != domain.DigestVersion || strings.TrimSpace(input.Instruction) == "" || input.UserID != request.UserID || !input.Start.Equal(request.Start) || !input.Cutoff.Equal(request.End) {
 		return report, "", errors.New("digest snapshot does not match request")
 	}
-	if report.Review != nil {
-		if err := digest.ValidateReview(*input, *report.Review); err != nil {
-			return report, "", err
-		}
+	if report.Body != "" {
 		return report, digest.Render(report), nil
 	}
 	if len(input.Entries) == 0 {
-		report.Review = &domain.DigestReview{Sections: []domain.DigestSection{}}
+		report.Body = "所选时间范围内暂无可汇总的新内容。"
 	} else {
 		raw, err := json.Marshal(input)
 		if err != nil {
@@ -113,10 +110,10 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 		if err != nil {
 			return report, "", err
 		}
-		report.Review = &review
+		report.Body = review
 	}
 	report.GeneratedAt = time.Now().UTC()
-	// 在 CompletePublication 前保存已校验正文；重启后回放它，再原子写入 outbox。
+	// 在 CompletePublication 前保存正文；重启后回放它，再原子写入 outbox。
 	if err := w.saveDigestProgress(ctx, job.ID, report); err != nil {
 		return report, "", err
 	}

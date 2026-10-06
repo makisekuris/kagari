@@ -54,7 +54,7 @@ func completeSubmission(t *testing.T, s *Store, sub domain.Submission) int64 {
 	if err != nil || job == nil || job.ID != id {
 		t.Fatalf("ClaimJob() = (%+v, %v), want job %d", job, err, id)
 	}
-	if err := s.CompletePublication(context.Background(), id, mustJSON(t, domain.Result{Analysis: domain.Analysis{Title: sub.Text}}), nil, nil); err != nil {
+	if err := s.CompletePublication(context.Background(), id, mustJSON(t, domain.Result{Body: sub.Text}), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -153,7 +153,7 @@ func TestRetryRecoveryAndOrderedUncertainDeliveries(t *testing.T) {
 		{URL: "https://example.com/failure", Status: "error", Title: "not cached"},
 	}
 	target := telegramTargets(42)[0]
-	if err := s.CompletePublication(ctx, id, mustJSON(t, domain.Result{Analysis: domain.Analysis{Title: "done"}}), []domain.Delivery{
+	if err := s.CompletePublication(ctx, id, mustJSON(t, domain.Result{Body: "done"}), []domain.Delivery{
 		{Target: target, Part: 1, Text: "first"}, {Target: target, Part: 2, Text: "second"},
 	}, sources); err != nil {
 		t.Fatal(err)

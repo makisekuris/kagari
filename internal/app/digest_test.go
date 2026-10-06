@@ -15,6 +15,7 @@ import (
 	"kagari/internal/domain"
 	"kagari/internal/persona"
 	"kagari/internal/store"
+	"kagari/internal/telegram"
 
 	"go.uber.org/zap"
 )
@@ -51,17 +52,8 @@ func digestModelInput(t *testing.T, body map[string]any) domain.DigestInput {
 	return domain.DigestInput{}
 }
 
-func digestModelReview(input domain.DigestInput) domain.DigestReview {
-	item := domain.DigestItem{Title: "这一周的工程线索喵", Review: "这些材料介绍了同一项工程实践喵。"}
-	for _, entry := range input.Entries {
-		item.EntryIDs = append(item.EntryIDs, entry.JobID)
-		for _, source := range entry.Sources {
-			if source.Usable {
-				item.Refs = append(item.Refs, domain.DigestRef{JobID: entry.JobID, SourceID: source.ID})
-			}
-		}
-	}
-	return domain.DigestReview{Opening: "小菲来回顾这周的阅读喵。", Sections: []domain.DigestSection{{Name: "工程简报喵", Items: []domain.DigestItem{item}}}}
+func digestModelReview(input domain.DigestInput) string {
+	return "## 本周阅读\n这些材料介绍了同一项工程实践喵。"
 }
 
 func archiveDigestEntry(t *testing.T, s *store.Store, key string, at time.Time) int64 {
@@ -75,7 +67,11 @@ func archiveDigestEntry(t *testing.T, s *store.Store, key string, at time.Time) 
 	if _, err := s.StartJob(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	result, _ := json.Marshal(domain.Result{Analysis: domain.Analysis{Title: "工程实践", Overview: "归档概述", Category: "工程", Summary: []domain.Claim{{Text: "归档事实", SourceIDs: []string{"source"}}}}, Sources: []domain.Source{{ID: "source", URL: "https://example.org/" + key, Status: "ok", Content: "全文不应传入周报模型"}}, CreatedAt: at})
+	body := "归档事实"
+	if key == "oversized" {
+		body = strings.Repeat(body, 1000)
+	}
+	result, _ := json.Marshal(domain.Result{Body: body, Sources: []domain.Source{{ID: "source", URL: "https://example.org/" + key, Status: "ok", Content: "全文不应传入周报模型"}}, CreatedAt: at})
 	if err := s.CompletePublication(ctx, id, result, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +108,7 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":{"message":"temporary","type":"server_error"}}`))
 			return
 		}
-		raw, _ := json.Marshal(digestModelReview(input))
+		raw := []byte(digestModelReview(input))
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_digest", "object": "response", "status": "completed", "model": "test", "output": []any{map[string]any{"type": "message", "id": "msg_digest", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": string(raw), "annotations": []any{}}}}}, "usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}})
 	}))
 	defer server.Close()
@@ -129,9 +125,8 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	}
 	e.Profile = "初始表达偏好"
 	worker := &Worker{Store: s, Engine: e, Config: cfg, Log: zap.NewNop()}
-	request := domain.DigestRequest{UserID: 7, Start: now.AddDate(0, 0, -7), End: now, Version: domain.DigestVersion}
-	targets := []domain.DeliveryTarget{{Channel: "telegram", Address: "900"}}
-	id, _, err := worker.EnqueueDigest(ctx, request, targets)
+	request := domain.DigestRequest{Version: domain.DigestVersion, UserID: 7, Start: now.AddDate(0, 0, -7), End: now}
+	id, _, err := worker.EnqueueDigest(ctx, request, telegram.Targets([]int64{900}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +139,7 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	}
 	failed, _ := s.Job(ctx, id)
 	var snapshot digest.Report
-	if err := json.Unmarshal(failed.Result, &snapshot); err != nil || snapshot.Input == nil || snapshot.Review != nil {
+	if err := json.Unmarshal(failed.Result, &snapshot); err != nil || snapshot.Input == nil || snapshot.Body != "" {
 		t.Fatalf("failed attempt lost input: %+v %v", snapshot, err)
 	}
 	if !strings.Contains(snapshot.Input.Instruction, initialPersona.Prompt()) {
@@ -163,7 +158,7 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	}
 	// 模拟生成已完成、尚未提交 outbox 时进程退出。
 	report, text, err := worker.processDigest(ctx, job)
-	if err != nil || len(inputs) != 2 || inputs[0] != inputs[1] || strings.Contains(inputs[0], "全文不应") || len(report.Input.Entries) != 2 || report.Input.Profile != "初始表达偏好" || report.Usage.TotalTokens != 18 || !strings.HasPrefix(text, "本周回顾（1条）") {
+	if err != nil || len(inputs) != 2 || inputs[0] != inputs[1] || strings.Contains(inputs[0], "全文不应") || len(report.Input.Entries) != 2 || report.Input.Profile != "初始表达偏好" || report.Usage.TotalTokens != 18 || !strings.HasPrefix(text, "## 本周阅读") {
 		t.Fatalf("snapshot/generation: %+v %q err=%v inputs=%v", report, text, err, inputs)
 	}
 	if modelInputs[0] != modelInputs[1] || strings.Contains(modelInputs[1], "replacement-persona") {
@@ -189,7 +184,7 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	if err != nil || counts["pending"] != 1 {
 		t.Fatalf("outbox: %v %v", counts, err)
 	}
-	if duplicate, created, err := worker.EnqueueDigest(ctx, request, targets); err != nil || created || duplicate != id {
+	if duplicate, created, err := worker.EnqueueDigest(ctx, request, telegram.Targets([]int64{900})); err != nil || created || duplicate != id {
 		t.Fatalf("request lost idempotency: %d %v %v", duplicate, created, err)
 	}
 	if _, err := worker.ProcessJob(ctx, id); err != nil || len(inputs) != 2 {
@@ -215,17 +210,17 @@ func TestDigestEmptyAndInputLimitDoNotCallModel(t *testing.T) {
 		cfg.Weekly.MaxInputChars = 1024
 		now := time.Now()
 		if !empty {
-			archiveDigestEntry(t, s, "article", now.Add(-time.Hour))
+			archiveDigestEntry(t, s, "oversized", now.Add(-time.Hour))
 		}
 		worker := &Worker{Store: s, Config: cfg, Log: zap.NewNop()}
-		id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{UserID: 7, Start: now.AddDate(0, 0, -7), End: now, Version: domain.DigestVersion}, nil)
+		id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{Version: domain.DigestVersion, UserID: 7, Start: now.AddDate(0, 0, -7), End: now}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		job, err := worker.ProcessJob(ctx, id)
 		if empty {
 			var report digest.Report
-			if err != nil || json.Unmarshal(job.Result, &report) != nil || !strings.HasPrefix(digest.Render(report), "本周回顾（0条）") {
+			if err != nil || json.Unmarshal(job.Result, &report) != nil || !strings.HasPrefix(digest.Render(report), "所选时间范围内暂无") {
 				t.Fatalf("empty digest requires model: %+v %v", job, err)
 			}
 		} else if err == nil || job.Status != "failed" || !strings.Contains(job.LastError, "max_input_chars") {
@@ -234,11 +229,11 @@ func TestDigestEmptyAndInputLimitDoNotCallModel(t *testing.T) {
 	}
 }
 
-func TestDigestRejectsMissingEntriesWithoutPublishing(t *testing.T) {
+func TestDigestRejectsEmptyOutputWithoutPublishing(t *testing.T) {
 	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_invalid", "object": "response", "status": "completed", "model": "test", "output": []any{map[string]any{"type": "message", "id": "msg_invalid", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": `{"opening":"","sections":[],"closing":""}`, "annotations": []any{}}}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_invalid", "object": "response", "status": "completed", "model": "test", "output": []any{map[string]any{"type": "message", "id": "msg_invalid", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "", "annotations": []any{}}}}}})
 	}))
 	defer server.Close()
 	cfg, err := config.Load("")
@@ -256,16 +251,16 @@ func TestDigestRejectsMissingEntriesWithoutPublishing(t *testing.T) {
 	now := time.Now()
 	archiveDigestEntry(t, s, "article", now.Add(-time.Hour))
 	worker := &Worker{Store: s, Config: cfg, Log: zap.NewNop(), Persona: digestTestPersona("worker-injected-persona")}
-	id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{UserID: 7, Start: now.AddDate(0, 0, -7), End: now, Version: domain.DigestVersion}, []domain.DeliveryTarget{{Channel: "telegram", Address: "900"}})
+	id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{Version: domain.DigestVersion, UserID: 7, Start: now.AddDate(0, 0, -7), End: now}, telegram.Targets([]int64{900}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	job, err := worker.ProcessJob(ctx, id)
-	if err == nil || job.Status != "failed" || job.LastError != "weekly review failed validation" {
+	if err == nil || job.Status != "failed" || !strings.Contains(job.LastError, "empty digest output") {
 		t.Fatalf("missing entries were published: %+v %v", job, err)
 	}
 	var report digest.Report
-	if err := json.Unmarshal(job.Result, &report); err != nil || report.Input == nil || report.Review != nil {
+	if err := json.Unmarshal(job.Result, &report); err != nil || report.Input == nil || report.Body != "" {
 		t.Fatalf("invalid review persisted as valid output: %+v %v", report, err)
 	}
 	if !strings.Contains(report.Input.Instruction, "worker-injected-persona") {
@@ -276,7 +271,7 @@ func TestDigestRejectsMissingEntriesWithoutPublishing(t *testing.T) {
 		t.Fatalf("invalid output entered outbox: %v %v", counts, err)
 	}
 	notice, err := s.ClaimJob(ctx)
-	if err != nil || notice == nil || notice.Kind != "notice" || len(notice.Targets) != 1 || notice.Targets[0].Address != "7" {
+	if err != nil || notice == nil || notice.Kind != "notice" || len(notice.Targets) != 1 || notice.Targets[0] != telegram.Targets([]int64{7})[0] {
 		t.Fatalf("failed digest needs a private retry notice: %+v %v", notice, err)
 	}
 }
