@@ -104,11 +104,10 @@ func (c *Client) Send(ctx context.Context, chatID int64, text string) (int64, er
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	message, err := c.bot.SendMessage(ctx, &telegrambot.SendMessageParams{
+	message, err := c.bot.SendRichMessage(ctx, &telegrambot.SendRichMessageParams{
 		ChatID: chatID,
-		Text:   text,
-		LinkPreviewOptions: &models.LinkPreviewOptions{
-			IsDisabled: telegrambot.True(),
+		RichMessage: models.InputRichMessage{
+			Markdown: text,
 		},
 	})
 	if err != nil {

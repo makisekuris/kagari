@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"strconv"
+	"unicode/utf8"
 
 	"kagari/internal/distribution"
 	"kagari/internal/domain"
@@ -21,7 +22,17 @@ func Targets(chatIDs []int64) []domain.DeliveryTarget {
 
 func Adapter(send func(context.Context, int64, string) (int64, error)) distribution.Adapter {
 	return distribution.Adapter{
-		Prepare: render.Chunks,
+		Prepare: func(text string) []string {
+			if text == "" {
+				return nil
+			}
+			if utf8.RuneCountInString(text) > 32768 {
+				// ponytail: oversized Markdown uses existing text cuts; preserve
+				// cross-part formatting if these reports need it.
+				return render.Chunks(text)
+			}
+			return []string{text}
+		},
 		Send: func(ctx context.Context, target domain.DeliveryTarget, text string) (string, error) {
 			chatID, err := strconv.ParseInt(target.Address, 10, 64)
 			if err != nil || chatID == 0 || strconv.FormatInt(chatID, 10) != target.Address {

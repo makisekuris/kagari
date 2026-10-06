@@ -55,7 +55,7 @@ func TestPublicationFansOutWithoutReanalysisAndFailureIsIsolated(t *testing.T) {
 	if err := w.Process(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	parts := render.Chunks(fmt.Sprintf("任务 #%d\n%s", id, render.Analysis(result)))
+	parts := telegram.Adapter(nil).Prepare(fmt.Sprintf("任务 #%d\n%s", id, render.Analysis(result)))
 	var channelParts []string
 	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

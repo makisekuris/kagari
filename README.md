@@ -160,6 +160,10 @@ Telegram 只接收允许列表中用户的私聊消息。确认、命令回复�
 
 Telegram accepts private messages from users on the allowlist. Acknowledgements, command replies, and processing failure notices go to the submitting private chat. Analysis and digest results default to the submitting chat; a nonempty `telegram.target_chat_ids` list sends each result to every listed chat or channel, where the bot needs posting permission. An empty list keeps results in the submitting private chat. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, `/weekly START END`, and the archive commands below.
 
+Telegram 使用 `sendRichMessage` 直接发送 Markdown，由 Telegram 渲染标题、强调、链接和代码。正文不超过 32768 个字符时整篇发送；超过时复用原有分片，跨分片的格式可能不完整。CLI、归档与投递队列保留原始 Markdown。
+
+Telegram sends Markdown directly through `sendRichMessage`, which renders headings, emphasis, links, and code. Bodies up to 32768 characters are sent whole; longer bodies use the existing chunks, which may interrupt formatting across parts. The CLI, archives, and delivery queue keep the original Markdown.
+
 私聊 bot 可分页查看自己的归档、读取详情并确认删除。用户身份取自 Telegram 发送者，不接受用户 ID 参数。
 
 In a private bot chat, browse your archives, read details, and confirm deletion. Ownership comes from the Telegram sender; commands do not accept a user ID.

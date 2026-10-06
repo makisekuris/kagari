@@ -8,8 +8,7 @@ import (
 
 func Analysis(result domain.Result) string { return strings.TrimSpace(result.Body) }
 
-// Telegram measures message length in UTF-16 units. Plain text avoids markup
-// escaping and broken entities when a long report is split.
+// Chunks splits text at 3500 UTF-16 units without splitting a rune.
 func Chunks(text string) []string {
 	const limit = 3500
 	var out []string

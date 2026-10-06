@@ -98,7 +98,7 @@ func TestPollPersistsBeforeAckExtractsUTF16AndDeduplicates(t *testing.T) {
 			nextOnce.Do(func() { close(nextPoll) })
 			<-req.Context().Done()
 			return nil, req.Context().Err()
-		case strings.HasSuffix(req.URL.Path, "/sendMessage"):
+		case strings.HasSuffix(req.URL.Path, "/sendRichMessage"):
 			mu.Lock()
 			sendCalls++
 			mu.Unlock()
@@ -180,16 +180,21 @@ func TestAcceptUpdateUsesInjectedReplyAndDeduplicatesAck(t *testing.T) {
 	st := testStore(t)
 	var sends int
 	var ackChatID string
-	var ackText string
+	var ackMarkdown string
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if !strings.HasSuffix(req.URL.Path, "/sendMessage") {
+		if !strings.HasSuffix(req.URL.Path, "/sendRichMessage") {
 			t.Fatalf("unexpected Telegram request: %s", req.URL.Path)
 		}
 		sends++
 		if err := req.ParseMultipartForm(1 << 20); err != nil {
 			t.Fatal(err)
 		}
-		ackChatID, ackText = req.FormValue("chat_id"), req.FormValue("text")
+		ackChatID = req.FormValue("chat_id")
+		var richMessage models.InputRichMessage
+		if err := json.Unmarshal([]byte(req.FormValue("rich_message")), &richMessage); err != nil {
+			t.Fatal(err)
+		}
+		ackMarkdown = richMessage.Markdown
 		return apiResponse(req, http.StatusOK, `{"ok":true,"result":{"message_id":88,"date":1700000004,"chat":{"id":7,"type":"private"}}}`), nil
 	})
 	client, err := newClient(baseConfig(), st, func(sub domain.Submission) (domain.Submission, error) { return sub, nil }, zap.NewNop(), customReplyTemplate{}, "https://telegram.test", transport)
@@ -205,8 +210,8 @@ func TestAcceptUpdateUsesInjectedReplyAndDeduplicatesAck(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if sends != 1 || ackChatID != "7" || ackText != "Custom receipt for task #1" {
-		t.Fatalf("ack sends=%d chat=%q text=%q; want one injected ack to chat 7 for task 1", sends, ackChatID, ackText)
+	if sends != 1 || ackChatID != "7" || ackMarkdown != "Custom receipt for task #1" {
+		t.Fatalf("ack sends=%d chat=%q markdown=%q; want one injected ack to chat 7 for task 1", sends, ackChatID, ackMarkdown)
 	}
 	job, err := st.Job(context.Background(), 1)
 	if err != nil || job == nil || job.ID != 1 || len(job.Targets) != 1 || job.Targets[0].Address != "900" {
@@ -392,6 +397,46 @@ func TestSendClassifiesFailuresWithoutLeakingDetails(t *testing.T) {
 				t.Fatalf("Send() made %d API attempts; want one", sends)
 			}
 		})
+	}
+}
+
+func TestSendUsesRichMessageMarkdown(t *testing.T) {
+	markdown := "## 标题😀\n\n**bold** [link](https://example.org) `code`\n" + strings.Repeat("正文😀", 1300)
+	if got := len([]rune(markdown)); got < 3900 || got > 4100 {
+		t.Fatalf("fixture has %d Unicode characters, want about 4000", got)
+	}
+	sends := 0
+	client := testClient(t, testStore(t), baseConfig(), func(sub domain.Submission) (domain.Submission, error) { return sub, nil }, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		sends++
+		if !strings.HasSuffix(req.URL.Path, "/sendRichMessage") {
+			t.Fatalf("unexpected Telegram method: %s", req.URL.Path)
+		}
+		if err := req.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		if req.FormValue("chat_id") != "-100123" {
+			t.Fatalf("wrong chat_id: %v", req.Form)
+		}
+		for _, field := range []string{"text", "parse_mode", "entities"} {
+			if _, ok := req.Form[field]; ok {
+				t.Fatalf("legacy field %q sent: %v", field, req.Form)
+			}
+		}
+		var richMessage models.InputRichMessage
+		if err := json.Unmarshal([]byte(req.FormValue("rich_message")), &richMessage); err != nil {
+			t.Fatal(err)
+		}
+		if richMessage.Markdown != markdown || richMessage.HTML != "" || len(richMessage.Blocks) != 0 || len(richMessage.Media) != 0 {
+			t.Fatalf("rich Markdown changed: %+v", richMessage)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(req.FormValue("rich_message")), &fields); err != nil || len(fields) != 1 || fields["markdown"] == nil {
+			t.Fatalf("unexpected rich_message fields: %v, %v", fields, err)
+		}
+		return apiResponse(req, http.StatusOK, `{"ok":true,"result":{"message_id":88,"date":1700000004,"chat":{"id":-100123,"type":"channel"}}}`), nil
+	}))
+	if id, err := client.Send(context.Background(), -100123, markdown); err != nil || id != 88 || sends != 1 {
+		t.Fatalf("Send() = %d, %v; sends=%d", id, err, sends)
 	}
 }
 
