@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -61,7 +60,6 @@ func New(ctx context.Context, cfg config.Config, read func(context.Context, stri
 		BaseURL: cfg.Model.BaseURL, APIKey: cfg.Model.APIKey, Model: cfg.Model.Name,
 		Timeout: &cfg.Model.Timeout, MaxTokens: &cfg.Model.MaxOutputTokens, MaxRetries: &zero,
 		Store: &no, ParallelToolCalls: &no,
-		HTTPClient: &http.Client{Transport: responsesTransport{}},
 	})
 	if err != nil {
 		return nil, err
@@ -70,7 +68,7 @@ func New(ctx context.Context, cfg config.Config, read func(context.Context, stri
 	if persona != nil {
 		personaText = persona.Prompt()
 	}
-	return &Engine{Model: m, Config: cfg, Profile: string(profile), Read: read, CachedSource: cache, personaPrompt: personaText}, nil
+	return &Engine{Model: &normalizedResponsesModel{ResponsesModel: m}, Config: cfg, Profile: string(profile), Read: read, CachedSource: cache, personaPrompt: personaText}, nil
 }
 
 // Prepare 在入队前统一 URL 并生成分析缓存键。收录时间不进入键：

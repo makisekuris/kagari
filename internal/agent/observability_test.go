@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 	"unicode/utf8"
 
 	"kagari/internal/config"
@@ -21,20 +20,11 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-func TestAgentMessagesAndLiveSSE(t *testing.T) {
+func TestAgentMessagesAndFinalLogs(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		t.Run(fmt.Sprintf("streaming=%t", streaming), func(t *testing.T) {
 			core, logs := observer.New(zapcore.InfoLevel)
-			firstLogged := make(chan struct{}, 1)
-			logger := zap.New(zapcore.RegisterHooks(core, func(entry zapcore.Entry) error {
-				if entry.Message == "agent sse output" {
-					select {
-					case firstLogged <- struct{}{}:
-					default:
-					}
-				}
-				return nil
-			}))
+			logger := zap.New(core)
 			var calls atomic.Int32
 			args := `{"url":"https://example.org/article"}`
 			raw := "## 答案\n原文支持这个结论。"
@@ -48,53 +38,49 @@ func TestAgentMessagesAndLiveSSE(t *testing.T) {
 					t.Errorf("request stream=%v, want %t", request["stream"], streaming)
 				}
 				call := calls.Add(1)
-				var item map[string]any
-				if call == 1 {
-					item = map[string]any{"type": "function_call", "id": "fc_1", "call_id": "read_1", "name": "read_url", "arguments": args, "status": "completed"}
-				} else {
+				if call > 1 {
 					input, _ := json.Marshal(request["input"])
 					if !strings.Contains(string(input), `"call_id":"read_1"`) || !strings.Contains(string(input), "function_call_output") {
 						t.Error("tool result lost call_id")
 					}
-					item = map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": raw, "annotations": []any{}}}}
 				}
-				response := map[string]any{"id": fmt.Sprintf("resp_%d", call), "object": "response", "status": "completed", "model": "fixture", "output": []any{item}, "usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18, "input_tokens_details": map[string]any{"cached_tokens": 3}, "output_tokens_details": map[string]any{"reasoning_tokens": 2}}}
-				if !streaming {
-					if call == 1 {
-						response["output"] = []any{map[string]any{"id": "reason_1", "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": "需要阅读原文"}}}, item}
-					}
-					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(response)
-					return
-				}
-				w.Header().Set("Content-Type", "text/event-stream")
-				send := func(kind string, fields map[string]any) {
-					fields["type"] = kind
-					data, _ := json.Marshal(fields)
-					_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", kind, data)
-					w.(http.Flusher).Flush()
+				response := map[string]any{
+					"id": fmt.Sprintf("resp_%d", call), "object": "response", "status": "completed", "model": "fixture",
+					"usage": map[string]any{
+						"input_tokens": 11, "output_tokens": 7, "total_tokens": 18,
+						"input_tokens_details":  map[string]any{"cached_tokens": 3},
+						"output_tokens_details": map[string]any{"reasoning_tokens": 2},
+					},
 				}
 				if call == 1 {
-					send("response.output_item.added", map[string]any{"output_index": 0, "item": map[string]any{"id": "reason_1", "type": "reasoning", "summary": []any{}}})
-					send("response.reasoning_summary_text.delta", map[string]any{"output_index": 0, "summary_index": 0, "item_id": "reason_1", "delta": "需要阅读原文"})
-					added := map[string]any{"type": "function_call", "id": "fc_1", "call_id": "read_1", "name": "read_url", "arguments": "", "status": "in_progress"}
-					send("response.output_item.added", map[string]any{"output_index": 1, "item": added})
-					send("response.function_call_arguments.delta", map[string]any{"output_index": 1, "item_id": "fc_1", "delta": args[:35]})
-					// 服务端等待第一段日志，再发送剩余内容；缓冲到结束才打日志会失败。
-					select {
-					case <-firstLogged:
-					case <-time.After(3 * time.Second):
-						t.Error("SSE was not logged before response completion")
+					item := map[string]any{"type": "function_call", "id": "fc_1", "call_id": "read_1", "name": "read_url", "arguments": args, "status": "completed"}
+					reason := map[string]any{"id": "reason_1", "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": "需要阅读原文"}}}
+					response["output"] = []any{reason, item}
+					if streaming {
+						writeSSEHeader(w)
+						sendSSE(t, w, "response.output_item.added", map[string]any{"output_index": 0, "item": map[string]any{"id": "reason_1", "type": "reasoning", "summary": []any{}}})
+						sendSSE(t, w, "response.reasoning_summary_text.delta", map[string]any{"output_index": 0, "summary_index": 0, "item_id": "reason_1", "delta": "需要阅读原文"})
+						sendSSE(t, w, "response.output_item.added", map[string]any{"output_index": 1, "item": functionItem("fc_1", "read_1", args, "in_progress")})
+						sendSSE(t, w, "response.function_call_arguments.delta", map[string]any{"output_index": 1, "item_id": "fc_1", "delta": args[:20]})
+						sendSSE(t, w, "response.function_call_arguments.delta", map[string]any{"output_index": 1, "item_id": "fc_1", "delta": args[20:]})
+						sendSSE(t, w, "response.output_item.done", map[string]any{"output_index": 1, "item": item})
+						sendSSE(t, w, "response.completed", map[string]any{"response": response})
+						return
 					}
-					send("response.function_call_arguments.delta", map[string]any{"output_index": 1, "item_id": "fc_1", "delta": args[35:]})
-					send("response.output_item.done", map[string]any{"output_index": 1, "item": item})
 				} else {
+					response["output"] = responseText(raw)
+				}
+				if streaming {
+					writeSSEHeader(w)
 					cut := strings.Index(raw, "原文")
 					for _, delta := range []string{raw[:cut], raw[cut:]} {
-						send("response.output_text.delta", map[string]any{"output_index": 0, "content_index": 0, "item_id": "msg_1", "delta": delta})
+						sendSSE(t, w, "response.output_text.delta", map[string]any{"output_index": 0, "content_index": 0, "item_id": "msg_1", "delta": delta})
 					}
+					sendSSE(t, w, "response.completed", map[string]any{"response": response})
+					return
 				}
-				send("response.completed", map[string]any{"response": response})
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(response)
 			}))
 			defer server.Close()
 			cfg, err := config.Load("")
@@ -118,10 +104,16 @@ func TestAgentMessagesAndLiveSSE(t *testing.T) {
 			if calls.Load() != 2 || len(result.Readings) != 1 || result.Usage.TotalTokens != 36 || result.Body != raw {
 				t.Fatalf("wrong tool round trip: %+v calls=%d", result, calls.Load())
 			}
-			for _, name := range []string{"agent reason", "agent toolcall", "agent toolcall result", "agent token usage", "agent analyze finished"} {
+			for _, name := range []string{"agent toolcall", "agent toolcall result", "agent token usage", "agent analyze finished"} {
 				if logs.FilterMessage(name).Len() == 0 {
 					t.Errorf("missing info log %s", name)
 				}
+			}
+			if logs.FilterMessage("agent sse output").Len() != 0 {
+				t.Error("per-chunk SSE logging is disabled")
+			}
+			if !streaming && logs.FilterMessage("agent reason").Len() == 0 {
+				t.Error("non-stream response omitted reasoning logs")
 			}
 			toolCall := logs.FilterMessage("agent toolcall").All()[0].ContextMap()
 			if toolCall["call_id"] != "read_1" || toolCall["name"] != "read_url" || toolCall["arguments"] != args {
@@ -136,21 +128,14 @@ func TestAgentMessagesAndLiveSSE(t *testing.T) {
 					t.Errorf("tool result lost ID: %v", entry.ContextMap())
 				}
 			}
-			if streaming {
-				var text strings.Builder
-				for _, entry := range logs.FilterMessage("agent sse output").All() {
-					if delta, ok := entry.ContextMap()["delta"].(string); ok {
-						text.WriteString(delta)
-					}
+			if !streaming && logs.FilterMessage("agent message").Len() == 0 {
+				t.Error("non-stream response omitted final message log")
+			}
+			for _, entry := range logs.FilterMessage("agent token usage").All() {
+				usage := entry.ContextMap()
+				if usage["input_tokens"] != int64(11) || usage["output_tokens"] != int64(7) || usage["total_tokens"] != int64(18) || usage["cached_input_tokens"] != int64(3) || usage["reasoning_tokens"] != int64(2) {
+					t.Errorf("token usage details were lost: %v", usage)
 				}
-				if text.String() != string(raw) {
-					t.Errorf("stream was not logged in chunks: %q", text.String())
-				}
-				if logs.FilterMessage("agent message").Len() != 0 {
-					t.Error("stream also logged buffered message")
-				}
-			} else if logs.FilterMessage("agent sse output").Len() != 0 {
-				t.Error("non-stream response labeled SSE")
 			}
 		})
 	}
@@ -192,14 +177,22 @@ func TestModelFailureDiagnosticsExcludeUpstreamBody(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		t.Run(fmt.Sprintf("streaming=%t", streaming), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if streaming {
-					w.Header().Set("Content-Type", "text/event-stream")
-					_, _ = fmt.Fprint(w, "event: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"fixture_secret_body\"}\n\n")
-				} else {
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusTooManyRequests)
-					_, _ = fmt.Fprint(w, `{"error":{"message":"fixture_secret_body","type":"insufficient_quota","code":"insufficient_quota"}}`)
+				var request map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					return
 				}
+				if (request["stream"] == true) != streaming {
+					t.Errorf("request stream=%v, want %t", request["stream"], streaming)
+				}
+				if streaming {
+					writeSSEHeader(w)
+					_, _ = fmt.Fprint(w, "event: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"fixture_secret_body\"}\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = fmt.Fprint(w, `{"error":{"message":"fixture_secret_body","type":"insufficient_quota","code":"insufficient_quota"}}`)
 			}))
 			defer server.Close()
 			cfg, _ := config.Load("")
