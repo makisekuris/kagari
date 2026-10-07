@@ -15,9 +15,14 @@ import (
 // consumeEvents is shared by single-shot digest generation and tool-using analysis.
 func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]], iterations int) (output string, usage domain.Usage, usageReported bool, err error) {
 	turn := 0
+	statusSeen := false
+	responseStatus := ""
 	for {
 		event, ok := it.Next()
 		if !ok {
+			if statusSeen && responseStatus != "completed" {
+				return output, usage, usageReported, errors.New("model response incomplete")
+			}
 			return output, usage, usageReported, nil
 		}
 		if event.Err != nil {
@@ -29,26 +34,15 @@ func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schem
 		variant := event.Output.MessageOutput
 		if variant.AgenticRole == schema.AgenticRoleTypeAssistant {
 			turn++
+			statusSeen, responseStatus = false, ""
 			if e.Log != nil {
 				e.Log.Info("agent model turn", zap.Int("turn", turn), zap.Int("iterations_limit", iterations), zap.Bool("streaming", variant.IsStreaming))
 			}
-		}
-		if variant.IsStreaming {
-			variant.MessageStream = schema.StreamReaderWithConvert(variant.MessageStream, func(part *schema.AgenticMessage) (*schema.AgenticMessage, error) {
-				// Too noise be silent in without debug
-				// e.logMessage(part, true, turn)
-				fmt.Printf("%s", part)
-				return part, nil
-			})
 		}
 		msg, msgErr := variant.GetMessage()
 		if msgErr != nil {
 			return output, usage, usageReported, fmt.Errorf("agent message: %w", msgErr)
 		}
-		if !variant.IsStreaming {
-			e.logMessage(msg, false, turn)
-		}
-
 		if msg == nil || msg.Role != schema.AgenticRoleTypeAssistant {
 			continue
 		}
@@ -61,12 +55,24 @@ func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schem
 			e.logUsage(u, turn)
 		}
 		if msg.ResponseMeta != nil && msg.ResponseMeta.OpenAIExtension != nil {
-			switch msg.ResponseMeta.OpenAIExtension.Status {
+			status := msg.ResponseMeta.OpenAIExtension.Status
+			if status != "" {
+				statusSeen, responseStatus = true, string(status)
+			}
+			switch status {
 			case "failed":
 				return output, usage, usageReported, errors.New("model response failed")
-			case "incomplete":
+			case "incomplete", "cancelled":
 				return output, usage, usageReported, errors.New("model response incomplete")
 			}
+		}
+		for _, block := range msg.ContentBlocks {
+			if block != nil && block.AssistantGenText != nil && block.AssistantGenText.OpenAIExtension != nil && block.AssistantGenText.OpenAIExtension.Refusal != nil {
+				return output, usage, usageReported, errModelResponseRefused
+			}
+		}
+		if !variant.IsStreaming {
+			e.logMessage(msg, false, turn)
 		}
 		var b strings.Builder
 		toolCall := false
@@ -84,7 +90,7 @@ func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schem
 				b.WriteString(block.AssistantGenText.Text)
 			}
 		}
-		if !toolCall && b.Len() > 0 {
+		if !toolCall {
 			output = b.String()
 		}
 	}

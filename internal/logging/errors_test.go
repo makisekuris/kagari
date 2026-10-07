@@ -45,6 +45,8 @@ func TestErrorFieldsAreUsefulAndDoNotExposeRawErrors(t *testing.T) {
 		{"unexpected_eof", fmt.Errorf("wrapped: %w", io.ErrUnexpectedEOF), "model stream ended unexpectedly"},
 		{"network_unexpected_eof", &net.OpError{Op: "read", Net: "tcp", Err: io.ErrUnexpectedEOF}, "model stream ended unexpectedly"},
 		{"response_failed", errors.New("model response failed"), "model response failed"},
+		{"response_refused", fmt.Errorf("wrapped: %w", errors.New("model response refused")), "model response refused"},
+		{"invalid_analysis", fmt.Errorf("wrapped: %w", errors.New("invalid analysis output")), "invalid analysis output"},
 		{"sse", fmt.Errorf("wrapped: %w", errors.New("received error event: code=fixture_secret_body message=secret")), "model stream reported an error"},
 		{"digest_limit", errors.New("digest input exceeds weekly.max_input_chars (120000)"), "digest input exceeds weekly.max_input_chars"},
 	} {

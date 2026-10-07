@@ -34,7 +34,7 @@ agent:
   max_sources: 6
   max_iterations: 10
   timeout: 3m
-  streaming: false # true sends stream=true and logs SSE chunks immediately at info level.
+  streaming: false # Enables Responses SSE for analysis and weekly digests; per-chunk SSE logs are disabled.
 
 weekly:
   enabled: false # Enable after choosing your delivery target and time.

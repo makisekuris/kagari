@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -43,12 +45,55 @@ func responseText(text string) []any {
 	return []any{map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text}}}}
 }
 
+func responseAnalysis(kind domain.ResultKind, body string) []any {
+	encoded, _ := json.Marshal(struct {
+		Kind domain.ResultKind `json:"kind"`
+		Body string            `json:"body"`
+	}{Kind: kind, Body: body})
+	return responseText(string(encoded))
+}
+
+func requireAnalysisSchema(t *testing.T, request map[string]any) {
+	t.Helper()
+	textConfig, _ := request["text"].(map[string]any)
+	format, _ := textConfig["format"].(map[string]any)
+	schema, _ := format["schema"].(map[string]any)
+	properties, _ := schema["properties"].(map[string]any)
+	kind, _ := properties["kind"].(map[string]any)
+	if format["type"] != "json_schema" || format["name"] != "analysis_output" || format["strict"] != true ||
+		schema["type"] != "object" || schema["additionalProperties"] != false ||
+		!reflect.DeepEqual(schema["required"], []any{"kind", "body"}) ||
+		!reflect.DeepEqual(kind["enum"], []any{"analysis", "chat"}) {
+		t.Errorf("analysis request omitted the strict output schema: %v", request["text"])
+	}
+}
+
 func writeResponse(w http.ResponseWriter, call int, output []any) {
+	writeResponseWithStatus(w, "completed", output)
+}
+
+func writeResponseWithStatus(w http.ResponseWriter, status string, output []any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id": "resp", "object": "response", "status": "completed", "model": "fixture", "output": output,
+		"id": "resp", "object": "response", "status": status, "model": "fixture", "output": output,
 		"usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
 	})
+}
+
+func sendResponseEvent(w http.ResponseWriter, event string, fields map[string]any) {
+	fields["type"] = event
+	data, _ := json.Marshal(fields)
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+	w.(http.Flusher).Flush()
+}
+
+func streamTextResponse(w http.ResponseWriter, response map[string]any, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	middle := len(text) / 2
+	for _, delta := range []string{text[:middle], text[middle:]} {
+		sendResponseEvent(w, "response.output_text.delta", map[string]any{"output_index": 0, "content_index": 0, "item_id": "msg_1", "delta": delta})
+	}
+	sendResponseEvent(w, "response.completed", map[string]any{"response": response})
 }
 
 func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T) {
@@ -65,9 +110,7 @@ func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T
 		}
 		serialized, _ := json.Marshal(body)
 		requests = append(requests, string(serialized))
-		if body["text"] != nil {
-			t.Errorf("final JSON format unexpectedly constrained: %v", body["text"])
-		}
+		requireAnalysisSchema(t, body)
 		call := int(calls.Add(1))
 		if call > 1 {
 			input, _ := json.Marshal(body["input"])
@@ -91,10 +134,10 @@ func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T
 			}
 			writeResponse(w, call, responseTool("read_url", cURL, "read-c"))
 		case 4:
-			writeResponse(w, call, responseText("## Answer\nB and C confirm the result."))
+			writeResponse(w, call, responseAnalysis(domain.ResultKindAnalysis, "## Answer\nB and C confirm the result."))
 		default:
 			t.Errorf("unexpected model call %d", call)
-			writeResponse(w, call, responseText("unexpected"))
+			writeResponse(w, call, responseAnalysis(domain.ResultKindAnalysis, "unexpected"))
 		}
 	}))
 	defer server.Close()
@@ -133,8 +176,8 @@ func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T
 	if calls.Load() != 4 || readCalls != 3 {
 		t.Fatalf("calls=%d reads=%d", calls.Load(), readCalls)
 	}
-	if result.Body != "## Answer\nB and C confirm the result." {
-		t.Fatalf("body=%q", result.Body)
+	if result.Kind != domain.ResultKindAnalysis || result.Body != "## Answer\nB and C confirm the result." {
+		t.Fatalf("kind=%q body=%q", result.Kind, result.Body)
 	}
 	if !result.UsageReported || result.Usage.TotalTokens != 72 || result.AnalysisVersion != AnalysisVersion {
 		t.Fatalf("metadata=%+v", result)
@@ -156,6 +199,188 @@ func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T
 	}
 }
 
+func TestAnalyzeStructuredOutputStreamingAndNonStreaming(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		for _, kind := range []domain.ResultKind{domain.ResultKindAnalysis, domain.ResultKindChat} {
+			t.Run(fmt.Sprintf("streaming=%t/%s", streaming, kind), func(t *testing.T) {
+				const bodyText = "  exact body\n"
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var request map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Error(err)
+						return
+					}
+					if (request["stream"] == true) != streaming {
+						t.Errorf("stream=%v, want %t", request["stream"], streaming)
+					}
+					requireAnalysisSchema(t, request)
+					output := responseAnalysis(kind, bodyText)
+					response := map[string]any{"id": "resp", "object": "response", "status": "completed", "model": "fixture", "output": output, "usage": map[string]any{"input_tokens": 4, "output_tokens": 3, "total_tokens": 7}}
+					if !streaming {
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(response)
+						return
+					}
+					text := output[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+					streamTextResponse(w, response, text)
+				}))
+				defer server.Close()
+
+				cfg := engineConfig(t, server.URL)
+				cfg.Agent.Streaming = streaming
+				engine, err := New(context.Background(), cfg, nil, nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				submission, err := engine.Prepare(domain.Submission{Text: "Question"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := engine.Analyze(context.Background(), submission)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.Kind != kind || result.Body != bodyText || result.Usage.TotalTokens != 7 {
+					t.Fatalf("kind=%q body=%q usage=%+v", result.Kind, result.Body, result.Usage)
+				}
+			})
+		}
+	}
+}
+
+func TestAnalyzeStreamingToolRoundTripUsesStructuredOutput(t *testing.T) {
+	const target = "https://example.org/source"
+	const bodyText = "## Evidence\nThe source supports the claim."
+	args, _ := json.Marshal(readRequest{URL: target})
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		requireAnalysisSchema(t, request)
+		if request["stream"] != true {
+			t.Errorf("stream=%v, want true", request["stream"])
+		}
+		call := calls.Add(1)
+		if call == 1 {
+			argsText := string(args)
+			item := map[string]any{"type": "function_call", "id": "fc_read", "call_id": "read_1", "name": "read_url", "arguments": argsText, "status": "completed"}
+			response := map[string]any{"id": "resp_1", "object": "response", "status": "completed", "model": "fixture", "output": []any{item}, "usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}}
+			w.Header().Set("Content-Type", "text/event-stream")
+			sendResponseEvent(w, "response.output_item.added", map[string]any{"output_index": 0, "item": map[string]any{"type": "function_call", "id": "fc_read", "call_id": "read_1", "name": "read_url", "arguments": "", "status": "in_progress"}})
+			sendResponseEvent(w, "response.function_call_arguments.delta", map[string]any{"output_index": 0, "item_id": "fc_read", "delta": argsText})
+			sendResponseEvent(w, "response.output_item.done", map[string]any{"output_index": 0, "item": item})
+			sendResponseEvent(w, "response.completed", map[string]any{"response": response})
+			return
+		}
+		input, _ := json.Marshal(request["input"])
+		if !strings.Contains(string(input), `"call_id":"read_1"`) || !strings.Contains(string(input), "function_call_output") {
+			t.Errorf("tool result lost call ID or output: %s", input)
+		}
+		output := responseAnalysis(domain.ResultKindAnalysis, bodyText)
+		text := output[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+		response := map[string]any{"id": "resp_2", "object": "response", "status": "completed", "model": "fixture", "output": output, "usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}}
+		streamTextResponse(w, response, text)
+	}))
+	defer server.Close()
+	cfg := engineConfig(t, server.URL)
+	cfg.Agent.Streaming = true
+	engine, err := New(context.Background(), cfg, func(_ context.Context, url string) (domain.Source, error) {
+		return domain.Source{ID: "source", URL: url, RequestedURL: url, Status: "ok", Content: "source content"}, nil
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submission, err := engine.Prepare(domain.Submission{Text: "Summarize this source", URLs: []string{target}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Analyze(context.Background(), submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 || result.Kind != domain.ResultKindAnalysis || result.Body != bodyText || len(result.Readings) != 1 || result.Usage.TotalTokens != 36 {
+		t.Fatalf("calls=%d result=%+v", calls.Load(), result)
+	}
+}
+
+func TestAnalyzeRefusalKeepsReadingsAndUsageWithoutPublishingRawOutput(t *testing.T) {
+	const target = "https://example.org/source"
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		requireAnalysisSchema(t, request)
+		if calls.Add(1) == 1 {
+			writeResponse(w, 1, responseTool("read_url", target, "read-source"))
+			return
+		}
+		writeResponse(w, 2, []any{map[string]any{"type": "message", "id": "msg_refusal", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "refusal", "refusal": "upstream private refusal reason"}}}})
+	}))
+	defer server.Close()
+	engine, err := New(context.Background(), engineConfig(t, server.URL), func(_ context.Context, url string) (domain.Source, error) {
+		return domain.Source{ID: "source", URL: url, RequestedURL: url, Status: "ok", Content: "source content"}, nil
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submission, err := engine.Prepare(domain.Submission{Text: "Read and summarize", URLs: []string{target}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Analyze(context.Background(), submission)
+	if err != errModelResponseRefused {
+		t.Fatalf("error=%v", err)
+	}
+	if result.Kind != "" || result.Body != "" || len(result.Readings) != 1 || result.Usage.TotalTokens != 36 || !result.UsageReported {
+		t.Fatalf("refusal result lost metadata or exposed output: %+v", result)
+	}
+	if strings.Contains(err.Error(), "upstream private refusal reason") {
+		t.Fatal("upstream refusal reason leaked in error")
+	}
+}
+
+func TestAnalyzeRejectsIncompleteResponseWithParseableJSON(t *testing.T) {
+	for _, tc := range []struct{ status, wantError string }{
+		{status: "failed", wantError: "model response failed"},
+		{status: "incomplete", wantError: "model response incomplete"},
+		{status: "cancelled", wantError: "model response incomplete"},
+		{status: "in_progress", wantError: "model response incomplete"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					return
+				}
+				requireAnalysisSchema(t, request)
+				writeResponseWithStatus(w, tc.status, responseAnalysis(domain.ResultKindAnalysis, "parseable final JSON"))
+			}))
+			defer server.Close()
+			engine, err := New(context.Background(), engineConfig(t, server.URL), nil, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			submission, err := engine.Prepare(domain.Submission{Text: "Question"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := engine.Analyze(context.Background(), submission)
+			if err == nil || err.Error() != tc.wantError {
+				t.Fatalf("error=%v", err)
+			}
+			if result.Kind != "" || result.Body != "" || result.Usage.TotalTokens != 18 || !result.UsageReported {
+				t.Fatalf("incomplete result lost metadata or exposed output: %+v", result)
+			}
+		})
+	}
+}
 func TestBrowserIsOpenedLazilyAndCanRetrySameURLWithHTTP(t *testing.T) {
 	const target = "https://example.org/page"
 	var calls atomic.Int32
@@ -181,10 +406,10 @@ func TestBrowserIsOpenedLazilyAndCanRetrySameURLWithHTTP(t *testing.T) {
 		case 2:
 			writeResponse(w, 2, responseTool("read_url", target, "http"))
 		case 3:
-			writeResponse(w, 3, responseText("The browser was unavailable; HTTP supplied the page."))
+			writeResponse(w, 3, responseAnalysis(domain.ResultKindChat, "The browser was unavailable; HTTP supplied the page."))
 		default:
 			t.Errorf("unexpected request")
-			writeResponse(w, 4, responseText("unexpected"))
+			writeResponse(w, 4, responseAnalysis(domain.ResultKindAnalysis, "unexpected"))
 		}
 	}))
 	defer server.Close()
@@ -212,7 +437,7 @@ func TestBrowserIsOpenedLazilyAndCanRetrySameURLWithHTTP(t *testing.T) {
 	if opened != 1 || calls.Load() != 3 {
 		t.Fatalf("browser opens=%d model calls=%d", opened, calls.Load())
 	}
-	if result.Body == "" || len(result.Readings) != 2 || result.Readings[0].Backend != browserBackend || result.Readings[1].Backend != httpBackend {
+	if result.Kind != domain.ResultKindChat || result.Body == "" || len(result.Readings) != 2 || result.Readings[0].Backend != browserBackend || result.Readings[1].Backend != httpBackend {
 		t.Fatalf("same-URL retry was not recorded: %+v", result)
 	}
 	if len(result.Sources) != 2 || result.Sources[0].Status != "failed" || !result.Sources[1].Usable() {
@@ -296,9 +521,9 @@ func TestPersonaIsFrozenAndChangesCacheIdentity(t *testing.T) {
 	}
 }
 
-func TestEmptyModelAnswerFailsSafely(t *testing.T) {
+func TestBlankStructuredBodyFailsSafely(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeResponse(w, 1, responseText("  \n "))
+		writeResponse(w, 1, responseAnalysis(domain.ResultKindAnalysis, "  \n "))
 	}))
 	defer server.Close()
 	engine, err := New(context.Background(), engineConfig(t, server.URL), nil, nil, nil)
@@ -309,8 +534,11 @@ func TestEmptyModelAnswerFailsSafely(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = engine.Analyze(context.Background(), submission)
-	if err == nil || err.Error() != "empty analysis output" {
+	result, err := engine.Analyze(context.Background(), submission)
+	if err == nil || err != errInvalidAnalysisOutput {
 		t.Fatalf("empty answer error=%v", err)
+	}
+	if result.Kind != "" || result.Body != "" || result.Usage.TotalTokens != 18 || !result.UsageReported {
+		t.Fatalf("invalid output lost usage or exposed raw JSON: %+v", result)
 	}
 }

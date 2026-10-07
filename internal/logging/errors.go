@@ -108,6 +108,10 @@ func describeError(err error) errorInfo {
 			return errorInfo{reason: message, kind: "model_response_error"}
 		case "model response incomplete":
 			return errorInfo{reason: message, kind: "model_response_incomplete"}
+		case "model response refused":
+			return errorInfo{reason: message, kind: "model_response_refused"}
+		case "invalid analysis output":
+			return errorInfo{reason: message, kind: "analysis_output_error"}
 		case "model.base_url, model.name and model.api_key are required":
 			return errorInfo{reason: "model configuration incomplete", kind: "configuration_error"}
 		case "unsupported digest version", "digest snapshot does not match request":

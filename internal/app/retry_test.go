@@ -31,6 +31,8 @@ func TestProcessJobRetriesModelAndNotifiesOnlyExhaustion(t *testing.T) {
 		{"http_exhausts", "http", 6, true},
 		{"empty_output_recovers", "empty", 1, false},
 		{"empty_output_exhausts", "empty", 6, true},
+		{"invalid_output_recovers", "invalid", 1, false},
+		{"invalid_output_exhausts", "invalid", 6, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -43,9 +45,12 @@ func TestProcessJobRetriesModelAndNotifiesOnlyExhaustion(t *testing.T) {
 					_, _ = w.Write([]byte(`{"error":{"message":"fixture_secret_body","type":"forbidden"}}`))
 					return
 				}
-				raw := []byte("## 文章\n事实")
+				raw, _ := json.Marshal(map[string]string{"kind": "analysis", "body": "## 文章\n事实"})
 				if failed && tc.failure == "empty" {
 					raw = nil
+				}
+				if failed && tc.failure == "invalid" {
+					raw = []byte(`{"kind":"fixture_secret_body","body":"事实"}`)
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_retry", "object": "response", "status": "completed", "model": "test", "output": []any{map[string]any{"type": "message", "id": "msg_retry", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": string(raw), "annotations": []any{}}}}}})
 			}))
@@ -140,6 +145,16 @@ func TestProcessJobRetriesModelAndNotifiesOnlyExhaustion(t *testing.T) {
 			}
 			if tc.terminal && (job.LastError == "" || strings.Contains(job.LastError, "fixture_secret_body")) {
 				t.Fatalf("last_error is empty or exposed upstream response: %q", job.LastError)
+			}
+			if tc.terminal && tc.failure == "invalid" {
+				var result domain.Result
+				if err := json.Unmarshal(job.Result, &result); err != nil || result.Kind != "" || result.Body != "" {
+					t.Fatalf("invalid structured output was retained as publishable content: %+v, %v", result, err)
+				}
+				counts, err := s.DeliveryCounts(ctx, id)
+				if err != nil || len(counts) != 0 {
+					t.Fatalf("invalid structured output reached the outbox: %v, %v", counts, err)
+				}
 			}
 			unrelated, err := s.Job(ctx, unrelatedID)
 			if err != nil || unrelated.Status != "pending" || unrelated.Attempts != 0 {

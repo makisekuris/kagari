@@ -35,6 +35,8 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 	var sources []domain.Source
 	var text string
 	var workErr error
+	var chatResult bool
+	jobTargets := job.Targets
 	switch job.Kind {
 	case "analyze":
 		var s domain.Submission
@@ -53,9 +55,21 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 				r, workErr = engine.Analyze(ctx, s)
 			}
 		}
+		if workErr == nil && r.Kind != "" && r.Kind != domain.ResultKindAnalysis && r.Kind != domain.ResultKindChat {
+			workErr = errors.New("unknown result kind")
+		}
 		result = r
 		sources = r.Sources
-		text = render.Analysis(r)
+		if r.Kind == domain.ResultKindChat {
+			chatResult = true
+			text = r.Body
+			jobTargets = nil
+			if s.ChatID != 0 {
+				jobTargets = telegram.Targets([]int64{s.ChatID})
+			}
+		} else {
+			text = render.Analysis(r)
+		}
 	case "digest":
 		result, text, workErr = w.processDigest(ctx, job)
 	case "command":
@@ -80,10 +94,10 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 			dispatcher = distribution.Dispatcher{"telegram": telegram.Adapter(nil)}
 		}
 		publishText := text
-		if len(job.Targets) > 0 && job.Kind != "digest" {
+		if len(job.Targets) > 0 && job.Kind != "digest" && !chatResult {
 			publishText = fmt.Sprintf("任务 #%d\n%s", job.ID, text)
 		}
-		messages, workErr = dispatcher.Plan(job.Targets, publishText)
+		messages, workErr = dispatcher.Plan(jobTargets, publishText)
 	}
 	if result == nil {
 		result = map[string]string{"status": "failed"}

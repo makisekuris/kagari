@@ -1,8 +1,8 @@
 # Kagari
 
-Kagari 是一个 Go 个人阅读助手。它从 CLI 或 Telegram 接收问题、转发文本和链接，由 Agent 自主读取页面、追读相关链接并生成 Markdown，来源和读取记录保存到 SQLite。周报基于归档正文回顾。
+Kagari 是一个 Go 个人阅读助手。它从 CLI 或 Telegram 接收问题、转发文本和链接，由 Agent 自主读取页面、追读相关链接，并选择生成 Markdown 分析或普通对话回复。来源和读取记录保存到 SQLite。周报基于归档分析正文回顾。
 
-Kagari is a personal reading assistant written in Go. It accepts questions, forwarded text and links from the CLI or Telegram. An agent reads relevant pages and follows links, producing Markdown with archived sources and read records. Digests review saved prose.
+Kagari is a personal reading assistant written in Go. It accepts questions, forwarded text and links from the CLI or Telegram. An agent reads relevant pages and follows links, choosing between a Markdown analysis and a conversational reply. Sources and read records are saved to SQLite. Digests review archived analyses.
 
 运行需要 Go 1.27；进程锁使用 `flock`，支持 macOS 和 Linux。模型 endpoint、Telegram bot 和频道权限由部署者配置。
 
@@ -121,6 +121,16 @@ Callers obtain the `persona.PersonaRole` interface through `persona.Default()` a
 Engine 构造时读取 `profile.md` 并冻结人格提示词；分析缓存键包含完整分析提示词，周报重试使用任务保存的提示词快照。修改 `profile.md` 后，长期运行的 `run` 服务需重启；单次 `analyze` 和 `digest` 命令会在执行时读取当前文件。修改人格实现后需重新构建程序；运行中的服务还需重启。暂不支持运行时切换角色。
 
 The Engine reads `profile.md` and freezes persona text when constructed. Analysis cache keys include the complete analysis prompt, and digest retries reuse the saved instruction snapshot. Restart a long-running `run` service after changing `profile.md`; one-shot `analyze` and `digest` commands read the current file when executed. Rebuild after changing persona code, then restart a running service to use the new binary. Runtime persona switching is not supported.
+
+### 最终输出 / Final output
+
+分析调用要求模型服务支持 Responses API 的严格 JSON Schema 输出。最终结果只包含 `kind` 和 `body`：`analysis` 的正文是 Markdown 分析，`chat` 的正文是普通对话或澄清问题。程序校验字段、类型和非空正文；无效结果进入任务重试，不发布。正文以外的来源、读取记录和用量由程序保存，周报生成继续直接返回成稿。
+
+Analysis calls require a model endpoint that supports strict JSON Schema output in the Responses API. The final output contains only `kind` and `body`: `analysis` contains a Markdown analysis, while `chat` contains a conversational reply or clarification. The application validates the fields, types, and nonempty body; invalid results enter task retry without publication. Sources, read records, and usage are saved by the application. Digest generation continues to return prose directly.
+
+`analysis` 使用任务入队时保存的分析投递目标；`chat` 只回复提交者私聊，不进入阅读归档或新生成的周报。CLI 没有私聊目标时只展示正文。Telegram 消息格式由渠道适配器负责；当前发送仍为普通文本。
+
+An `analysis` uses the delivery targets saved when the task was queued. A `chat` reply goes only to the submitting private chat and is excluded from the reading archive and newly generated digests. CLI submissions without a private chat target only display the body. The Telegram adapter owns message formatting; delivery currently uses plain text.
 
 ## CLI 命令 / CLI commands
 

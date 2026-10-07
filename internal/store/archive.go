@@ -14,7 +14,9 @@ import (
 func (s *Store) FindResult(ctx context.Context, cacheKey string) (*domain.Result, error) {
 	var raw []byte
 	// 分析缓存按内容 cache_key 跨任务复用；部分尝试不是可复用结果。
-	err := s.db.QueryRowContext(ctx, `SELECT result FROM jobs WHERE kind='analyze' AND status='completed' AND json_extract(payload,'$.cache_key')=? ORDER BY id DESC LIMIT 1`, cacheKey).Scan(&raw)
+	err := s.db.QueryRowContext(ctx, `SELECT result FROM jobs WHERE kind='analyze' AND status='completed'
+		AND (json_type(result,'$.kind') IS NULL OR json_extract(result,'$.kind')='analysis')
+		AND json_extract(payload,'$.cache_key')=? ORDER BY id DESC LIMIT 1`, cacheKey).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -48,7 +50,9 @@ func (s *Store) Entries(ctx context.Context, userID int64, start, end time.Time)
 	if !start.Before(end) {
 		return []domain.ArchiveEntry{}, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,payload,result FROM jobs WHERE kind='analyze' AND status='completed' AND json_extract(payload,'$.user_id')=? ORDER BY id`, userID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,payload,result FROM jobs WHERE kind='analyze' AND status='completed'
+		AND (json_type(result,'$.kind') IS NULL OR json_extract(result,'$.kind')='analysis')
+		AND json_extract(payload,'$.user_id')=? ORDER BY id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +108,8 @@ func (s *Store) Stats(ctx context.Context, userID int64, start, end time.Time) (
 	if !start.Before(end) {
 		return 0, 0, 0, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT status,payload FROM jobs WHERE kind='analyze' AND json_extract(payload,'$.user_id')=?`, userID)
+	rows, err := s.db.QueryContext(ctx, `SELECT status,payload FROM jobs WHERE kind='analyze' AND json_extract(payload,'$.user_id')=?
+		AND (status<>'completed' OR json_type(result,'$.kind') IS NULL OR json_extract(result,'$.kind')='analysis')`, userID)
 	if err != nil {
 		return 0, 0, 0, err
 	}

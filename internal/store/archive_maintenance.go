@@ -20,7 +20,9 @@ func (s *Store) ListArchive(ctx context.Context, userID int64, limit, offset int
 		return nil, errors.New("store: archive limit must be 1..100 and offset non-negative")
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id,payload,result FROM jobs
-		WHERE kind='analyze' AND status='completed' AND json_extract(payload,'$.user_id')=?
+		WHERE kind='analyze' AND status='completed'
+		AND (json_type(result,'$.kind') IS NULL OR json_extract(result,'$.kind')='analysis')
+		AND json_extract(payload,'$.user_id')=?
 		ORDER BY id DESC LIMIT ? OFFSET ?`, userID, limit, offset)
 	if err != nil {
 		return nil, err
@@ -55,7 +57,9 @@ func (s *Store) ArchiveEntry(ctx context.Context, userID, id int64) (*domain.Arc
 	}
 	var payload, result []byte
 	err := s.db.QueryRowContext(ctx, `SELECT payload,result FROM jobs
-		WHERE id=? AND kind='analyze' AND status='completed' AND json_extract(payload,'$.user_id')=?`, id, userID).Scan(&payload, &result)
+		WHERE id=? AND kind='analyze' AND status='completed'
+		AND (json_type(result,'$.kind') IS NULL OR json_extract(result,'$.kind')='analysis')
+		AND json_extract(payload,'$.user_id')=?`, id, userID).Scan(&payload, &result)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -82,7 +86,9 @@ func (s *Store) DeleteArchiveEntry(ctx context.Context, userID, id int64) (map[s
 
 	var exists int
 	err = tx.QueryRowContext(ctx, `SELECT 1 FROM jobs
-		WHERE id=? AND kind='analyze' AND status='completed' AND json_extract(payload,'$.user_id')=?`, id, userID).Scan(&exists)
+		WHERE id=? AND kind='analyze' AND status='completed'
+		AND (json_type(result,'$.kind') IS NULL OR json_extract(result,'$.kind')='analysis')
+		AND json_extract(payload,'$.user_id')=?`, id, userID).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("store: archive entry %d is missing or unavailable", id)
 	}
@@ -105,7 +111,9 @@ func (s *Store) DeleteArchiveEntry(ctx context.Context, userID, id int64) (map[s
 		return nil, err
 	}
 	jobResult, err := tx.ExecContext(ctx, `DELETE FROM jobs
-		WHERE id=? AND kind='analyze' AND status='completed' AND json_extract(payload,'$.user_id')=?`, id, userID)
+		WHERE id=? AND kind='analyze' AND status='completed'
+		AND (json_type(result,'$.kind') IS NULL OR json_extract(result,'$.kind')='analysis')
+		AND json_extract(payload,'$.user_id')=?`, id, userID)
 	if err != nil {
 		return nil, err
 	}

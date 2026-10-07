@@ -58,16 +58,24 @@ type Usage struct {
 	TotalTokens  int `json:"total_tokens"`
 }
 
-// Result 保存 Markdown 回复及其阅读记录。失败任务也可能包含部分结果，
+type ResultKind string
+
+const (
+	ResultKindAnalysis ResultKind = "analysis"
+	ResultKindChat     ResultKind = "chat"
+)
+
+// Result 保存回复类型、正文及阅读记录。失败任务也可能包含部分结果，
 // 由任务状态决定 Body 是否可发布。
 type Result struct {
-	Body            string    `json:"body,omitempty"`
-	AnalysisVersion string    `json:"analysis_version,omitempty"`
-	Sources         []Source  `json:"sources"`
-	Readings        []Reading `json:"readings"`
-	Usage           Usage     `json:"usage"`
-	UsageReported   bool      `json:"usage_reported"`
-	CreatedAt       time.Time `json:"created_at"`
+	Kind            ResultKind `json:"kind,omitempty"`
+	Body            string     `json:"body,omitempty"`
+	AnalysisVersion string     `json:"analysis_version,omitempty"`
+	Sources         []Source   `json:"sources"`
+	Readings        []Reading  `json:"readings"`
+	Usage           Usage      `json:"usage"`
+	UsageReported   bool       `json:"usage_reported"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 // Job 的处理状态与消息投递状态独立：completed 只表示产物和 outbox 已落库。

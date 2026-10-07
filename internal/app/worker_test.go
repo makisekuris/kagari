@@ -45,10 +45,16 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 			if !strings.Contains(string(input), "function_call_output") || !strings.Contains(string(input), "正文应被保存到本地") {
 				t.Errorf("analysis final turn lacks the read result: %s", input)
 			}
-			output = []any{map[string]any{"type": "message", "id": "msg_analysis", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": finalAnalysis, "annotations": []any{}}}}}
+			encoded, _ := json.Marshal(map[string]string{"kind": "analysis", "body": finalAnalysis})
+			output = []any{map[string]any{"type": "message", "id": "msg_analysis", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": string(encoded), "annotations": []any{}}}}}
 		case 3:
 			if tools, ok := body["tools"].([]any); ok && len(tools) != 0 {
 				t.Errorf("weekly digest exposed tools: %v", tools)
+			}
+			if text, ok := body["text"].(map[string]any); ok {
+				if format, ok := text["format"].(map[string]any); ok && format["type"] == "json_schema" {
+					t.Error("analysis output schema leaked into the shared model's digest call")
+				}
 			}
 			input := digestModelInput(t, body)
 			if len(input.Entries) != 1 || input.Entries[0].Body != finalAnalysis || len(input.Entries[0].Sources) != 1 || !input.Entries[0].Sources[0].Usable {
@@ -115,7 +121,7 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Result.Body != finalAnalysis || len(entries[0].Result.Sources) != 1 || entries[0].Result.Sources[0].Content != "正文应被保存到本地" {
+	if len(entries) != 1 || entries[0].Result.Kind != domain.ResultKindAnalysis || entries[0].Result.Body != finalAnalysis || len(entries[0].Result.Sources) != 1 || entries[0].Result.Sources[0].Content != "正文应被保存到本地" {
 		t.Fatal("archive dedup/evidence missing")
 	}
 	request := domain.DigestRequest{Version: domain.DigestVersion, UserID: 7, Start: now.Add(-time.Hour), End: now.Add(time.Hour)}

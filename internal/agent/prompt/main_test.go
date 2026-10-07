@@ -36,12 +36,20 @@ func TestPromptComposeUsesInjectedPersona(t *testing.T) {
 		"没有内容的栏目省略",
 		"人格设定、profile 与用户偏好",
 		"按问题调整顺序",
+		"需要完整分析主题、材料或证据时使用 analysis",
+		"问候、简短交流",
+		"kind 为 chat 时",
+		"只包含 kind 和 body 两个字段",
+		"Telegram 等渠道协议字段",
+		"二级 Markdown 标题（##）",
+		"body 不输出 claim ID 或 source ID",
+		"来源使用实际 URL",
 	} {
 		if !strings.Contains(analysis, rule) {
 			t.Errorf("analysis prompt missing rule %q", rule)
 		}
 	}
-	if strings.Contains(analysis, "JSON Schema") || !strings.Contains(analysis, "不输出 JSON、category、claim ID 或 source ID") {
-		t.Fatal("analysis prompt retained a final schema contract")
+	if strings.Contains(analysis, "JSON Schema") || strings.Contains(analysis, "不输出 JSON") {
+		t.Fatal("analysis prompt retained an obsolete schema contract")
 	}
 }

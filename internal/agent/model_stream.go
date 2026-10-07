@@ -43,6 +43,10 @@ func normalizeToolCallStream(source *schema.StreamReader[*schema.AgenticMessage]
 					writer.Send(nil, fmt.Errorf("function tool call stream ended before response completed (status %q)", status))
 					return
 				}
+				if status == "" {
+					writer.Send(nil, errors.New("model response incomplete"))
+					return
+				}
 				for index, args := range earlyArgs {
 					if gotDelta[index] {
 						continue

@@ -27,7 +27,7 @@ import (
 	"kagari/internal/reader"
 )
 
-const AnalysisVersion = "markdown-agent-v1"
+const AnalysisVersion = "structured-output-v1"
 
 // Persona 只提供角色与语言风格；任务、证据要求和输出格式由 Agent 提示词规定。
 type Persona interface {
@@ -224,13 +224,16 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[*schema.AgenticMessage]{Agent: a, EnableStreaming: e.Config.Agent.Streaming})
 	stage = "model"
 	modelCalled = true
-	it := runner.Query(ctx, e.analysisInput(s, session.sources))
-	result.Body, result.Usage, usageReported, err = e.consumeEvents(it, e.Config.Agent.MaxIterations)
+	it := runner.Query(ctx, e.analysisInput(s, session.sources), adk.WithChatModelOptions([]model.Option{analysisOutputOption()}))
+	var rawOutput string
+	rawOutput, result.Usage, usageReported, err = e.consumeEvents(it, e.Config.Agent.MaxIterations)
 	if err != nil {
 		return result, err
 	}
-	if strings.TrimSpace(result.Body) == "" {
-		return result, errors.New("empty analysis output")
+	stage = "output_validation"
+	result.Kind, result.Body, err = decodeAnalysisOutput(rawOutput)
+	if err != nil {
+		return result, err
 	}
 	return result, nil
 }
