@@ -139,5 +139,8 @@ func decodeArchiveEntry(id int64, payload, rawResult []byte) (*domain.ArchiveEnt
 	if err := json.Unmarshal(rawResult, &entry.Result); err != nil {
 		return nil, err
 	}
+	if entry.Result.Kind == "" {
+		entry.Result.Kind = domain.ResultKindAnalysis
+	}
 	return &entry, nil
 }

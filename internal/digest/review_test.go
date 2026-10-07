@@ -73,6 +73,32 @@ func TestPrepareFiltersDeduplicatesAndProjects(t *testing.T) {
 	}
 }
 
+func TestPrepareFiltersResultKindsBeforeDeduplication(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	entry := func(id int64, at time.Time, key string, kind domain.ResultKind) domain.ArchiveEntry {
+		return domain.ArchiveEntry{
+			JobID:      id,
+			Submission: domain.Submission{UserID: 7, CacheKey: key, ReceivedAt: at},
+			Result:     domain.Result{Kind: kind, Body: "body"},
+		}
+	}
+	entries := []domain.ArchiveEntry{
+		entry(1, start, "shared", domain.ResultKindChat),
+		entry(2, start.Add(time.Minute), "shared", domain.ResultKindAnalysis),
+		entry(3, start, "legacy", "other"),
+		entry(4, start.Add(2*time.Minute), "legacy", ""),
+	}
+	request := domain.DigestRequest{UserID: 7, Start: start, End: end, Version: domain.DigestVersion}
+	input, err := Prepare(request, end, "UTC", "", "instruction", entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(input.Entries) != 2 || input.Entries[0].JobID != 2 || input.Entries[1].JobID != 4 {
+		t.Fatalf("Prepare() selected %+v, want analysis and legacy analysis only", input.Entries)
+	}
+}
+
 func TestPrepareRejectsInvalidWindow(t *testing.T) {
 	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {

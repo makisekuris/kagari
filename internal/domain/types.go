@@ -67,6 +67,7 @@ const (
 
 // Result 保存回复类型、正文及阅读记录。失败任务也可能包含部分结果，
 // 由任务状态决定 Body 是否可发布。
+// 历史记录缺少 Kind；仅在已完成分析的读取入口补为 analysis。
 type Result struct {
 	Kind            ResultKind `json:"kind,omitempty"`
 	Body            string     `json:"body,omitempty"`

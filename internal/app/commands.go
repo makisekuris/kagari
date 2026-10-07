@@ -113,6 +113,22 @@ func (w *Worker) Status(ctx context.Context, id int64) (string, error) {
 		return "", err
 	}
 	text := fmt.Sprintf("任务 #%d：%s（%s），已尝试 %d 次", id, job.Status, job.Kind, job.Attempts)
+	if job.Kind == "analyze" && job.Status == "completed" {
+		var result struct {
+			Kind json.RawMessage `json:"kind"`
+		}
+		if err := json.Unmarshal(job.Result, &result); err != nil {
+			return "", err
+		}
+		kind := domain.ResultKindAnalysis
+		if len(result.Kind) > 0 {
+			kind = ""
+			if json.Unmarshal(result.Kind, &kind) != nil || (kind != domain.ResultKindAnalysis && kind != domain.ResultKindChat) {
+				kind = "unknown"
+			}
+		}
+		text += fmt.Sprintf("\n结果类型：%s", kind)
+	}
 	if job.LastError != "" {
 		text += "\n" + job.LastError
 	}

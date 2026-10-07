@@ -3,8 +3,11 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -73,6 +76,20 @@ func TestChatResultUsesSubmissionChatAndSkipsAnalysisCacheAndArchive(t *testing.
 	}
 
 	sub := domain.Submission{UserID: 7, ChatID: 71, Text: "hello", CacheKey: "same-chat", ReceivedAt: now}
+	legacy := sub
+	legacy.ReceivedAt = now.Add(-time.Hour)
+	legacyPayload, _ := json.Marshal(legacy)
+	legacyID, _, err := s.Enqueue(ctx, "analyze", "legacy-cache", legacyPayload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartJob(ctx, legacyID); err != nil {
+		t.Fatal(err)
+	}
+	legacyResult, _ := json.Marshal(domain.Result{Body: "old analysis", AnalysisVersion: "old-version", CreatedAt: now})
+	if err := s.CompletePublication(ctx, legacyID, legacyResult, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 	firstID := run("chat-first", sub, targets)
 	job, err := s.Job(ctx, firstID)
 	if err != nil || job == nil || len(job.Targets) != 2 || job.Targets[0] != targets[0] || job.Targets[1] != targets[1] {
@@ -96,7 +113,7 @@ func TestChatResultUsesSubmissionChatAndSkipsAnalysisCacheAndArchive(t *testing.
 	cli := domain.Submission{UserID: 7, Text: "cli chat", CacheKey: "cli-chat", ReceivedAt: now.Add(2 * time.Minute)}
 	cliID := run("chat-cli", cli, targets)
 	if requests.Load() != 3 {
-		t.Fatalf("model requests = %d, want one for each chat result", requests.Load())
+		t.Fatalf("model requests = %d, want one for each chat result without reusing the old-version cache", requests.Load())
 	}
 	deliveryCounts, err := s.DeliveryCounts(ctx, cliID)
 	if err != nil || len(deliveryCounts) != 0 {
@@ -126,5 +143,125 @@ func TestChatResultUsesSubmissionChatAndSkipsAnalysisCacheAndArchive(t *testing.
 	entries, err = s.Entries(ctx, 7, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil || len(entries) != 1 || entries[0].JobID != analysisID || entries[0].Result.Body != "analysis archive" {
 		t.Fatalf("analysis archive = (%+v, %v), want analysis unaffected", entries, err)
+	}
+}
+
+func TestStatusDoesNotTreatInvalidKindsAsLegacyAnalysis(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w := &Worker{Store: s}
+	for _, kind := range []string{`null`, `""`, `"other"`, `123`} {
+		id, _, err := s.Enqueue(ctx, "analyze", kind, []byte(`{}`), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.StartJob(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CompletePublication(ctx, id, []byte(`{"kind":`+kind+`,"body":"saved"}`), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		status, err := w.Status(ctx, id)
+		if err != nil || !strings.Contains(status, "结果类型：unknown") {
+			t.Fatalf("status with kind %s = (%q, %v), want unknown", kind, status, err)
+		}
+	}
+}
+
+func TestResultRoutingKeepsTargetsAcrossRetries(t *testing.T) {
+	for _, kind := range []domain.ResultKind{domain.ResultKindAnalysis, domain.ResultKindChat} {
+		t.Run(string(kind), func(t *testing.T) {
+			ctx := context.Background()
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if requests.Add(1) == 1 {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = w.Write([]byte(`{"error":{"message":"temporary failure","type":"server_error"}}`))
+					return
+				}
+				raw, _ := json.Marshal(map[string]any{"kind": kind, "body": "reply body"})
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id": "resp_retry", "object": "response", "status": "completed", "model": "test",
+					"output": []any{map[string]any{"type": "message", "id": "msg_retry", "role": "assistant", "status": "completed", "content": []any{
+						map[string]any{"type": "output_text", "text": string(raw), "annotations": []any{}},
+					}}},
+				})
+			}))
+			defer server.Close()
+			cfg, err := config.Load("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.MaxAttempts = 1
+			cfg.ProfilePath = t.TempDir() + "/missing-profile"
+			cfg.Model.BaseURL, cfg.Model.APIKey, cfg.Model.Name = server.URL+"/v1", "test-key", "test-model"
+			e, err := agent.New(ctx, cfg, nil, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, err := store.New(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			w := &Worker{Store: s, Engine: e, Config: cfg, Log: zap.NewNop()}
+			targets := telegram.Targets([]int64{71, -100123})
+			raw, _ := json.Marshal(domain.Submission{UserID: 7, ChatID: 71, Text: "question", CacheKey: "retry", ReceivedAt: time.Now()})
+			id, _, err := s.Enqueue(ctx, "analyze", "retry", raw, targets)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job, err := w.ProcessJob(ctx, id); err == nil || job == nil || job.Status != "failed" {
+				t.Fatalf("first attempt = (%+v, %v), want failed task", job, err)
+			}
+			status, err := w.Status(ctx, id)
+			if err != nil || strings.Contains(status, "结果类型") {
+				t.Fatalf("failed task status = (%q, %v), want no completed result kind", status, err)
+			}
+			w.Config.Telegram.TargetChatIDs = []int64{999, -100999}
+			if err := s.RetryJob(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			job, err := w.ProcessJob(ctx, id)
+			if err != nil || job == nil || job.Status != "completed" || !reflect.DeepEqual(job.Targets, targets) {
+				t.Fatalf("processing retry = (%+v, %v), want completed task with frozen targets", job, err)
+			}
+			wantTargets, wantText := targets, fmt.Sprintf("任务 #%d\nreply body", id)
+			if kind == domain.ResultKindChat {
+				wantTargets, wantText = targets[:1], "reply body"
+			}
+			counts, err := s.DeliveryTargetCounts(ctx, id)
+			if err != nil || len(counts) != len(wantTargets) {
+				t.Fatalf("delivery targets = (%+v, %v), want %+v", counts, err, wantTargets)
+			}
+			for _, count := range counts {
+				if count.Target != targets[0] && (kind == domain.ResultKindChat || count.Target != targets[1]) {
+					t.Fatalf("unexpected delivery target: %+v", count)
+				}
+			}
+			status, err = w.Status(ctx, id)
+			if err != nil || !strings.Contains(status, "结果类型："+string(kind)) {
+				t.Fatalf("completed status = (%q, %v), want result kind %s", status, err, kind)
+			}
+			first, err := s.ClaimDelivery(ctx)
+			if err != nil || first == nil || first.JobID != id || first.Target != targets[0] || first.Text != wantText {
+				t.Fatalf("first delivery = (%+v, %v)", first, err)
+			}
+			if err := s.FailDelivery(ctx, first.ID, "outcome unknown", 1, time.Now(), true); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RetryDeliveries(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			retry, err := s.ClaimDelivery(ctx)
+			if err != nil || retry == nil || retry.ID != first.ID || retry.Target != first.Target || retry.Text != first.Text || requests.Load() != 2 {
+				t.Fatalf("delivery retry = (%+v, %v), model calls = %d, want persisted target/body without reanalysis", retry, err, requests.Load())
+			}
+		})
 	}
 }

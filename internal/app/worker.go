@@ -55,20 +55,21 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 				r, workErr = engine.Analyze(ctx, s)
 			}
 		}
-		if workErr == nil && r.Kind != "" && r.Kind != domain.ResultKindAnalysis && r.Kind != domain.ResultKindChat {
+		if workErr == nil && r.Kind != domain.ResultKindAnalysis && r.Kind != domain.ResultKindChat {
 			workErr = errors.New("unknown result kind")
 		}
 		result = r
 		sources = r.Sources
-		if r.Kind == domain.ResultKindChat {
+		switch r.Kind {
+		case domain.ResultKindAnalysis:
+			text = render.Analysis(r)
+		case domain.ResultKindChat:
 			chatResult = true
 			text = r.Body
 			jobTargets = nil
 			if s.ChatID != 0 {
 				jobTargets = telegram.Targets([]int64{s.ChatID})
 			}
-		} else {
-			text = render.Analysis(r)
 		}
 	case "digest":
 		result, text, workErr = w.processDigest(ctx, job)

@@ -27,6 +27,9 @@ func (s *Store) FindResult(ctx context.Context, cacheKey string) (*domain.Result
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, err
 	}
+	if result.Kind == "" {
+		result.Kind = domain.ResultKindAnalysis
+	}
 	return &result, nil
 }
 
@@ -73,11 +76,11 @@ func (s *Store) Entries(ctx context.Context, userID int64, start, end time.Time)
 		if received.Before(start.UTC()) || !received.Before(end.UTC()) {
 			continue
 		}
-		var result domain.Result
-		if err := json.Unmarshal(rawResult, &result); err != nil {
+		entry, err := decodeArchiveEntry(id, payload, rawResult)
+		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, domain.ArchiveEntry{JobID: id, Submission: submission, Result: result})
+		entries = append(entries, *entry)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

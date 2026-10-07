@@ -41,12 +41,15 @@ func TestPublicationFansOutWithoutReanalysisAndFailureIsIsolated(t *testing.T) {
 	if err := s.CompletePublication(ctx, seed, raw, nil, nil); err != nil {
 		t.Fatal(err)
 	}
+	w := &Worker{Store: s, Log: zap.NewNop(), Config: config.Config{MaxAttempts: 3, Reader: config.Reader{CacheTTL: time.Hour}}}
+	if status, err := w.Status(ctx, seed); err != nil || !strings.Contains(status, "结果类型：analysis") {
+		t.Fatalf("legacy result status = (%q, %v), want analysis", status, err)
+	}
 	targets := telegram.Targets([]int64{7, -100123})
 	id, _, err := s.Enqueue(ctx, "analyze", "publication", payload, targets)
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &Worker{Store: s, Log: zap.NewNop(), Config: config.Config{MaxAttempts: 3, Reader: config.Reader{CacheTTL: time.Hour}}}
 	job, err := s.StartJob(ctx, id)
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +57,11 @@ func TestPublicationFansOutWithoutReanalysisAndFailureIsIsolated(t *testing.T) {
 	// 没有 Engine；缓存复用和多目标投递都不能重新调用模型。
 	if err := w.Process(ctx, job); err != nil {
 		t.Fatal(err)
+	}
+	published, err := s.Job(ctx, id)
+	var saved domain.Result
+	if err != nil || published == nil || json.Unmarshal(published.Result, &saved) != nil || saved.Kind != domain.ResultKindAnalysis {
+		t.Fatalf("cached legacy publication = (%+v, %v), want explicit analysis result", published, err)
 	}
 	parts := render.Chunks(fmt.Sprintf("任务 #%d\n%s", id, render.Analysis(result)))
 	var channelParts []string

@@ -26,6 +26,9 @@ func Prepare(request domain.DigestRequest, asOf time.Time, timezone, profile, in
 
 	selected := make([]domain.ArchiveEntry, 0, len(entries))
 	for _, entry := range entries {
+		if entry.Result.Kind != "" && entry.Result.Kind != domain.ResultKindAnalysis {
+			continue
+		}
 		receivedAt := entry.Submission.ReceivedAt
 		if entry.Submission.UserID == request.UserID && !receivedAt.Before(request.Start) && receivedAt.Before(request.End) {
 			selected = append(selected, entry)
