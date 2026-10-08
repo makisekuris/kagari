@@ -128,9 +128,13 @@ The Engine reads `profile.md` and freezes persona text when constructed. Analysi
 
 Analysis calls require a model endpoint that supports strict JSON Schema output in the Responses API. The final output contains only `kind` and `body`: `analysis` contains a Markdown analysis, while `chat` contains a conversational reply or clarification. The application validates the fields, types, and nonempty body; invalid results enter task retry without publication. Sources, read records, and usage are saved by the application. Digest generation continues to return prose directly.
 
-`analysis` 使用任务入队时保存的分析投递目标；`chat` 只回复提交者私聊，不进入阅读归档或新生成的周报。CLI 没有私聊目标时只展示正文。Telegram 消息格式由渠道适配器负责；当前发送仍为普通文本。
+`analysis` 使用任务入队时保存的分析投递目标；`chat` 只回复提交者私聊，不进入阅读归档或新生成的周报。CLI 没有私聊目标时只展示正文。程序向渠道声明正文为 Markdown 或普通文本，Telegram 适配器负责选择发送接口和分段。
 
-An `analysis` uses the delivery targets saved when the task was queued. A `chat` reply goes only to the submitting private chat and is excluded from the reading archive and newly generated digests. CLI submissions without a private chat target only display the body. The Telegram adapter owns message formatting; delivery currently uses plain text.
+An `analysis` uses the delivery targets saved when the task was queued. A `chat` reply goes only to the submitting private chat and is excluded from the reading archive and newly generated digests. CLI submissions without a private chat target only display the body. The application declares Markdown or plain text; the Telegram adapter selects the send method and handles splitting.
+
+Telegram 适配器通过 SDK 自带的 `sendRichMessage` 发送分析与周报的原始 Markdown，由 Telegram 渲染。聊天、命令、通知和收件回执通过 `sendMessage` 按普通文本发送，关闭链接预览。普通文本按最多 3500 个 UTF-16 单元分段；Markdown 整条发送，长度和结构由 Telegram 校验。归档与 outbox 保留原始正文，outbox 仅增加格式标记；不保存格式实体或带版本的发送 payload，也不提供旧数据库迁移。
+
+The Telegram adapter sends original analysis and digest Markdown through the SDK's `sendRichMessage`, with rendering handled by Telegram. Chats, commands, notices, and acknowledgements use plain-text `sendMessage` with link previews disabled. Plain text is split at up to 3500 UTF-16 units; Markdown is sent as one message and validated by Telegram. Archives and the outbox retain the original text; the outbox only adds a format marker. There are no saved formatting entities, versioned send payloads, or old-database migrations.
 
 ## CLI 命令 / CLI commands
 

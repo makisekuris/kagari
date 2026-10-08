@@ -163,8 +163,8 @@ func (s *Store) CompletePublication(ctx context.Context, id int64, result []byte
 				return errors.New("store: Telegram target must be a canonical nonzero chat ID")
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO deliveries(job_id,channel,address,part,text,status,next_attempt_at)
-			VALUES(?,?,?,?,?,'pending',?)`, id, target.Channel, target.Address, delivery.Part, delivery.Text, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO deliveries(job_id,channel,address,part,text,format,status,next_attempt_at)
+			VALUES(?,?,?,?,?,?,'pending',?)`, id, target.Channel, target.Address, delivery.Part, delivery.Text, delivery.Format, now); err != nil {
 			return err
 		}
 	}

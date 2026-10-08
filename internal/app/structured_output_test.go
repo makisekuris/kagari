@@ -22,6 +22,7 @@ import (
 
 func TestChatResultUsesSubmissionChatAndSkipsAnalysisCacheAndArchive(t *testing.T) {
 	ctx := context.Background()
+	const chatBody = "**plain reply** <b>& literal</b>"
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
@@ -29,7 +30,7 @@ func TestChatResultUsesSubmissionChatAndSkipsAnalysisCacheAndArchive(t *testing.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "resp_chat", "object": "response", "status": "completed", "model": "test",
 			"output": []any{map[string]any{"type": "message", "id": "msg_chat", "role": "assistant", "status": "completed", "content": []any{
-				map[string]any{"type": "output_text", "text": `{"kind":"chat","body":"plain reply"}`, "annotations": []any{}},
+				map[string]any{"type": "output_text", "text": `{"kind":"chat","body":"**plain reply** <b>& literal</b>"}`, "annotations": []any{}},
 			}}},
 			"usage": map[string]any{"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
 		})
@@ -96,7 +97,7 @@ func TestChatResultUsesSubmissionChatAndSkipsAnalysisCacheAndArchive(t *testing.
 		t.Fatalf("saved job = (%+v, %v), want original frozen targets", job, err)
 	}
 	var saved domain.Result
-	if err := json.Unmarshal(job.Result, &saved); err != nil || saved.Kind != domain.ResultKindChat || saved.Body != "plain reply" || saved.AnalysisVersion != agent.AnalysisVersion || saved.Usage.TotalTokens != 5 {
+	if err := json.Unmarshal(job.Result, &saved); err != nil || saved.Kind != domain.ResultKindChat || saved.Body != chatBody || saved.AnalysisVersion != agent.AnalysisVersion || saved.Usage.TotalTokens != 5 {
 		t.Fatalf("saved chat result = (%+v, %v), want structured task result with metadata", saved, err)
 	}
 	counts, err := s.DeliveryTargetCounts(ctx, firstID)
@@ -104,8 +105,11 @@ func TestChatResultUsesSubmissionChatAndSkipsAnalysisCacheAndArchive(t *testing.
 		t.Fatalf("chat delivery targets = (%+v, %v), want original private chat only", counts, err)
 	}
 	delivery, err := s.ClaimDelivery(ctx)
-	if err != nil || delivery == nil || delivery.JobID != firstID || delivery.Text != "plain reply" {
+	if err != nil || delivery == nil || delivery.JobID != firstID || delivery.Text != chatBody {
 		t.Fatalf("chat delivery = (%+v, %v), want plain body without analysis/task framing", delivery, err)
+	}
+	if delivery.Format != domain.ContentPlainText {
+		t.Fatalf("chat format = %q, want plain text", delivery.Format)
 	}
 
 	sub.ReceivedAt = now.Add(time.Minute)
@@ -184,7 +188,11 @@ func TestResultRoutingKeepsTargetsAcrossRetries(t *testing.T) {
 					_, _ = w.Write([]byte(`{"error":{"message":"temporary failure","type":"server_error"}}`))
 					return
 				}
-				raw, _ := json.Marshal(map[string]any{"kind": kind, "body": "reply body"})
+				body := "reply body"
+				if kind == domain.ResultKindAnalysis {
+					body = "## 标题\n\n**reply body**"
+				}
+				raw, _ := json.Marshal(map[string]any{"kind": kind, "body": body})
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"id": "resp_retry", "object": "response", "status": "completed", "model": "test",
 					"output": []any{map[string]any{"type": "message", "id": "msg_retry", "role": "assistant", "status": "completed", "content": []any{
@@ -231,7 +239,7 @@ func TestResultRoutingKeepsTargetsAcrossRetries(t *testing.T) {
 			if err != nil || job == nil || job.Status != "completed" || !reflect.DeepEqual(job.Targets, targets) {
 				t.Fatalf("processing retry = (%+v, %v), want completed task with frozen targets", job, err)
 			}
-			wantTargets, wantText := targets, fmt.Sprintf("任务 #%d\nreply body", id)
+			wantTargets, wantText := targets, fmt.Sprintf("任务 #%d\n## 标题\n\n**reply body**", id)
 			if kind == domain.ResultKindChat {
 				wantTargets, wantText = targets[:1], "reply body"
 			}
@@ -252,6 +260,13 @@ func TestResultRoutingKeepsTargetsAcrossRetries(t *testing.T) {
 			if err != nil || first == nil || first.JobID != id || first.Target != targets[0] || first.Text != wantText {
 				t.Fatalf("first delivery = (%+v, %v)", first, err)
 			}
+			wantFormat := domain.ContentPlainText
+			if kind == domain.ResultKindAnalysis {
+				wantFormat = domain.ContentMarkdown
+			}
+			if first.Format != wantFormat {
+				t.Fatalf("format for %s = %q, want %q", kind, first.Format, wantFormat)
+			}
 			if err := s.FailDelivery(ctx, first.ID, "outcome unknown", 1, time.Now(), true); err != nil {
 				t.Fatal(err)
 			}
@@ -259,7 +274,7 @@ func TestResultRoutingKeepsTargetsAcrossRetries(t *testing.T) {
 				t.Fatal(err)
 			}
 			retry, err := s.ClaimDelivery(ctx)
-			if err != nil || retry == nil || retry.ID != first.ID || retry.Target != first.Target || retry.Text != first.Text || requests.Load() != 2 {
+			if err != nil || retry == nil || retry.ID != first.ID || retry.Target != first.Target || retry.Text != first.Text || retry.Format != first.Format || requests.Load() != 2 {
 				t.Fatalf("delivery retry = (%+v, %v), model calls = %d, want persisted target/body without reanalysis", retry, err, requests.Load())
 			}
 		})

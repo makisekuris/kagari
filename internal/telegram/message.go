@@ -35,7 +35,7 @@ func (c *Client) acceptUpdate(ctx context.Context, update *models.Update) error 
 		return errors.New("Telegram update could not be saved")
 	}
 	if created && kind == "analyze" && ackChatID != 0 {
-		if _, err := c.Send(ctx, ackChatID, c.replies.AskChatID(jobID)); err != nil {
+		if _, err := c.Send(ctx, ackChatID, domain.Content{Text: c.replies.AskChatID(jobID)}); err != nil {
 			c.log.Warn("Telegram acknowledgement failed", zap.String("reason", err.Error()))
 		}
 	}

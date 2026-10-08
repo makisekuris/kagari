@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
 	address TEXT NOT NULL,
 	part INTEGER NOT NULL,
 	text TEXT NOT NULL,
+	format TEXT NOT NULL DEFAULT '' CHECK (format IN ('','markdown')),
 	status TEXT NOT NULL CHECK (status IN ('pending','sending','sent','failed','uncertain')),
 	attempts INTEGER NOT NULL DEFAULT 0,
 	last_error TEXT NOT NULL DEFAULT '',
@@ -130,7 +131,7 @@ func New(path string) (*Store, error) {
 	if err == nil {
 		for _, query := range []string{
 			`SELECT id,kind,key,payload,result,targets,status,attempts,last_error,next_attempt_at FROM jobs LIMIT 0`,
-			`SELECT id,job_id,channel,address,part,text,status,attempts,next_attempt_at,message_id FROM deliveries LIMIT 0`,
+			`SELECT id,job_id,channel,address,part,text,format,status,attempts,next_attempt_at,message_id FROM deliveries LIMIT 0`,
 		} {
 			rows, queryErr := tx.QueryContext(ctx, query)
 			if queryErr == nil {

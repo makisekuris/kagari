@@ -10,8 +10,8 @@ import (
 
 	"go.uber.org/zap"
 	"kagari/internal/domain"
-	"kagari/internal/render"
 	"kagari/internal/store"
+	"kagari/internal/telegram"
 )
 
 func archiveCommandWorker(t *testing.T) (*Worker, *store.Store) {
@@ -194,7 +194,8 @@ func TestArchiveListKeepsLongTitlesCompactWithoutChangingDetails(t *testing.T) {
 		id = addCommandArchive(t, s, 7, fmt.Sprintf("long-title-%d", i), title)
 	}
 	listing := w.command(ctx, domain.Command{UserID: 7, Text: "/archive"})
-	if len(render.Chunks(listing)) != 1 || !strings.Contains(listing, "…") || strings.Contains(listing, title) {
+	parts, err := telegram.Adapter(nil).Prepare(domain.Content{Text: listing, Format: domain.ContentPlainText})
+	if err != nil || len(parts) != 1 || !strings.Contains(listing, "…") || strings.Contains(listing, title) {
 		t.Fatalf("archive page did not fit a compact message: %s", listing)
 	}
 	preview := w.command(ctx, domain.Command{UserID: 7, Text: fmt.Sprintf("/archive_delete %d", id)})

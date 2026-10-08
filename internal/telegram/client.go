@@ -100,17 +100,29 @@ func validToken(token string) bool {
 	return true
 }
 
-func (c *Client) Send(ctx context.Context, chatID int64, text string) (int64, error) {
+func (c *Client) Send(ctx context.Context, chatID int64, content domain.Content) (int64, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	message, err := c.bot.SendMessage(ctx, &telegrambot.SendMessageParams{
-		ChatID: chatID,
-		Text:   text,
-		LinkPreviewOptions: &models.LinkPreviewOptions{
-			IsDisabled: telegrambot.True(),
-		},
-	})
+	var message *models.Message
+	var err error
+	switch content.Format {
+	case domain.ContentPlainText:
+		message, err = c.bot.SendMessage(ctx, &telegrambot.SendMessageParams{
+			ChatID: chatID,
+			Text:   content.Text,
+			LinkPreviewOptions: &models.LinkPreviewOptions{
+				IsDisabled: telegrambot.True(),
+			},
+		})
+	case domain.ContentMarkdown:
+		message, err = c.bot.SendRichMessage(ctx, &telegrambot.SendRichMessageParams{
+			ChatID:      chatID,
+			RichMessage: models.InputRichMessage{Markdown: content.Text},
+		})
+	default:
+		return 0, &SendError{Reason: "Telegram content format is unsupported", Permanent: true}
+	}
 	if err != nil {
 		return 0, sendError(err)
 	}

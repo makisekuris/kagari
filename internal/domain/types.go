@@ -100,6 +100,19 @@ type DeliveryTarget struct {
 	Address string `json:"address"`
 }
 
+type ContentFormat string
+
+const (
+	ContentPlainText ContentFormat = ""
+	ContentMarkdown  ContentFormat = "markdown"
+)
+
+// Content 描述正文语法；渠道适配器选择对应的发送方式。
+type Content struct {
+	Text   string
+	Format ContentFormat
+}
+
 // Delivery 是产物的一段消息；Part 保证同一任务、同一目标按顺序投递。
 // uncertain 表示渠道可能已经接收，需用户显式允许后才能重新发送。
 type Delivery struct {
@@ -108,6 +121,7 @@ type Delivery struct {
 	Target   DeliveryTarget
 	Part     int
 	Text     string
+	Format   ContentFormat
 	Status   string
 	Attempts int
 }

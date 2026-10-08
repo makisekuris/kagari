@@ -144,6 +144,23 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 	if report.Input == nil || len(report.Input.Entries) != 1 || report.Body == "" || requests.Load() != 3 {
 		t.Fatalf("digest generation %+v", report)
 	}
+	rows, err := s.TableRows(ctx, "deliveries", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digestDelivery := false
+	for _, row := range rows {
+		if row["job_id"] != id {
+			continue
+		}
+		if row["format"] != string(domain.ContentMarkdown) || row["text"] != report.Body {
+			t.Fatalf("digest did not use Markdown formatting: %+v", row)
+		}
+		digestDelivery = true
+	}
+	if !digestDelivery {
+		t.Fatal("digest delivery missing")
+	}
 	duplicate, created, err := w.EnqueueDigest(ctx, request, telegram.Targets([]int64{7}))
 	if err != nil || created || duplicate != id {
 		t.Fatal("digest period duplicated")
@@ -152,7 +169,8 @@ func TestAnalyzeArchiveCacheDigestAndUncertainDelivery(t *testing.T) {
 		t.Fatal("cross-user status access")
 	}
 	sendCtx, cancel := context.WithCancel(ctx)
-	if err := deliver(sendCtx, w, distribution.Dispatcher{"telegram": telegram.Adapter(func(_ context.Context, _ int64, text string) (int64, error) {
+	if err := deliver(sendCtx, w, distribution.Dispatcher{"telegram": telegram.Adapter(func(_ context.Context, _ int64, message domain.Content) (int64, error) {
+		text := message.Text
 		if !strings.Contains(text, "原文简报喵") || !strings.Contains(text, "taffy锐评") || strings.Contains(text, "AI 摘要：") || strings.Contains(text, "Agent 评价：") {
 			t.Errorf("delivery replaced model headings: %s", text)
 		}

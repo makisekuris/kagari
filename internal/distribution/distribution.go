@@ -23,13 +23,13 @@ func (e *SendError) Error() string {
 }
 
 type Adapter struct {
-	Prepare func(string) []string
-	Send    func(context.Context, domain.DeliveryTarget, string) (string, error)
+	Prepare func(domain.Content) ([]string, error)
+	Send    func(context.Context, domain.DeliveryTarget, domain.Content) (string, error)
 }
 
 type Dispatcher map[string]Adapter
 
-func (d Dispatcher) Plan(targets []domain.DeliveryTarget, text string) ([]domain.Delivery, error) {
+func (d Dispatcher) Plan(targets []domain.DeliveryTarget, content domain.Content) ([]domain.Delivery, error) {
 	var deliveries []domain.Delivery
 	seen := make(map[domain.DeliveryTarget]struct{}, len(targets))
 	for _, target := range targets {
@@ -44,15 +44,18 @@ func (d Dispatcher) Plan(targets []domain.DeliveryTarget, text string) ([]domain
 		if !ok || adapter.Prepare == nil || adapter.Send == nil {
 			return nil, &SendError{Reason: "distribution channel is unavailable", Permanent: true}
 		}
-		chunks := adapter.Prepare(text)
-		if text != "" && len(chunks) == 0 {
+		chunks, err := adapter.Prepare(content)
+		if err != nil {
+			return nil, err
+		}
+		if content.Text != "" && len(chunks) == 0 {
 			return nil, &SendError{Reason: "distribution produced no message", Permanent: true}
 		}
 		for i, chunk := range chunks {
 			if chunk == "" {
 				return nil, &SendError{Reason: "distribution produced an empty message", Permanent: true}
 			}
-			deliveries = append(deliveries, domain.Delivery{Target: target, Part: i + 1, Text: chunk})
+			deliveries = append(deliveries, domain.Delivery{Target: target, Part: i + 1, Text: chunk, Format: content.Format})
 		}
 	}
 	return deliveries, nil
@@ -67,7 +70,7 @@ func (d Dispatcher) Send(ctx context.Context, delivery domain.Delivery) (string,
 	if !ok || adapter.Prepare == nil || adapter.Send == nil {
 		return "", &SendError{Reason: "distribution channel is unavailable", Permanent: true}
 	}
-	messageID, err := adapter.Send(ctx, target, delivery.Text)
+	messageID, err := adapter.Send(ctx, target, domain.Content{Text: delivery.Text, Format: delivery.Format})
 	if err != nil {
 		return "", err
 	}

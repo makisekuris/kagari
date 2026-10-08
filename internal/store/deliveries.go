@@ -32,7 +32,7 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*domain.Delivery, error) {
 	if _, err := tx.ExecContext(ctx, `UPDATE deliveries SET status='sending',attempts=attempts+1 WHERE id=? AND status='pending'`, id); err != nil {
 		return nil, err
 	}
-	delivery, err := scanDelivery(tx.QueryRowContext(ctx, `SELECT id,job_id,channel,address,part,text,status,attempts FROM deliveries WHERE id=?`, id))
+	delivery, err := scanDelivery(tx.QueryRowContext(ctx, `SELECT id,job_id,channel,address,part,text,format,status,attempts FROM deliveries WHERE id=?`, id))
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*domain.Delivery, error) {
 func scanDelivery(row interface{ Scan(...any) error }) (*domain.Delivery, error) {
 	var delivery domain.Delivery
 	err := row.Scan(&delivery.ID, &delivery.JobID, &delivery.Target.Channel, &delivery.Target.Address,
-		&delivery.Part, &delivery.Text, &delivery.Status, &delivery.Attempts)
+		&delivery.Part, &delivery.Text, &delivery.Format, &delivery.Status, &delivery.Attempts)
 	return &delivery, err
 }
 

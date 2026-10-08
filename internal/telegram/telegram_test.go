@@ -377,7 +377,7 @@ func TestSendClassifiesFailuresWithoutLeakingDetails(t *testing.T) {
 				}
 				return apiResponse(req, tc.status, tc.body), nil
 			}))
-			_, err := client.Send(context.Background(), 7, "plain text")
+			_, err := client.Send(context.Background(), 7, domain.Content{Text: "plain text"})
 			if err == nil {
 				t.Fatal("Send() unexpectedly succeeded")
 			}
@@ -392,6 +392,41 @@ func TestSendClassifiesFailuresWithoutLeakingDetails(t *testing.T) {
 				t.Fatalf("Send() made %d API attempts; want one", sends)
 			}
 		})
+	}
+}
+
+func TestSendUsesNativeMarkdownAndPlainTextMethods(t *testing.T) {
+	client := testClient(t, testStore(t), baseConfig(), func(sub domain.Submission) (domain.Submission, error) { return sub, nil }, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if err := req.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		switch req.URL.Path {
+		case "/bot123:fixture_secret/sendMessage":
+			if got := req.FormValue("text"); got != "literal **markdown** <b>text</b>" {
+				t.Errorf("plain text changed: %q", got)
+			}
+			var preview models.LinkPreviewOptions
+			if err := json.Unmarshal([]byte(req.FormValue("link_preview_options")), &preview); err != nil || preview.IsDisabled == nil || !*preview.IsDisabled {
+				t.Errorf("plain link preview = (%+v, %v)", preview, err)
+			}
+		case "/bot123:fixture_secret/sendRichMessage":
+			var rich models.InputRichMessage
+			if err := json.Unmarshal([]byte(req.FormValue("rich_message")), &rich); err != nil || rich.Markdown != "## 标题😀\n\n**事实**与[来源](https://example.org/?a=1&b=2)" {
+				t.Errorf("native markdown = (%+v, %v)", rich, err)
+			}
+		default:
+			t.Errorf("unexpected Telegram method: %s", req.URL.Path)
+		}
+		return apiResponse(req, http.StatusOK, `{"ok":true,"result":{"message_id":88,"date":1700000004,"chat":{"id":7,"type":"private"}}}`), nil
+	}))
+
+	plain := domain.Content{Text: "literal **markdown** <b>text</b>"}
+	if id, err := client.Send(context.Background(), 7, plain); err != nil || id != 88 {
+		t.Fatalf("plain Send() = (%d, %v)", id, err)
+	}
+	markdown := domain.Content{Format: domain.ContentMarkdown, Text: "## 标题😀\n\n**事实**与[来源](https://example.org/?a=1&b=2)"}
+	if id, err := client.Send(context.Background(), 7, markdown); err != nil || id != 88 {
+		t.Fatalf("markdown Send() = (%d, %v)", id, err)
 	}
 }
 

@@ -34,6 +34,7 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 	var result any
 	var sources []domain.Source
 	var text string
+	format := domain.ContentPlainText
 	var workErr error
 	var chatResult bool
 	jobTargets := job.Targets
@@ -63,6 +64,7 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 		switch r.Kind {
 		case domain.ResultKindAnalysis:
 			text = render.Analysis(r)
+			format = domain.ContentMarkdown
 		case domain.ResultKindChat:
 			chatResult = true
 			text = r.Body
@@ -73,6 +75,7 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 		}
 	case "digest":
 		result, text, workErr = w.processDigest(ctx, job)
+		format = domain.ContentMarkdown
 	case "command":
 		var c domain.Command
 		workErr = json.Unmarshal(job.Payload, &c)
@@ -98,7 +101,7 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 		if len(job.Targets) > 0 && job.Kind != "digest" && !chatResult {
 			publishText = fmt.Sprintf("任务 #%d\n%s", job.ID, text)
 		}
-		messages, workErr = dispatcher.Plan(jobTargets, publishText)
+		messages, workErr = dispatcher.Plan(jobTargets, domain.Content{Text: publishText, Format: format})
 	}
 	if result == nil {
 		result = map[string]string{"status": "failed"}

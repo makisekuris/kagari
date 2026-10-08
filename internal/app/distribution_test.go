@@ -63,18 +63,21 @@ func TestPublicationFansOutWithoutReanalysisAndFailureIsIsolated(t *testing.T) {
 	if err != nil || published == nil || json.Unmarshal(published.Result, &saved) != nil || saved.Kind != domain.ResultKindAnalysis {
 		t.Fatalf("cached legacy publication = (%+v, %v), want explicit analysis result", published, err)
 	}
-	parts := render.Chunks(fmt.Sprintf("任务 #%d\n%s", id, render.Analysis(result)))
+	parts, err := telegram.Adapter(nil).Prepare(domain.Content{Text: fmt.Sprintf("任务 #%d\n%s", id, render.Analysis(result)), Format: domain.ContentMarkdown})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var channelParts []string
 	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	d := distribution.Dispatcher{"telegram": telegram.Adapter(func(_ context.Context, chatID int64, text string) (int64, error) {
+	d := distribution.Dispatcher{"telegram": telegram.Adapter(func(_ context.Context, chatID int64, message domain.Content) (int64, error) {
 		if chatID == 7 {
 			return 0, &distribution.SendError{Reason: "timeout", Uncertain: true}
 		}
 		if chatID != -100123 {
 			t.Fatalf("unexpected target %d", chatID)
 		}
-		channelParts = append(channelParts, text)
+		channelParts = append(channelParts, message.Text)
 		if len(channelParts) == len(parts) {
 			cancel()
 		}
