@@ -123,6 +123,11 @@ func TestPublicationFansOutWithoutReanalysisAndFailureIsIsolated(t *testing.T) {
 	if reply := w.command(ctx, domain.Command{UserID: 7, ChatID: 7, Text: "/weekly"}); !strings.Contains(reply, "周报已排队") {
 		t.Fatalf("weekly command: %s", reply)
 	}
+	notice, err := s.ClaimJob(ctx)
+	var commandReply domain.Command
+	if err != nil || notice == nil || notice.Kind != "notice" || len(notice.Targets) != 1 || notice.Targets[0] != targets[0] || json.Unmarshal(notice.Payload, &commandReply) != nil || !strings.Contains(commandReply.Text, "投递结果不确定") || !strings.Contains(commandReply.Text, "/retry_delivery "+strconv.FormatInt(id, 10)) {
+		t.Fatalf("delivery notice = (%+v, %+v, %v), want private recovery instructions", notice, commandReply, err)
+	}
 	weekly, err := s.ClaimJob(ctx)
 	if err != nil || weekly == nil || weekly.Kind != "digest" || !reflect.DeepEqual(weekly.Targets, targets) {
 		t.Fatalf("weekly targets = %+v, %v", weekly, err)

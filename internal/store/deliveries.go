@@ -76,20 +76,25 @@ func (s *Store) FailDelivery(ctx context.Context, id int64, reason string, maxAt
 	if !uncertain && maxAttempts < 1 {
 		return errors.New("store: max attempts must be positive")
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var jobID int64
+	var channel, address string
+	var attempts int
+	if err := tx.QueryRowContext(ctx, `SELECT job_id,channel,address,attempts FROM deliveries WHERE id=? AND status='sending'`, id).Scan(&jobID, &channel, &address, &attempts); err != nil {
+		return err
+	}
 	state := "pending"
 	if uncertain {
 		// 网络错误可能发生在 Telegram 已受理之后，不能自动重试造成重复消息。
 		state = "uncertain"
-	} else {
-		var attempts int
-		if err := s.db.QueryRowContext(ctx, `SELECT attempts FROM deliveries WHERE id=? AND status='sending'`, id).Scan(&attempts); err != nil {
-			return err
-		}
-		if attempts >= maxAttempts {
-			state = "failed"
-		}
+	} else if attempts >= maxAttempts {
+		state = "failed"
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE deliveries SET status=?,last_error=?,next_attempt_at=? WHERE id=? AND status='sending'`, state, reason, timestamp(retryAt), id)
+	result, err := tx.ExecContext(ctx, `UPDATE deliveries SET status=?,last_error=?,next_attempt_at=? WHERE id=? AND status='sending'`, state, reason, timestamp(retryAt), id)
 	if err != nil {
 		return err
 	}
@@ -100,7 +105,13 @@ func (s *Store) FailDelivery(ctx context.Context, id int64, reason string, maxAt
 	if count == 0 {
 		return fmt.Errorf("store: delivery %d is missing or is not sending", id)
 	}
-	return nil
+	if state == "failed" || state == "uncertain" {
+		delivery := domain.Delivery{ID: id, JobID: jobID, Target: domain.DeliveryTarget{Channel: channel, Address: address}, Status: state}
+		if err := enqueueDeliveryNotice(ctx, tx, delivery); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) RetryDeliveries(ctx context.Context, jobID int64) error {

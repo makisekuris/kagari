@@ -212,6 +212,10 @@ telegram:
 
 Replace the example IDs with your private chat and channel IDs, or set `KAGARI_TELEGRAM_TARGET_CHAT_IDS=123456789,-1001234567890`. Targets are saved at enqueue time; configuration changes affect new jobs. Each target has independent delivery status and part ordering, so one target's failure does not block the others. `/status ID` shows each target's status. `/retry_delivery ID` requeues only failed or uncertain deliveries and preserves sent parts; retrying an uncertain delivery may duplicate a message.
 
+分析与周报的投递进入失败或结果不确定状态时，会向原提交者私聊发送一条通知，附查看与重发命令。通知与终止状态在同一事务内保存；启动恢复也会补入尚未通知的记录。每条投递只通知一次，人工重发和重启不会重复通知；通知自身发送失败不会继续生成通知。发送结果不确定的原消息仍需手动重发。
+
+When an analysis or digest delivery fails permanently, exhausts its attempts, or has an uncertain outcome, a notice goes to the original submitter's private chat with status and resend commands. The terminal state and notice are saved in one transaction; startup recovery also queues missing notices. Each delivery gets one notice, including across manual retries and restarts. A failed notice does not generate another notice. Original messages with uncertain outcomes still require manual resending.
+
 ## 数据库维护 / Database maintenance
 
 `db` 命令只打开已存在的数据库，不创建或初始化文件。`info` 和 `list` 以只读模式运行，可在服务期间使用；`list` 的分页参数写在表名之前，默认 20 条，最多 100 条。

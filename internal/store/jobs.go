@@ -99,6 +99,33 @@ func (s *Store) Recover(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE deliveries SET status='uncertain',last_error='outcome unknown after restart' WHERE status='sending'`); err != nil {
 		return err
 	}
+	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.job_id,d.channel,d.address,d.status
+		FROM deliveries d JOIN jobs j ON j.id=d.job_id
+		WHERE j.kind IN ('analyze','digest') AND d.status IN ('failed','uncertain') ORDER BY d.id`)
+	if err != nil {
+		return err
+	}
+	var notices []domain.Delivery
+	for rows.Next() {
+		var notice domain.Delivery
+		if err := rows.Scan(&notice.ID, &notice.JobID, &notice.Target.Channel, &notice.Target.Address, &notice.Status); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		notices = append(notices, notice)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, notice := range notices {
+		if err := enqueueDeliveryNotice(ctx, tx, notice); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
