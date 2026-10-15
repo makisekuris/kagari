@@ -26,6 +26,10 @@ Run `make` or `make help` from the project root to list commands. Requires Go an
 | `make test` / `make vet` | 单独运行测试或静态检查 / Run tests or static checks separately |
 | `make fmt` | 格式化 Go 代码 / Format Go code |
 
+GitHub Actions 在每次 push 和 PR 上运行 `make check`，Go 版本取自 `go.mod`。
+
+GitHub Actions runs `make check` on pushes and pull requests, using the Go version in `go.mod`.
+
 ```sh
 make cli ARGS='read https://example.com/article'
 make cli ARGS='analyze -note "关注系统设计" -user 123456 https://example.com/article'
