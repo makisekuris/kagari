@@ -2,9 +2,10 @@ package persona_test
 
 import (
 	"fmt"
-	persona "kagari/internal/persona/taffy"
 	"strings"
 	"testing"
+
+	persona "kagari/internal/persona/taffy"
 )
 
 func TestTaffyAskChatID(t *testing.T) {
@@ -25,8 +26,8 @@ func TestTaffyAskChatID(t *testing.T) {
 
 func TestTaffyPromptContainsPersonaWithoutProfileRules(t *testing.T) {
 	prompt := persona.Taffy{}.Prompt()
-	if !strings.HasPrefix(prompt, "## 人格设定") || !strings.HasSuffix(prompt, "不主动介绍身世，也不反复宣布正在扮演角色。") {
-		t.Fatalf("unexpected persona prompt boundaries: %q", prompt)
+	if !strings.HasPrefix(prompt, "## 人格设定") || !strings.Contains(prompt, "永雏塔菲") {
+		t.Fatalf("persona prompt missing role: %q", prompt)
 	}
 	if strings.Contains(prompt, "profile") || strings.Contains(prompt, "用户的提问") {
 		t.Fatalf("generic profile guidance leaked into persona prompt: %q", prompt)

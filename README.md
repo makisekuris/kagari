@@ -118,6 +118,10 @@ Commands load `.env` from the current working directory; no `source` command is 
 
 Callers obtain the `persona.PersonaRole` interface through `persona.Default()` and inject it into the Agent and Telegram without depending on a concrete persona type. Selection lives in `internal/persona/main.go`; switch implementations there without changing callers. Implementations provide `Prompt() string` for persona and language style, and `AskChatID(int64) string` for job acknowledgements, and live in subpackages such as `internal/persona/taffy/`. Common task rules and Markdown style instructions remain independent.
 
+内置永雏塔菲（默认）和明前奶绿。使用奶绿时，将 `internal/persona/main.go` 的导入改为 `nailv "kagari/internal/persona/nailv"`，并在 `Default()` 中返回 `nailv.Nailv{}`。奶绿人格参考[公开角色资料](https://laplace.live/about)，采用花店店员的背景和亲切、慵懒、偶尔吐槽的语气。
+
+Built-in personas are Taffy (default) and Mingqian Nailv. To use Nailv, change the import in `internal/persona/main.go` to `nailv "kagari/internal/persona/nailv"` and return `nailv.Nailv{}` from `Default()`. Nailv draws on the [public character profile](https://laplace.live/about), using a flower shop assistant background and a friendly, laid-back tone with occasional teasing.
+
 Engine 构造时读取 `profile.md` 并冻结人格提示词；分析缓存键包含完整分析提示词，周报重试使用任务保存的提示词快照。修改 `profile.md` 后，长期运行的 `run` 服务需重启；单次 `analyze` 和 `digest` 命令会在执行时读取当前文件。修改人格实现后需重新构建程序；运行中的服务还需重启。暂不支持运行时切换角色。
 
 The Engine reads `profile.md` and freezes persona text when constructed. Analysis cache keys include the complete analysis prompt, and digest retries reuse the saved instruction snapshot. Restart a long-running `run` service after changing `profile.md`; one-shot `analyze` and `digest` commands read the current file when executed. Rebuild after changing persona code, then restart a running service to use the new binary. Runtime persona switching is not supported.
