@@ -170,6 +170,10 @@ Place the global `-config` flag before the subcommand. These examples use the lo
 
 Without `-cutoff`, `-start`, or `-end`, a digest uses the current time when the command runs as its cutoff. The same user, version, and exact time range can reuse a saved result. Empty digests need no model call. The default maximum is six attempts, including the first; intermediate failures do not send a final Telegram notice.
 
+周报首次冻结材料前，会等待同一用户、同一时间范围内尚未完成的分析，每分钟重新检查，等待不计入尝试次数。最终失败的分析数量会附在周报末尾。材料冻结后，重试继续复用快照。CLI 遇到等待时保留周报任务并退出，提示运行 `kagari run` 处理排队任务，或稍后使用相同时间范围重试。
+
+Before freezing its input, a digest waits for unfinished analyses belonging to the same user and time range, checking again after one minute without consuming an attempt. The rendered digest notes the number of analyses that ultimately failed. Retries reuse the frozen snapshot. When blocked by unfinished analyses, the CLI preserves the digest job and exits with instructions to run `kagari run` or retry the same time range later.
+
 CLI 的 `analyze` 和 `digest` 会启动任务处理器，不能与 `run` 或另一个处理型 CLI 命令同时运行。状态、导出和重试命令可以在服务运行时使用。
 
 CLI `analyze` and `digest` start a processor and must not run alongside `run` or another processing CLI command. Status, export, and retry commands can run while the service is active.

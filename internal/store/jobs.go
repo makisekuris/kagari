@@ -259,6 +259,22 @@ func (s *Store) InterruptJob(ctx context.Context, id int64, result []byte) error
 	return nil
 }
 
+// DeferJob requeues work that depends on another job without consuming an attempt or replacing its result.
+func (s *Store) DeferJob(ctx context.Context, id int64, reason string, retryAt time.Time) error {
+	updated, err := s.db.ExecContext(ctx, `UPDATE jobs SET status='pending',attempts=MAX(attempts-1,0),last_error=?,next_attempt_at=? WHERE id=? AND status='processing'`, reason, timestamp(retryAt), id)
+	if err != nil {
+		return err
+	}
+	count, err := updated.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("store: job %d is missing or is not processing", id)
+	}
+	return nil
+}
+
 func (s *Store) Job(ctx context.Context, id int64) (*domain.Job, error) {
 	job, err := scanJob(s.db.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM jobs WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {

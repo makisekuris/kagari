@@ -78,6 +78,159 @@ func archiveDigestEntry(t *testing.T, s *store.Store, key string, at time.Time) 
 	return id
 }
 
+func enqueuePendingDigestAnalysis(t *testing.T, s *store.Store, userID int64, key string, at time.Time) int64 {
+	t.Helper()
+	payload, _ := json.Marshal(domain.Submission{UserID: userID, ReceivedAt: at, CacheKey: key})
+	id, _, err := s.Enqueue(context.Background(), "analyze", key, payload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func failDigestAnalysis(t *testing.T, s *store.Store, userID int64, key string, at time.Time) int64 {
+	t.Helper()
+	ctx := context.Background()
+	id := enqueuePendingDigestAnalysis(t, s, userID, key, at)
+	if _, err := s.StartJob(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FailJob(ctx, id, []byte(`{"partial":true}`), "temporary", 1, time.Now().Add(time.Hour), nil); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestDigestWaitsForRetryingAnalysisWithoutSpendingAttempts(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	analysisID := enqueuePendingDigestAnalysis(t, s, 7, "retrying-analysis", now.Add(-time.Hour))
+	if _, err := s.StartJob(ctx, analysisID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FailJob(ctx, analysisID, []byte(`{"partial":true}`), "temporary", 3, now.Add(time.Hour), nil); err != nil {
+		t.Fatal(err)
+	}
+	var modelCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		modelCalls++
+		w.Header().Set("Content-Type", "application/json")
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		input := digestModelInput(t, body)
+		if len(input.Entries) != 1 || input.Entries[0].Body != "退避后成功的分析" {
+			t.Errorf("digest input omitted the completed analysis: %+v", input.Entries)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_wait", "object": "response", "status": "completed", "model": "test", "output": []any{map[string]any{"type": "message", "id": "msg_wait", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": digestModelReview(input), "annotations": []any{}}}}}})
+	}))
+	defer server.Close()
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Model.BaseURL, cfg.Model.Name, cfg.Model.APIKey = server.URL+"/v1", "test", "fake"
+	cfg.ProfilePath = t.TempDir() + "/missing"
+	cfg.MaxAttempts = 1
+	worker := &Worker{Store: s, Config: cfg, Log: zap.NewNop()}
+	request := domain.DigestRequest{Version: domain.DigestVersion, UserID: 7, Start: now.Add(-2 * time.Hour), End: now}
+	digestID, _, err := worker.EnqueueDigest(ctx, request, telegram.Targets([]int64{900}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	deferred, err := worker.ProcessJob(ctx, digestID)
+	if err == nil || !strings.Contains(err.Error(), "kagari run") || deferred == nil || deferred.Status != "pending" || deferred.Attempts != 0 || len(deferred.Result) != 0 || deferred.NextAttemptAt.Before(started.Add(50*time.Second)) || modelCalls != 0 {
+		t.Fatalf("digest did not defer cleanly: job=%+v err=%v modelCalls=%d", deferred, err, modelCalls)
+	}
+	counts, err := s.DeliveryCounts(ctx, digestID)
+	if err != nil || len(counts) != 0 {
+		t.Fatalf("deferred digest wrote deliveries: %v, %v", counts, err)
+	}
+	if _, err := s.StartJob(ctx, analysisID); err != nil {
+		t.Fatal(err)
+	}
+	result, _ := json.Marshal(domain.Result{Kind: domain.ResultKindAnalysis, Body: "退避后成功的分析", CreatedAt: now})
+	if err := s.CompletePublication(ctx, analysisID, result, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	job, err := s.StartJob(ctx, digestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Process(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := s.Job(ctx, digestID)
+	var report digest.Report
+	if err != nil || completed.Status != "completed" || json.Unmarshal(completed.Result, &report) != nil || report.Input == nil || len(report.Input.Entries) != 1 || report.Input.Entries[0].Body != "退避后成功的分析" || modelCalls != 1 {
+		t.Fatalf("digest did not include recovered analysis: job=%+v report=%+v err=%v modelCalls=%d", completed, report, err, modelCalls)
+	}
+}
+
+func TestDigestWaitIsScopedToOwnerAndHalfOpenPeriod(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	start := now.Add(-24 * time.Hour)
+	enqueuePendingDigestAnalysis(t, s, 8, "other-owner-pending", now.Add(-time.Hour))
+	enqueuePendingDigestAnalysis(t, s, 7, "outside-period-pending", start.Add(-time.Second))
+	enqueuePendingDigestAnalysis(t, s, 7, "cutoff-pending", now)
+	failDigestAnalysis(t, s, 8, "other-owner-failed", now.Add(-time.Hour))
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Model.APIKey = ""
+	worker := &Worker{Store: s, Config: cfg, Log: zap.NewNop()}
+	id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{Version: domain.DigestVersion, UserID: 7, Start: start, End: now}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := worker.ProcessJob(ctx, id)
+	var report digest.Report
+	if err != nil || job.Status != "completed" || json.Unmarshal(job.Result, &report) != nil || report.FailedAnalyses != 0 || report.Input == nil || len(report.Input.Entries) != 0 {
+		t.Fatalf("other owner or out-of-period analysis blocked digest: job=%+v report=%+v err=%v", job, report, err)
+	}
+}
+
+func TestEmptyDigestReportsFailedAnalyses(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	failDigestAnalysis(t, s, 7, "failed-analysis", now.Add(-time.Hour))
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Model.APIKey = ""
+	worker := &Worker{Store: s, Config: cfg, Log: zap.NewNop()}
+	id, _, err := worker.EnqueueDigest(ctx, domain.DigestRequest{Version: domain.DigestVersion, UserID: 7, Start: now.Add(-2 * time.Hour), End: now}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := worker.ProcessJob(ctx, id)
+	var report digest.Report
+	if err != nil || job.Status != "completed" || json.Unmarshal(job.Result, &report) != nil || report.FailedAnalyses != 1 || !strings.Contains(digest.Render(report), "另有 1 条分析失败，未纳入本周报") {
+		t.Fatalf("empty digest omitted failed count: job=%+v report=%+v err=%v", job, report, err)
+	}
+}
+
 func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	ctx := context.Background()
 	path := t.TempDir() + "/archive.db"
@@ -89,6 +242,7 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	now := time.Now().UTC()
 	archiveDigestEntry(t, s, "first", now.Add(-time.Hour))
 	archiveDigestEntry(t, s, "second", now.Add(-2*time.Hour))
+	failDigestAnalysis(t, s, 7, "failed", now.Add(-90*time.Minute))
 	var inputs []string
 	var modelInputs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,13 +293,15 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	}
 	failed, _ := s.Job(ctx, id)
 	var snapshot digest.Report
-	if err := json.Unmarshal(failed.Result, &snapshot); err != nil || snapshot.Input == nil || snapshot.Body != "" {
+	if err := json.Unmarshal(failed.Result, &snapshot); err != nil || snapshot.Input == nil || snapshot.Body != "" || snapshot.FailedAnalyses != 1 {
 		t.Fatalf("failed attempt lost input: %+v %v", snapshot, err)
 	}
 	if !strings.Contains(snapshot.Input.Instruction, initialPersona.Prompt()) {
 		t.Fatal("digest snapshot did not freeze the injected persona")
 	}
-	archiveDigestEntry(t, s, "late", now.Add(-3*time.Hour))
+	archiveDigestEntry(t, s, "late-completed", now.Add(-3*time.Hour))
+	enqueuePendingDigestAnalysis(t, s, 7, "late-pending", now.Add(-3*time.Hour))
+	failDigestAnalysis(t, s, 7, "late-failed", now.Add(-3*time.Hour))
 	replacement, err := agent.New(ctx, cfg, nil, nil, digestTestPersona("replacement-persona"))
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +314,7 @@ func TestDigestRetryFreezesInputAndRecoveryReplaysOutput(t *testing.T) {
 	}
 	// 模拟生成已完成、尚未提交 outbox 时进程退出。
 	report, text, err := worker.processDigest(ctx, job)
-	if err != nil || len(inputs) != 2 || inputs[0] != inputs[1] || strings.Contains(inputs[0], "全文不应") || len(report.Input.Entries) != 2 || report.Input.Profile != "初始表达偏好" || report.Usage.TotalTokens != 18 || !strings.HasPrefix(text, "## 本周阅读") {
+	if err != nil || len(inputs) != 2 || inputs[0] != inputs[1] || strings.Contains(inputs[0], "全文不应") || len(report.Input.Entries) != 2 || report.Input.Profile != "初始表达偏好" || report.Usage.TotalTokens != 18 || report.FailedAnalyses != 1 || !strings.Contains(text, "另有 1 条分析失败，未纳入本周报") || !strings.HasPrefix(text, "## 本周阅读") {
 		t.Fatalf("snapshot/generation: %+v %q err=%v inputs=%v", report, text, err, inputs)
 	}
 	if modelInputs[0] != modelInputs[1] || strings.Contains(modelInputs[1], "replacement-persona") {

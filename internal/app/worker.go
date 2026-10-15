@@ -111,6 +111,14 @@ func (w *Worker) Process(ctx context.Context, job *domain.Job) error {
 		return err
 	}
 	if workErr != nil {
+		if errors.Is(workErr, errDigestPending) {
+			persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := w.Store.DeferJob(persistCtx, job.ID, workErr.Error(), time.Now().Add(time.Minute)); err != nil {
+				return err
+			}
+			return workErr
+		}
 		// 上下文取消时也保存部分结果并重新排队；endpoint 的原始错误或响应正文不能写入日志。
 		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()

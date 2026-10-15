@@ -17,6 +17,8 @@ import (
 	"kagari/internal/domain"
 )
 
+var errDigestPending = errors.New("weekly digest is waiting for pending analyses")
+
 func (w *Worker) EnqueueDigest(ctx context.Context, request domain.DigestRequest, targets []domain.DeliveryTarget) (int64, bool, error) {
 	if !request.Start.Before(request.End) {
 		return 0, false, errors.New("start must be before end")
@@ -50,6 +52,13 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 		}
 	}
 	if report.Input == nil {
+		_, pending, failed, err := w.Store.Stats(ctx, request.UserID, request.Start, request.End)
+		if err != nil {
+			return report, "", err
+		}
+		if pending > 0 {
+			return report, "", errDigestPending
+		}
 		entries, err := w.Store.Entries(ctx, request.UserID, request.Start, request.End)
 		if err != nil {
 			return report, "", err
@@ -75,7 +84,7 @@ func (w *Worker) processDigest(ctx context.Context, job *domain.Job) (report dig
 		if err != nil {
 			return report, "", err
 		}
-		report = digest.Report{Version: domain.DigestVersion, UserID: request.UserID, Start: request.Start.UTC(), End: request.End.UTC(), GeneratedAt: now, Input: &input}
+		report = digest.Report{Version: domain.DigestVersion, UserID: request.UserID, Start: request.Start.UTC(), End: request.End.UTC(), GeneratedAt: now, FailedAnalyses: failed, Input: &input}
 		if err := w.saveDigestProgress(ctx, job.ID, report); err != nil {
 			return report, "", err
 		}

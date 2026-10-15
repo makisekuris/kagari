@@ -65,3 +65,23 @@ func TestWeeklyDigestCheck(t *testing.T) {
 	}
 
 }
+
+func TestRenderIncludesFailedAnalysisCount(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "empty", want: "另有 2 条分析失败，未纳入本周报。"},
+		{name: "nonempty", body: "本周阅读", want: "本周阅读\n\n另有 2 条分析失败，未纳入本周报。"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Render(Report{Body: tc.body, FailedAnalyses: 2}); got != tc.want {
+				t.Fatalf("Render() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got := Render(Report{Body: "正文"}); got != "正文" {
+		t.Fatalf("zero failed count changed rendering: %q", got)
+	}
+}

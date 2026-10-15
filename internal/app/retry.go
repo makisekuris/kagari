@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -42,6 +43,9 @@ func (w *Worker) processJob(ctx context.Context, id int64, wait func(context.Con
 				persisted, stateErr := w.Store.Job(ctx, id)
 				if stateErr != nil {
 					return nil, stateErr
+				}
+				if errors.Is(err, errDigestPending) && persisted != nil && persisted.Status == "pending" {
+					return persisted, fmt.Errorf("task #%d is waiting for analyses to finish; run `kagari run` with the same configuration or try again later: %w", id, err)
 				}
 				if persisted == nil || persisted.Status == "processing" {
 					return persisted, err

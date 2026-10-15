@@ -75,3 +75,33 @@ func TestFailureEvidenceAndFinalNoticeAreAtomic(t *testing.T) {
 		t.Fatalf("manual retry round did not get its own final notice: %d, %v", count, err)
 	}
 }
+
+func TestDeferJobPreservesProgressAndDoesNotConsumeAttempt(t *testing.T) {
+	s := testStore(t, ":memory:")
+	ctx := context.Background()
+	id, _, err := s.Enqueue(ctx, "digest", "defer", []byte(`{"user_id":7}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartJob(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	progress := []byte(`{"snapshot":"frozen"}`)
+	if err := s.SaveJobProgress(ctx, id, progress); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FailJob(ctx, id, progress, "temporary", 3, time.Now(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartJob(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	retryAt := time.Now().Add(time.Minute)
+	if err := s.DeferJob(ctx, id, "waiting for analyses", retryAt); err != nil {
+		t.Fatal(err)
+	}
+	job, err := s.Job(ctx, id)
+	if err != nil || job.Status != "pending" || job.Attempts != 1 || string(job.Result) != string(progress) || job.LastError != "waiting for analyses" || !job.NextAttemptAt.Equal(retryAt) {
+		t.Fatalf("deferred job lost progress or consumed an attempt: %+v, %v", job, err)
+	}
+}

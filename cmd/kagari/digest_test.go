@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"kagari/internal/app"
 	"kagari/internal/config"
+	"kagari/internal/domain"
 	"kagari/internal/store"
 )
 
@@ -42,5 +44,41 @@ func TestDigestCutoffAndLocalReplay(t *testing.T) {
 	}
 	if err := runDigest(context.Background(), worker, args, &second); err != nil || first.String() != second.String() || !strings.HasPrefix(second.String(), "所选时间范围内暂无") {
 		t.Fatalf("local replay: %q %q %v", first.String(), second.String(), err)
+	}
+}
+
+func TestDigestCommandDefersWhenAnalysisIsPending(t *testing.T) {
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	worker := &app.Worker{Store: s, Config: cfg, Log: zap.NewNop()}
+	cutoff := time.Now().UTC()
+	args := []string{"-user", "7", "-cutoff", cutoff.Format(time.RFC3339Nano)}
+	request, err := digestRequest(args, cutoff, cfg.Weekly.Timezone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(domain.Submission{UserID: 7, ReceivedAt: cutoff.Add(-time.Hour), CacheKey: "pending"})
+	if _, _, err := s.Enqueue(context.Background(), "analyze", "pending", payload, nil); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = runDigest(context.Background(), worker, args, &output)
+	if err == nil || !strings.Contains(err.Error(), "kagari run") || !strings.Contains(err.Error(), "later") || output.Len() != 0 {
+		t.Fatalf("digest command did not report its dependency: output=%q err=%v", output.String(), err)
+	}
+	id, created, err := worker.EnqueueDigest(context.Background(), request, nil)
+	if err != nil || created {
+		t.Fatalf("digest command lost idempotency: id=%d created=%v err=%v", id, created, err)
+	}
+	job, err := s.Job(context.Background(), id)
+	if err != nil || job.Status != "pending" || job.Attempts != 0 || len(job.Result) != 0 {
+		t.Fatalf("deferred CLI task was not preserved: %+v %v", job, err)
 	}
 }
