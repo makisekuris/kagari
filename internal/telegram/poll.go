@@ -37,6 +37,18 @@ type updatesResponse struct {
 }
 
 func (c *Client) Poll(ctx context.Context) error {
+	return pollUpdates(ctx, c.store.Offset, c.getUpdates, c.acceptUpdate, func(ctx context.Context, updateID int64) error {
+		_, _, err := c.store.AcceptUpdate(ctx, updateID, "", "", nil, nil)
+		return err
+	}, c.log)
+}
+
+type offsetReader func(context.Context) (int64, error)
+type updateReader func(context.Context, int64) ([]json.RawMessage, error)
+type updateAcceptor func(context.Context, *models.Update) error
+type malformedUpdateAcceptor func(context.Context, int64) error
+
+func pollUpdates(ctx context.Context, readOffset offsetReader, readUpdates updateReader, accept updateAcceptor, acceptMalformed malformedUpdateAcceptor, log *zap.Logger) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -45,14 +57,14 @@ func (c *Client) Poll(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		offset, err := c.store.Offset(ctx)
+		offset, err := readOffset(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return errors.New("Telegram update state is unavailable")
 		}
-		updates, err := c.getUpdates(ctx, offset)
+		updates, err := readUpdates(ctx, offset)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -65,7 +77,7 @@ func (c *Client) Poll(ctx context.Context) error {
 			if errors.As(err, &apiErr) && apiErr.retryAfter > 0 {
 				wait = apiErr.retryAfter
 			}
-			c.log.Warn("Telegram polling failed; retrying", zap.Duration("retry_after", wait))
+			log.Warn("Telegram polling failed; retrying", zap.Duration("retry_after", wait))
 			if !sleep(ctx, wait) {
 				return nil
 			}
@@ -87,13 +99,13 @@ func (c *Client) Poll(ctx context.Context) error {
 					return errors.New("Telegram returned an unreadable update")
 				}
 				// 即使内容无法读取，也按无来源的 update 原子推进 offset，避免重复阻塞轮询。
-				if _, _, err := c.store.AcceptUpdate(ctx, *malformed.ID, "", "", nil, nil); err != nil {
+				if err := acceptMalformed(ctx, *malformed.ID); err != nil {
 					return errors.New("Telegram update could not be saved")
 				}
-				c.log.Warn("discarded unreadable Telegram update", zap.Int64("update_id", *malformed.ID))
+				log.Warn("discarded unreadable Telegram update", zap.Int64("update_id", *malformed.ID))
 				continue
 			}
-			if err := c.acceptUpdate(ctx, &update); err != nil {
+			if err := accept(ctx, &update); err != nil {
 				return err
 			}
 		}
@@ -101,18 +113,22 @@ func (c *Client) Poll(ctx context.Context) error {
 }
 
 func (c *Client) getUpdates(ctx context.Context, offset int64) ([]json.RawMessage, error) {
+	return getUpdates(ctx, c.http, c.baseURL, c.config.Token, offset)
+}
+
+func getUpdates(ctx context.Context, client *http.Client, baseURL, token string, offset int64) ([]json.RawMessage, error) {
 	query := url.Values{
 		"offset":  {fmt.Sprint(offset)},
 		"limit":   {"100"},
 		"timeout": {fmt.Sprint(pollTimeout)},
 	}
-	endpoint := c.baseURL + "/bot" + c.config.Token + "/getUpdates?" + query.Encode()
+	endpoint := baseURL + "/bot" + token + "/getUpdates?" + query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, errors.New("could not create Telegram polling request")
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New("Telegram polling transport failed")
 	}

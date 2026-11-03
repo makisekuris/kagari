@@ -53,9 +53,6 @@ func newClient(cfg config.Telegram, st *store.Store, prepare func(domain.Submiss
 	if !validToken(cfg.Token) || len(cfg.AllowedUserIDs) == 0 || st == nil || prepare == nil {
 		return nil, errors.New("telegram token, allowlist, store, and prepare function are required")
 	}
-	if strings.TrimSpace(baseURL) == "" {
-		return nil, errors.New("telegram API URL is required")
-	}
 	if log == nil {
 		log = zap.NewNop()
 	}
@@ -65,6 +62,17 @@ func newClient(cfg config.Telegram, st *store.Store, prepare func(domain.Submiss
 			return nil, errors.New("telegram allowlist IDs must be positive")
 		}
 		allowed[id] = struct{}{}
+	}
+	httpClient, sdk, baseURL, err := newAPI(cfg.Token, baseURL, transport)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{config: cfg, allowed: allowed, store: st, prepare: prepare, replies: replies, log: log, http: httpClient, bot: sdk, baseURL: baseURL}, nil
+}
+
+func newAPI(token, baseURL string, transport http.RoundTripper) (*http.Client, *telegrambot.Bot, string, error) {
+	if strings.TrimSpace(baseURL) == "" {
+		return nil, nil, "", errors.New("telegram API URL is required")
 	}
 	if transport == nil {
 		transport = &http.Transport{Proxy: nil}
@@ -77,15 +85,15 @@ func newClient(cfg config.Telegram, st *store.Store, prepare func(domain.Submiss
 		},
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
-	sdk, err := telegrambot.New(cfg.Token,
+	sdk, err := telegrambot.New(token,
 		telegrambot.WithSkipGetMe(),
 		telegrambot.WithServerURL(baseURL),
 		telegrambot.WithHTTPClient(httpTimeout, httpClient),
 	)
 	if err != nil {
-		return nil, errors.New("could not initialize Telegram client")
+		return nil, nil, "", errors.New("could not initialize Telegram client")
 	}
-	return &Client{config: cfg, allowed: allowed, store: st, prepare: prepare, replies: replies, log: log, http: httpClient, bot: sdk, baseURL: baseURL}, nil
+	return httpClient, sdk, baseURL, nil
 }
 
 func validToken(token string) bool {
@@ -101,6 +109,10 @@ func validToken(token string) bool {
 }
 
 func (c *Client) Send(ctx context.Context, chatID int64, content domain.Content) (int64, error) {
+	return sendTelegram(c.bot, ctx, chatID, content)
+}
+
+func sendTelegram(bot *telegrambot.Bot, ctx context.Context, chatID int64, content domain.Content) (int64, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -108,7 +120,7 @@ func (c *Client) Send(ctx context.Context, chatID int64, content domain.Content)
 	var err error
 	switch content.Format {
 	case domain.ContentPlainText:
-		message, err = c.bot.SendMessage(ctx, &telegrambot.SendMessageParams{
+		message, err = bot.SendMessage(ctx, &telegrambot.SendMessageParams{
 			ChatID: chatID,
 			Text:   content.Text,
 			LinkPreviewOptions: &models.LinkPreviewOptions{
@@ -116,7 +128,7 @@ func (c *Client) Send(ctx context.Context, chatID int64, content domain.Content)
 			},
 		})
 	case domain.ContentMarkdown:
-		message, err = c.bot.SendRichMessage(ctx, &telegrambot.SendRichMessageParams{
+		message, err = bot.SendRichMessage(ctx, &telegrambot.SendRichMessageParams{
 			ChatID:      chatID,
 			RichMessage: models.InputRichMessage{Markdown: content.Text},
 		})
