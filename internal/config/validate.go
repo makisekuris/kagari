@@ -9,6 +9,20 @@ import (
 	"time"
 )
 
+// ValidatePersonal checks the single owner's service, independently of archive CLI commands.
+func (c Config) ValidatePersonal() error {
+	if err := c.Validate(true, true); err != nil {
+		return err
+	}
+	if len(c.Telegram.AllowedUserIDs) != 1 || len(c.Telegram.TargetChatIDs) != 0 {
+		return errors.New("personal mode requires exactly one telegram.allowed_user_ids entry and no target_chat_ids")
+	}
+	if c.Personal.TaskConcurrency < 1 || c.Personal.TaskBudget < time.Millisecond {
+		return errors.New("personal.task_concurrency must be positive and personal.task_budget at least 1ms")
+	}
+	return nil
+}
+
 // Validate 先校验所有命令共享的边界，再按调用方需求检查凭证。
 // read 和归档回放不要求凭证；生成非空周报及 analyze/run 再启用模型检查。
 func (c Config) Validate(modelRequired, telegramRequired bool) error {

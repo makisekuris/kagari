@@ -11,6 +11,7 @@ type Config struct {
 	Reader      Reader   `mapstructure:"reader"`
 	Browser     Browser  `mapstructure:"browser"`
 	Agent       Agent    `mapstructure:"agent"`
+	Personal    Personal `mapstructure:"personal"`
 	Weekly      Weekly   `mapstructure:"weekly"`
 	ProfilePath string   `mapstructure:"profile_path"`
 	LogLevel    string   `mapstructure:"log_level"`
@@ -23,6 +24,11 @@ type Model struct {
 	Name            string        `mapstructure:"name"`
 	Timeout         time.Duration `mapstructure:"timeout"`
 	MaxOutputTokens int           `mapstructure:"max_output_tokens"`
+}
+
+type Personal struct {
+	TaskConcurrency int           `mapstructure:"task_concurrency"`
+	TaskBudget      time.Duration `mapstructure:"task_budget"`
 }
 
 type Telegram struct {
