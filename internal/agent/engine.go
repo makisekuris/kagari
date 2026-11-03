@@ -224,7 +224,8 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[*schema.AgenticMessage]{Agent: a, EnableStreaming: e.Config.Agent.Streaming})
 	stage = "model"
 	modelCalled = true
-	it := runner.Query(ctx, e.analysisInput(s, session.sources), adk.WithChatModelOptions([]model.Option{analysisOutputOption()}))
+	// Keep function calls available on endpoints that suppress tools under a text JSON Schema.
+	it := runner.Query(ctx, e.analysisInput(s, session.sources))
 	var rawOutput string
 	rawOutput, result.Usage, usageReported, err = e.consumeEvents(it, e.Config.Agent.MaxIterations)
 	if err != nil {

@@ -6,11 +6,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
-	"github.com/cloudwego/eino/components/model"
-	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
-
 	"kagari/internal/domain"
 )
 
@@ -18,21 +13,6 @@ var (
 	errInvalidAnalysisOutput = errors.New("invalid analysis output")
 	errModelResponseRefused  = errors.New("model response refused")
 )
-
-func analysisOutputOption() model.Option {
-	return agenticopenai.WithResponsesText(&responses.ResponseTextConfigParam{
-		Format: responses.ResponseFormatTextConfigUnionParam{OfJSONSchema: &responses.ResponseFormatTextJSONSchemaConfigParam{
-			Name:   "analysis_output",
-			Strict: param.NewOpt(true),
-			Schema: map[string]any{
-				"type":                 "object",
-				"properties":           map[string]any{"kind": map[string]any{"type": "string", "enum": []string{string(domain.ResultKindAnalysis), string(domain.ResultKindChat)}}, "body": map[string]any{"type": "string"}},
-				"required":             []string{"kind", "body"},
-				"additionalProperties": false,
-			},
-		}},
-	})
-}
 
 func decodeAnalysisOutput(raw string) (domain.ResultKind, string, error) {
 	dec := json.NewDecoder(strings.NewReader(raw))

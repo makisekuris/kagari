@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -53,18 +52,13 @@ func responseAnalysis(kind domain.ResultKind, body string) []any {
 	return responseText(string(encoded))
 }
 
-func requireAnalysisSchema(t *testing.T, request map[string]any) {
+func requireAnalysisToolMode(t *testing.T, request map[string]any) {
 	t.Helper()
 	textConfig, _ := request["text"].(map[string]any)
 	format, _ := textConfig["format"].(map[string]any)
-	schema, _ := format["schema"].(map[string]any)
-	properties, _ := schema["properties"].(map[string]any)
-	kind, _ := properties["kind"].(map[string]any)
-	if format["type"] != "json_schema" || format["name"] != "analysis_output" || format["strict"] != true ||
-		schema["type"] != "object" || schema["additionalProperties"] != false ||
-		!reflect.DeepEqual(schema["required"], []any{"kind", "body"}) ||
-		!reflect.DeepEqual(kind["enum"], []any{"analysis", "chat"}) {
-		t.Errorf("analysis request omitted the strict output schema: %v", request["text"])
+	tools, _ := request["tools"].([]any)
+	if format["type"] == "json_schema" || len(tools) == 0 {
+		t.Errorf("analysis must expose tools without forcing final JSON format: tools=%d format=%v", len(tools), format["type"])
 	}
 }
 
@@ -110,7 +104,7 @@ func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T
 		}
 		serialized, _ := json.Marshal(body)
 		requests = append(requests, string(serialized))
-		requireAnalysisSchema(t, body)
+		requireAnalysisToolMode(t, body)
 		call := int(calls.Add(1))
 		if call > 1 {
 			input, _ := json.Marshal(body["input"])
@@ -213,7 +207,7 @@ func TestAnalyzeStructuredOutputStreamingAndNonStreaming(t *testing.T) {
 					if (request["stream"] == true) != streaming {
 						t.Errorf("stream=%v, want %t", request["stream"], streaming)
 					}
-					requireAnalysisSchema(t, request)
+					requireAnalysisToolMode(t, request)
 					output := responseAnalysis(kind, bodyText)
 					response := map[string]any{"id": "resp", "object": "response", "status": "completed", "model": "fixture", "output": output, "usage": map[string]any{"input_tokens": 4, "output_tokens": 3, "total_tokens": 7}}
 					if !streaming {
@@ -259,7 +253,7 @@ func TestAnalyzeStreamingToolRoundTripUsesStructuredOutput(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		requireAnalysisSchema(t, request)
+		requireAnalysisToolMode(t, request)
 		if request["stream"] != true {
 			t.Errorf("stream=%v, want true", request["stream"])
 		}
@@ -315,7 +309,7 @@ func TestAnalyzeRefusalKeepsReadingsAndUsageWithoutPublishingRawOutput(t *testin
 			t.Error(err)
 			return
 		}
-		requireAnalysisSchema(t, request)
+		requireAnalysisToolMode(t, request)
 		if calls.Add(1) == 1 {
 			writeResponse(w, 1, responseTool("read_url", target, "read-source"))
 			return
@@ -359,7 +353,7 @@ func TestAnalyzeRejectsIncompleteResponseWithParseableJSON(t *testing.T) {
 					t.Error(err)
 					return
 				}
-				requireAnalysisSchema(t, request)
+				requireAnalysisToolMode(t, request)
 				writeResponseWithStatus(w, tc.status, responseAnalysis(domain.ResultKindAnalysis, "parseable final JSON"))
 			}))
 			defer server.Close()
