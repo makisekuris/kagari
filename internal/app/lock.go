@@ -25,4 +25,5 @@ func Lock(path string) (func(), error) {
 		return nil, fmt.Errorf("another processor holds the database lock: %w", err)
 	}
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
+
 }

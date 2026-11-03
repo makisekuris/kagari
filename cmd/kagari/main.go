@@ -12,7 +12,6 @@ import (
 	"strings"
 	"syscall"
 
-	"go.uber.org/zap"
 	"kagari/internal/agent"
 	"kagari/internal/app"
 	"kagari/internal/browser"
@@ -22,6 +21,8 @@ import (
 	"kagari/internal/reader"
 	"kagari/internal/render"
 	"kagari/internal/store"
+
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -39,7 +40,7 @@ func run() error {
 	}
 	args := root.Args()
 	if len(args) == 0 {
-		return errors.New("commands: read, analyze, run, digest, status, export, retry, retry-delivery, db")
+		return errors.New("commands: run, tasks, runs, memories, memory-history, read, analyze, digest, status, export, retry, retry-delivery, db")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -62,6 +63,10 @@ func run() error {
 	if args[0] == "db" {
 		return runDB(ctx, cfg.Storage.Path, args[1:], os.Stdout)
 	}
+	switch args[0] {
+	case "tasks", "runs", "memories", "memory-history":
+		return inspectPersonal(ctx, cfg, args, os.Stdout)
+	}
 	r := reader.New(reader.Options{Timeout: cfg.Reader.Timeout, MaxBytes: cfg.Reader.MaxBytes, MaxContentChars: cfg.Reader.MaxContentChars, MaxLinks: cfg.Reader.MaxLinks, AllowedNonPublicCIDRs: cfg.Reader.AllowedNonPublicCIDRs})
 	if args[0] == "read" {
 		if len(args) != 2 {
@@ -73,7 +78,13 @@ func run() error {
 		}
 		return readErr
 	}
-	processor := args[0] == "analyze" || args[0] == "run" || args[0] == "digest"
+	if args[0] == "run" {
+		if len(args) != 1 {
+			return errors.New("usage: kagari run")
+		}
+		return runPersonal(ctx, cfg, r.Read, log)
+	}
+	processor := args[0] == "analyze" || args[0] == "digest"
 	// 先取得处理器锁再恢复任务，避免 CLI 将运行中服务的 processing/sending 状态改写。
 	if processor {
 		unlock, err := app.Lock(cfg.Storage.Path)
@@ -94,7 +105,7 @@ func run() error {
 	}
 	role := persona.Default()
 	w := &app.Worker{Store: s, Config: cfg, Log: log, Persona: role, Replies: role}
-	if args[0] == "analyze" || args[0] == "run" {
+	if args[0] == "analyze" {
 		e, err := agent.New(ctx, cfg, r.Read, s.CachedSource, role)
 		if err != nil {
 			return err
@@ -108,11 +119,6 @@ func run() error {
 		w.Engine = e
 	}
 	switch args[0] {
-	case "run":
-		if len(args) != 1 {
-			return errors.New("usage: kagari run")
-		}
-		return app.Run(ctx, w)
 	case "analyze":
 		flags := flag.NewFlagSet("analyze", flag.ContinueOnError)
 		question := flags.String("question", "", "question to explore")
