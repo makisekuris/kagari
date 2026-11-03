@@ -1,12 +1,12 @@
 # Kagari
 
-Kagari 是一个 Go 个人阅读助手。它从 CLI 或 Telegram 接收问题、转发文本和链接，由 Agent 自主读取页面、追读相关链接，并选择生成 Markdown 分析或普通对话回复。来源和读取记录保存到 SQLite。周报基于归档分析正文回顾。
+Kagari 是一个 Go 个人 Agent。`kagari run` 启动面向单一使用者的 Telegram 私聊服务，持续推进后台任务并维护长期记忆。`read`、`analyze`、`digest`、`status`、`export`、`retry`、`retry-delivery` 和 `db` CLI 仍操作 V1 阅读归档；V2 服务不处理 V1 队列或调度 V1 周报。
 
-Kagari is a personal reading assistant written in Go. It accepts questions, forwarded text and links from the CLI or Telegram. An agent reads relevant pages and follows links, choosing between a Markdown analysis and a conversational reply. Sources and read records are saved to SQLite. Digests review archived analyses.
+Kagari is a personal agent written in Go. `kagari run` starts a Telegram private-chat service for one owner, continuing background tasks and maintaining long-term memory. The `read`, `analyze`, `digest`, `status`, `export`, `retry`, `retry-delivery`, and `db` CLI commands still operate on V1 reading archives; the V2 service does not process the V1 queue or schedule V1 digests.
 
-运行需要 Go 1.27；进程锁使用 `flock`，支持 macOS 和 Linux。模型 endpoint、Telegram bot 和频道权限由部署者配置。
+运行需要 Go 1.27；进程锁使用 `flock`，支持 macOS 和 Linux。部署者提供模型 endpoint 和 Telegram bot；V2 只向配置的 owner 私聊回复。
 
-Requires Go 1.27. The process lock uses `flock` and supports macOS and Linux. You provide the model endpoint, Telegram bot, and any channel permissions.
+Requires Go 1.27. The process lock uses `flock` and supports macOS and Linux. You provide the model endpoint and Telegram bot; V2 replies only to the configured owner's private chat.
 
 ## 日常操作 / Everyday commands
 
@@ -20,7 +20,7 @@ Run `make` or `make help` from the project root to list commands. Requires Go an
 | `make build` | 为当前平台构建 `bin/kagari` / Build `bin/kagari` for the current platform |
 | `make build-mac` | 构建 macOS arm64 产物 / Build for macOS arm64 |
 | `make build-linux` | 构建 Linux amd64 产物 / Build for Linux amd64 |
-| `make run` | 构建并启动 Telegram 服务 / Build and start the Telegram service |
+| `make run` | 构建并启动 V2 Telegram personal 服务 / Build and start the V2 Telegram personal service |
 | `make cli ARGS='...'` | 构建并执行任意 CLI 子命令 / Build and execute any CLI subcommand |
 | `make check` | 运行全部测试和 `go vet` / Run all tests and `go vet` |
 | `make test` / `make vet` | 单独运行测试或静态检查 / Run tests or static checks separately |
@@ -37,12 +37,17 @@ make cli ARGS='analyze -question "这项设计有哪些取舍？" -user 123456'
 make cli ARGS='digest -user 123456'
 make cli ARGS='status 17'
 make cli ARGS='db info'
+make cli ARGS='tasks'
+make cli ARGS='tasks 1'
+make cli ARGS='runs 1'
+make cli ARGS='memories "answer style"'
+make cli ARGS='memory-history answer_style'
 make run CONFIG=path/to/config.yaml
 ```
 
-`run` 和 `cli` 每次先构建，构建失败则停止。`CONFIG` 默认是 `config.yaml`，可在这两个目标上覆盖；`.env` 仍从当前工作目录读取。`ARGS` 按 shell 参数解析，包含空格的单个参数需像上面的 `-note` 一样加引号。其他子命令与数据库清理要求见下文。
+`run` 和 `cli` 每次先构建，构建失败则停止。`CONFIG` 默认是 `config.yaml`，可在这两个目标上覆盖；`.env` 仍从当前工作目录读取。`ARGS` 按 shell 参数解析，包含空格的单个参数需像上面的 `-note` 一样加引号。V2 检查命令输出 JSON；旧版 `status`、`export` 和 retry 命令读取 V1 归档队列。数据库命令的范围见下文。
 
-`run` and `cli` build first on every invocation and stop if the build fails. `CONFIG` defaults to `config.yaml` and can be overridden for either target; `.env` is still loaded from the current working directory. `ARGS` is parsed as shell arguments; quote individual arguments containing spaces as shown with `-note`. See below for other subcommands and database clearing requirements.
+`run` and `cli` build first on every invocation and stop if the build fails. `CONFIG` defaults to `config.yaml` and can be overridden for either target; `.env` is still loaded from the current working directory. `ARGS` is parsed as shell arguments; quote individual arguments containing spaces as shown with `-note`. The V2 inspection commands print JSON; `status`, `export`, and retry commands inspect the separate V1 archive queue. See below for database limits.
 
 跨平台构建关闭 CGO，产物名称包含平台和架构。macOS 默认使用 Apple Silicon 的 `arm64`，Intel Mac 使用 `MAC_ARCH=amd64`；Linux 默认使用 `amd64`，ARM 服务器使用 `LINUX_ARCH=arm64`：
 
@@ -71,9 +76,19 @@ Copy the examples, leaving existing local files unchanged:
 make init
 ```
 
-在 `.env` 中填写 `KAGARI_MODEL_BASE_URL`、`KAGARI_MODEL_NAME` 和 `KAGARI_MODEL_API_KEY`。使用 Telegram 时填写 `KAGARI_TELEGRAM_TOKEN`，并在 `config.yaml` 的 `telegram.allowed_user_ids` 中加入允许使用 bot 的用户 ID。
+在 `.env` 中填写 `KAGARI_MODEL_BASE_URL`、`KAGARI_MODEL_NAME`、`KAGARI_MODEL_API_KEY` 和 `KAGARI_TELEGRAM_TOKEN`。在 `config.yaml` 中填入唯一一个正数 `telegram.allowed_user_ids`，并保持 `target_chat_ids` 为空；`run` 不支持多个 owner 或群聊目标。
 
-Set `KAGARI_MODEL_BASE_URL`, `KAGARI_MODEL_NAME`, and `KAGARI_MODEL_API_KEY` in `.env`. For Telegram, also set `KAGARI_TELEGRAM_TOKEN` and add permitted user IDs to `telegram.allowed_user_ids` in `config.yaml`.
+Set `KAGARI_MODEL_BASE_URL`, `KAGARI_MODEL_NAME`, `KAGARI_MODEL_API_KEY`, and `KAGARI_TELEGRAM_TOKEN` in `.env`. In `config.yaml`, set exactly one positive `telegram.allowed_user_ids` entry and keep `target_chat_ids` empty; `run` does not support multiple owners or group destinations.
+
+```yaml
+telegram:
+  allowed_user_ids: [123456789]
+  target_chat_ids: []
+
+personal:
+  task_concurrency: 4
+  task_budget: 30m
+```
 
 ### 2. 构建并试读 / Build and read
 
@@ -89,12 +104,17 @@ make cli ARGS='read https://example.com/article'
 make cli ARGS='analyze -user 123456 https://example.com/article'
 ```
 
-启动 Telegram 服务：
+启动 V2 Telegram 服务后，在 owner 私聊中直接发送任务或偏好：
 
-Start the Telegram service:
+Start the V2 Telegram service, then send a task or preference in the owner's private chat:
 
 ```sh
 make run
+```
+
+```text
+调查 https://example.com 的方案和主要风险。
+以后回答请简洁一些，但保留关键依据。
 ```
 
 ## 配置 / Configuration
@@ -106,10 +126,12 @@ Commands load `.env` from the current working directory; no `source` command is 
 | 设置 / Setting | 默认值 / Default | 说明 / Description |
 | --- | --- | --- |
 | `storage.path` | `data/kagari.db` | SQLite 数据库 / SQLite database |
-| `profile_path` | `profile.md` | 阅读偏好和表达示例 / Reading preferences and style examples |
+| `profile_path` | `profile.md` | V2 Agent 的 owner 背景与表达偏好 / Owner context and style for the V2 agent |
 | `max_attempts` | `6` | 包含首次尝试 / Includes the first attempt |
 | `agent.streaming` | `false` | 启用 Responses SSE / Enables Responses SSE |
-| `weekly.enabled` | `false` | 周报定时调度 / Scheduled weekly digests |
+| `personal.task_concurrency` | `4` | 并行 Task worker 数，必须为正数 / Concurrent task workers; must be positive |
+| `personal.task_budget` | `30m` | 每个 Task 的累计执行预算 / Cumulative execution budget per Task |
+| `weekly.enabled` | `false` | V1 weekly 调度设置；V2 `run` 不调度周报 / V1 weekly scheduler setting; V2 `run` does not schedule digests |
 | `weekly.max_input_chars` | `120000` | 周报完整模型输入字符上限 / Maximum serialized digest input size |
 
 `.env`、`config.yaml` 和 `profile.md` 已被 Git 忽略。不要将真实凭证写入示例文件或提交到仓库。
@@ -118,31 +140,23 @@ Commands load `.env` from the current working directory; no `source` command is 
 
 ### 人格替换 / Persona injection
 
-调用方统一通过 `persona.Default()` 获取 `persona.PersonaRole` 接口，再分别注入 Agent 和 Telegram，不直接依赖具体人格类型。角色选择集中在 `internal/persona/main.go`；替换实现只需在这里切换，调用方不变。人格实现提供 `Prompt() string`（人格与语言风格）和 `AskChatID(int64) string`（带任务编号的收件回执），放在 `internal/persona/taffy/` 等子包中；通用任务规则与 Markdown 文风要求保持独立。
+V2 `run` 通过 `persona.Default()` 读取人格提示词，并在启动时载入 `profile.md`。角色选择集中在 `internal/persona/main.go`；替换实现后重新构建并重启服务，修改 `profile.md` 后重启服务。
 
-Callers obtain the `persona.PersonaRole` interface through `persona.Default()` and inject it into the Agent and Telegram without depending on a concrete persona type. Selection lives in `internal/persona/main.go`; switch implementations there without changing callers. Implementations provide `Prompt() string` for persona and language style, and `AskChatID(int64) string` for job acknowledgements, and live in subpackages such as `internal/persona/taffy/`. Common task rules and Markdown style instructions remain independent.
+V2 `run` reads the persona prompt through `persona.Default()` and loads `profile.md` at startup. Persona selection lives in `internal/persona/main.go`; rebuild and restart after changing the implementation, and restart after changing `profile.md`.
 
 内置永雏塔菲（默认）和明前奶绿。使用奶绿时，将 `internal/persona/main.go` 的导入改为 `nailv "kagari/internal/persona/nailv"`，并在 `Default()` 中返回 `nailv.Nailv{}`。奶绿人格参考[公开角色资料](https://laplace.live/about)，采用花店店员的背景和亲切、慵懒、偶尔吐槽的语气。
 
 Built-in personas are Taffy (default) and Mingqian Nailv. To use Nailv, change the import in `internal/persona/main.go` to `nailv "kagari/internal/persona/nailv"` and return `nailv.Nailv{}` from `Default()`. Nailv draws on the [public character profile](https://laplace.live/about), using a flower shop assistant background and a friendly, laid-back tone with occasional teasing.
 
-Engine 构造时读取 `profile.md` 并冻结人格提示词；分析缓存键包含完整分析提示词，周报重试使用任务保存的提示词快照。修改 `profile.md` 后，长期运行的 `run` 服务需重启；单次 `analyze` 和 `digest` 命令会在执行时读取当前文件。修改人格实现后需重新构建程序；运行中的服务还需重启。暂不支持运行时切换角色。
+旧版 `analyze` 和 `digest` CLI 仍使用阅读 Agent 与其输出格式；它们不由 V2 `run` 调度。
 
-The Engine reads `profile.md` and freezes persona text when constructed. Analysis cache keys include the complete analysis prompt, and digest retries reuse the saved instruction snapshot. Restart a long-running `run` service after changing `profile.md`; one-shot `analyze` and `digest` commands read the current file when executed. Rebuild after changing persona code, then restart a running service to use the new binary. Runtime persona switching is not supported.
+The legacy `analyze` and `digest` CLI commands still use the reading agent and its output format; V2 `run` does not schedule them.
 
-### 最终输出 / Final output
+### 旧阅读输出 / Legacy reading output
 
-分析调用要求模型服务支持 Responses API 的严格 JSON Schema 输出。最终结果只包含 `kind` 和 `body`：`analysis` 的正文是 Markdown 分析，`chat` 的正文是普通对话或澄清问题。程序校验字段、类型和非空正文；无效结果进入任务重试，不发布。正文以外的来源、读取记录和用量由程序保存，周报生成继续直接返回成稿。
+主对话和读取阶段在调用工具时不附加 JSON Schema 输出约束，最终结果由程序校验。主对话格式不合格时，只额外进行一次无工具的严格格式整理，不重做操作；自动记忆提取也使用严格 JSON Schema，因此模型端点仍需支持该能力。旧版 `analyze` 返回 `kind` 和 `body`：`analysis` 是 Markdown 分析，`chat` 是普通对话或澄清。`digest` CLI 继续直接生成归档周报。
 
-Analysis calls require a model endpoint that supports strict JSON Schema output in the Responses API. The final output contains only `kind` and `body`: `analysis` contains a Markdown analysis, while `chat` contains a conversational reply or clarification. The application validates the fields, types, and nonempty body; invalid results enter task retry without publication. Sources, read records, and usage are saved by the application. Digest generation continues to return prose directly.
-
-`analysis` 使用任务入队时保存的分析投递目标；`chat` 只回复提交者私聊，不进入阅读归档或新生成的周报。CLI 没有私聊目标时只展示正文。程序向渠道声明正文为 Markdown 或普通文本，Telegram 适配器负责选择发送接口和分段。
-
-An `analysis` uses the delivery targets saved when the task was queued. A `chat` reply goes only to the submitting private chat and is excluded from the reading archive and newly generated digests. CLI submissions without a private chat target only display the body. The application declares Markdown or plain text; the Telegram adapter selects the send method and handles splitting.
-
-Telegram 适配器通过 SDK 自带的 `sendRichMessage` 发送分析与周报的原始 Markdown，由 Telegram 渲染。聊天、命令、通知和收件回执通过 `sendMessage` 按普通文本发送，关闭链接预览。普通文本按最多 3500 个 UTF-16 单元分段；Markdown 整条发送，长度和结构由 Telegram 校验。归档与 outbox 保留原始正文，outbox 仅增加格式标记；不保存格式实体或带版本的发送 payload，也不提供旧数据库迁移。
-
-The Telegram adapter sends original analysis and digest Markdown through the SDK's `sendRichMessage`, with rendering handled by Telegram. Chats, commands, notices, and acknowledgements use plain-text `sendMessage` with link previews disabled. Plain text is split at up to 3500 UTF-16 units; Markdown is sent as one message and validated by Telegram. Archives and the outbox retain the original text; the outbox only adds a format marker. There are no saved formatting entities, versioned send payloads, or old-database migrations.
+Conversation and reading tool loops omit wire-level JSON Schema and validate the final result locally. A malformed conversation reply gets one tool-free formatting attempt without replaying actions. Automatic memory extraction also uses strict JSON Schema, so the endpoint must still support it. Legacy `analyze` returns `kind` and `body`: `analysis` is Markdown, while `chat` is a conversational reply or clarification. The `digest` CLI still generates archive digests directly.
 
 ## CLI 命令 / CLI commands
 
@@ -153,72 +167,58 @@ Place the global `-config` flag before the subcommand. These examples use the lo
 ```sh
 ./bin/kagari -config config.yaml read https://example.com/article
 ./bin/kagari -config config.yaml analyze -note '关注系统设计' -user 123456 https://example.com/article
-./bin/kagari -config config.yaml run
 ./bin/kagari -config config.yaml digest -user 123456
-./bin/kagari -config config.yaml digest -user 123456 -cutoff 2026-10-02T09:00:00+08:00
-./bin/kagari -config config.yaml digest -user 123456 -start 2026-09-01 -end 2026-09-08
 ./bin/kagari -config config.yaml status 17
 ./bin/kagari -config config.yaml export 17
 ./bin/kagari -config config.yaml retry 17
 ./bin/kagari -config config.yaml retry-delivery 17
+./bin/kagari -config config.yaml tasks
+./bin/kagari -config config.yaml tasks 1
+./bin/kagari -config config.yaml runs 1
+./bin/kagari -config config.yaml memories 'answer style'
+./bin/kagari -config config.yaml memory-history answer_style
+./bin/kagari -config config.yaml db info
 ```
 
-- `read URL` 读取单个 URL，不调用模型，也不创建任务。 / Reads one URL without calling the model or creating a job.
-- `analyze [-question TEXT] [-note TEXT] [-user ID] [URL...]` 探索问题或分析链接并归档正文。至少提供问题或链接。 / Explores a question or supplied URLs and archives the prose. Supply a question or a URL.
-- `run` 启动 Telegram long polling、任务处理、投递和启用后的周报调度。 / Starts Telegram polling, job processing, delivery, and enabled digest scheduling.
-- `digest [-user ID] [-cutoff RFC3339]` 默认回顾截止时间前七个日历日，包含开始时间、不包含截止时间。`-start` 与 `-end` 可指定日期范围，包含开始日期、不包含结束日期；必须同时提供且不能与 `-cutoff` 混用。 / By default, reviews the seven calendar days before the cutoff, including the start and excluding the cutoff. Use `-start` and `-end` together for a date range that includes the start date and excludes the end date; they cannot be combined with `-cutoff`.
-- `status ID` 查看任务和投递状态；`export ID` 输出任务 JSON。 / Shows job and delivery status; `export ID` prints the job JSON.
-- `retry ID` 重新排队失败任务；`retry-delivery ID` 手动重发失败或结果不确定的投递。 / Requeues a failed job; manually retries a failed or uncertain delivery.
+- V1 `read URL` 读取 URL，不调用模型；`analyze [-question TEXT] [-note TEXT] [-user ID] [URL...]` 分析或探索问题并归档结果。`digest [-user ID] [-cutoff RFC3339]` 默认回顾截止时间前七个日历日；`-start` 和 `-end` 必须同时提供，按包含开始、不包含结束处理，且不能与 `-cutoff` 混用。它是手动 CLI 操作，V2 `run` 不启动 weekly scheduler。
+- V1 `status ID` 查看旧归档任务和投递状态，`export ID` 输出任务 JSON，`retry ID` 与 `retry-delivery ID` 操作旧归档队列。它们的 ID 不是 V2 Task/Run ID。
+- V2 `tasks [TASK_ID]` 输出最近 Task 或单个 Task 的 JSON；`runs TASK_ID` 输出该 Task 的 Run 记录。
+- V2 `memories [QUERY]` 以不区分大小写的子串搜索当前有效的记忆；省略查询时列出最近记忆。`memory-history [KEY]` 输出最近记忆变更；传入 KEY 时精确筛选该键，历史中可能包含已遗忘前的值。这些命令只读 personal 表，不恢复或修改服务状态。
+- `db` 仍管理 V1 阅读归档的表；它不会清除 V2 Task、Run、记忆或 personal Telegram offset。
 
-未指定 `-cutoff`、`-start` 和 `-end` 时，周报使用执行命令时的当前时间作为截止时间。同一用户、版本和精确时间范围可复用已保存结果。空周报无需调用模型。默认总共最多尝试 6 次，包含首次尝试；中间失败不会向 Telegram 发送最终失败通知。
+The legacy `read URL` command fetches one URL without a model call. `analyze [-question TEXT] [-note TEXT] [-user ID] [URL...]` analyzes links or explores a question and archives the result. `digest [-user ID] [-cutoff RFC3339]` defaults to the seven calendar days before the cutoff. Use `-start` and `-end` together for an inclusive start and exclusive end; they cannot be combined with `-cutoff`. Digest generation is a manual CLI operation, and V2 `run` does not start the weekly scheduler.
 
-Without `-cutoff`, `-start`, or `-end`, a digest uses the current time when the command runs as its cutoff. The same user, version, and exact time range can reuse a saved result. Empty digests need no model call. The default maximum is six attempts, including the first; intermediate failures do not send a final Telegram notice.
+Legacy `status ID` shows archive job and delivery state, `export ID` prints job JSON, and `retry ID` / `retry-delivery ID` operate on the old archive queue. Their IDs are not V2 Task or Run IDs.
 
-周报首次冻结材料前，会等待同一用户、同一时间范围内尚未完成的分析，每分钟重新检查，等待不计入尝试次数。最终失败的分析数量会附在周报末尾。材料冻结后，重试继续复用快照。CLI 遇到等待时保留周报任务并退出，提示运行 `kagari run` 处理排队任务，或稍后使用相同时间范围重试。
+V2 `tasks [TASK_ID]` prints recent Tasks or one Task as JSON; `runs TASK_ID` prints that Task's Run records. `memories [QUERY]` performs a case-insensitive substring search over active memory keys and values; omitting QUERY lists recent memories. `memory-history [KEY]` prints recent memory changes, optionally filtered by an exact key. History can include values from before a memory was forgotten. These commands read personal tables without recovering or changing service state.
 
-Before freezing its input, a digest waits for unfinished analyses belonging to the same user and time range, checking again after one minute without consuming an attempt. The rendered digest notes the number of analyses that ultimately failed. Retries reuse the frozen snapshot. When blocked by unfinished analyses, the CLI preserves the digest job and exits with instructions to run `kagari run` or retry the same time range later.
+`db` still manages V1 reading-archive tables. It does not clear V2 Tasks, Runs, memories, or the personal Telegram offset.
 
-CLI 的 `analyze` 和 `digest` 会启动任务处理器，不能与 `run` 或另一个处理型 CLI 命令同时运行。状态、导出和重试命令可以在服务运行时使用。
+V2 通过 Telegram owner 私聊接收任务、取消或继续任务，也可自然表达稳定偏好、纠正和遗忘请求。例如：
 
-CLI `analyze` and `digest` start a processor and must not run alongside `run` or another processing CLI command. Status, export, and retry commands can run while the service is active.
-
-Telegram 只接收允许列表中用户的私聊消息。确认、命令回复和处理失败通知发回提交私聊。分析与周报结果默认发回提交私聊；配置非空的 `telegram.target_chat_ids` 后，同一结果会分发到列表中的所有聊天或频道，bot 需要相应发言权限。列表为空时仍回发提交私聊。支持 `/help`、`/status ID`、`/retry ID`、`/retry_delivery ID`、`/weekly`、`/weekly START END` 和下述归档命令。
-
-Telegram accepts private messages from users on the allowlist. Acknowledgements, command replies, and processing failure notices go to the submitting private chat. Analysis and digest results default to the submitting chat; a nonempty `telegram.target_chat_ids` list sends each result to every listed chat or channel, where the bot needs posting permission. An empty list keeps results in the submitting private chat. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, `/weekly START END`, and the archive commands below.
-
-私聊 bot 可分页查看自己的归档、读取详情并确认删除。用户身份取自 Telegram 发送者，不接受用户 ID 参数。
-
-In a private bot chat, browse your archives, read details, and confirm deletion. Ownership comes from the Telegram sender; commands do not accept a user ID.
+V2 accepts tasks and requests to cancel or continue them in the owner's Telegram private chat. Stable preferences, corrections, and forgetting can also be phrased naturally. For example:
 
 ```text
-/archive
-/archive 2
-/archive_show 17
-/archive_delete 17
-/archive_delete 17 confirm
+调查 https://example.com 的方案和主要风险。
+这个任务进展如何？
+取消任务 #1。
+继续任务 #1，补查兼容性；我授权再用一个预算周期。
+以后回答请简洁一些，但保留关键依据。
+更正：我现在主要使用 Rust。
+忘记我偏好简洁回答这件事。
 ```
 
-`/archive [页码]` 默认第一页，每页 10 条，按任务号从大到小列出已完成分析，保留重复收录；收录日期使用 `weekly.timezone`。`/archive_show` 展示原始提交、备注、链接和完整分析报告。`/archive_delete ID` 先展示归档标题和删除范围，带 `confirm` 的命令才执行删除。正在发送消息的归档会拒绝删除，请等待投递结束后重试。删除范围与 CLI 相同：删除归档及关联投递记录，保留共享缓存和已有周报快照，也不会撤回已发送消息。
+每条直接用户消息处理后都会排队检查稳定事实和偏好。记忆维护是异步的；查询个人记忆可确认已生效的内容。Task 和记忆工具只改写本地 personal 数据，不开放任意文件写入、命令执行或外部写操作；Task 可以只读网页。Telegram 回复全部使用普通文本，每条 outbox 分段最多 3500 个 UTF-16 单元；每段最多尝试三次，包含首次尝试。发送结果未知时不会自动重发，避免重复消息。
 
-`/archive [PAGE]` defaults to page 1, with 10 completed analyses per page in descending job ID order, including duplicate submissions; submission dates use `weekly.timezone`. `/archive_show` displays the original submission, notes, links, and full analysis report. `/archive_delete ID` first displays the archive title and deletion scope; deletion requires the command with `confirm`. An archive with an active message send cannot be deleted; retry after delivery finishes. As with the CLI, deletion removes the archive and its deliveries while preserving shared cache and existing digest snapshots, and does not retract sent messages.
+After each direct user message, a background reviewer checks for durable facts and preferences. Memory updates are asynchronous; query memories to confirm what has taken effect. Task and memory tools change local personal data but do not allow arbitrary file writes, command execution, or external writes; Tasks can read web pages. Telegram replies use plain text, split into outbox parts of at most 3500 UTF-16 units. Each part gets at most three total attempts, including the first. An unknown send outcome is not retried automatically, to avoid duplicate messages.
 
-归档命令使用现有任务队列和投递流程，因此分析任务执行时命令回复可能延迟。回复发回发起命令的私聊，不使用分析结果的公共投递目标。
+V2 的 Task 状态、阶段成果、预算、记忆和回执保存在 `storage.path` 指向的 SQLite 文件中。启动后，中断的后台阶段沿用剩余预算重新排队。中断的主对话保留已经提交的操作并说明中断，未提交的要求需要重新提出，以免重复建任务。发送中断的消息标记为结果不确定；旧 V1 表不会迁移为 personal Task。
 
-Archive commands use the existing job queue and delivery flow, so an analysis in progress may delay replies. Replies go to the private chat where the command was sent, rather than the public analysis delivery target.
+V2 Tasks, stage results, budgets, memories, and receipts are saved in the SQLite file at `storage.path`. Interrupted background stages resume with the remaining budget. An interrupted conversation keeps committed actions and reports the interruption; the owner must repeat uncommitted requests, avoiding duplicate task creation. Interrupted sends are marked uncertain. V1 tables are not migrated into personal Tasks.
 
-```yaml
-telegram:
-  allowed_user_ids: [123456789]
-  target_chat_ids: [123456789, -1001234567890]
-```
+`analyze`、`digest` 与 `run` 共用数据库处理器锁，不能同时运行。旧版 `status`、`export` 和重试命令只检查 V1 记录；V2 检查命令只检查 personal 记录。
 
-用实际私聊和频道 ID 替换示例；也可设置 `KAGARI_TELEGRAM_TARGET_CHAT_IDS=123456789,-1001234567890`。目标在入队时保存，修改配置只影响新任务。每个目标分别记录投递状态和分段顺序，一个目标失败不会阻塞其他目标。`/status ID` 显示每个目标的状态；`/retry_delivery ID` 仅重新排队失败或结果不确定的投递，已发送部分保留。结果不确定的消息仍需手动重发，可能重复。
-
-Replace the example IDs with your private chat and channel IDs, or set `KAGARI_TELEGRAM_TARGET_CHAT_IDS=123456789,-1001234567890`. Targets are saved at enqueue time; configuration changes affect new jobs. Each target has independent delivery status and part ordering, so one target's failure does not block the others. `/status ID` shows each target's status. `/retry_delivery ID` requeues only failed or uncertain deliveries and preserves sent parts; retrying an uncertain delivery may duplicate a message.
-
-分析与周报的投递进入失败或结果不确定状态时，会向原提交者私聊发送一条通知，附查看与重发命令。通知与终止状态在同一事务内保存；启动恢复也会补入尚未通知的记录。每条投递只通知一次，人工重发和重启不会重复通知；通知自身发送失败不会继续生成通知。发送结果不确定的原消息仍需手动重发。
-
-When an analysis or digest delivery fails permanently, exhausts its attempts, or has an uncertain outcome, a notice goes to the original submitter's private chat with status and resend commands. The terminal state and notice are saved in one transaction; startup recovery also queues missing notices. Each delivery gets one notice, including across manual retries and restarts. A failed notice does not generate another notice. Original messages with uncertain outcomes still require manual resending.
+`analyze`, `digest`, and `run` share the database processor lock and cannot run together. The legacy `status`, `export`, and retry commands inspect V1 records; V2 inspection commands read personal records.
 
 ## 数据库维护 / Database maintenance
 
@@ -247,13 +247,13 @@ Manage archived analyses by user. Archives are completed `analyze` jobs, owned b
 ./bin/kagari -config config.yaml db archive delete -user 123456 -yes 17
 ```
 
-`list` 和 `show` 使用只读连接，可在服务运行时执行。`delete` 需要 `-yes` 和处理器锁，会在同一事务中删除匹配用户及任务号的归档和关联投递记录；用户不匹配、任务未完成或任务类型不是分析时拒绝删除。删除后，新建周报的输入不再包含该记录；已有周报及其输入快照、共享来源缓存、调度元数据和 Telegram offset 会保留。删除不会撤回已发送的 Telegram 消息；任务号可能重用。
+`list` 和 `show` 使用只读连接，可在服务运行时执行。`delete` 需要 `-yes` 和处理器锁，会在同一事务中删除匹配用户及任务号的归档和关联投递记录；用户不匹配、任务未完成或任务类型不是分析时拒绝删除。删除后，新建周报的输入不再包含该记录；已有周报及其输入快照、共享来源缓存、旧调度元数据和 V1 Telegram offset 会保留。删除不会撤回已发送的 Telegram 消息；V1 任务号可能重用。
 
-`list` and `show` use read-only connections and can run while the service is active. `delete` requires `-yes` and the processor lock, and removes the archive matching both user and task ID along with its deliveries in one transaction. It rejects an owner mismatch, an incomplete task, or a task that is not an analysis. New digests exclude the deleted record; existing digests and input snapshots, shared source cache, scheduler metadata, and Telegram offset remain. Deletion does not retract sent Telegram messages; task IDs may be reused.
+`list` and `show` use read-only connections and can run while the service is active. `delete` requires `-yes` and the processor lock, and removes the archive matching both user and task ID along with its deliveries in one transaction. It rejects an owner mismatch, an incomplete task, or a task that is not an analysis. New digests exclude the deleted record; existing digests and input snapshots, shared source cache, legacy scheduler metadata, and the V1 Telegram offset remain. Deletion does not retract sent Telegram messages; V1 job IDs may be reused.
 
-清理前停止 `run` 或其他处理型命令。清理需要显式传 `-yes`，会事务性删除数据但保留数据库结构：
+清理前停止 `run` 或其他处理型命令。`db clear` 只清理 V1 阅读归档表；它不会删除 V2 personal 数据。操作仍需显式传 `-yes`，并会事务性删除所选数据但保留数据库结构：
 
-Stop `run` and other processing commands before clearing data. Clearing requires `-yes`; deletions are transactional and preserve the database schema:
+Stop `run` and other processing commands before clearing data. `db clear` only clears V1 reading-archive tables; it does not delete V2 personal data. Pass `-yes`; the selected deletions are transactional and preserve the database schema:
 
 ```sh
 # 只清来源缓存 / Clear only the source cache
@@ -262,13 +262,13 @@ Stop `run` and other processing commands before clearing data. Clearing requires
 # 默认清任务、投递和来源缓存 / Default: clear jobs, deliveries, and source cache
 ./bin/kagari -config config.yaml db clear -yes
 
-# 完整重置并清调度元数据 / Full reset, including scheduler metadata
+# 完整重置 V1 数据并清旧调度元数据 / Full reset of V1 data, including legacy scheduler metadata
 ./bin/kagari -config config.yaml db clear -scope all -yes
 ```
 
-清理不会撤回已发出的 Telegram 消息；清任务后任务号可能被重用。`all` 会重置 Telegram offset，尚未确认的更新可能重新入队。
+清理不会撤回已发出的 Telegram 消息；V1 任务号可能被重用。`all` 只重置旧 V1 Telegram offset，personal 服务的 offset、Task 和记忆会保留。
 
-Clearing does not retract Telegram messages already sent. Job IDs may be reused after jobs are deleted. `all` resets the Telegram offset, so unconfirmed updates may be enqueued again.
+Clearing does not retract sent Telegram messages; V1 job IDs may be reused. `all` resets only the legacy V1 Telegram offset; the personal service's offset, Tasks, and memories remain.
 
 ## 行为与限制 / Behavior and limits
 
@@ -277,13 +277,13 @@ Clearing does not retract Telegram messages already sent. Job IDs may be reused 
 - `read_url` 通过 HTTP GET 获取网页并提取正文与链接；启用 `browser.enabled` 后，`browse_url` 同时提供 Playwright MCP 的渲染页面读取。模型可选择或混用两个工具，HTTP 返回成功但正文不足时也可改用浏览器。浏览器需要 Node.js 18+ 和本机 Google Chrome；每个任务使用独立无头会话，不继承 Codex 或个人 Chrome 的登录状态。 / `read_url` fetches pages over HTTP GET and extracts text and links. With `browser.enabled`, `browse_url` is also available through Playwright MCP. The model can choose either tool or use both, including when HTTP succeeds but returns insufficient content. Requires Node.js 18+ and local Google Chrome. Each analysis gets an isolated headless browser without personal or Codex login state.
 - 默认每次分析最多 6 次不同的 `(URL, 后端)` 读取；首次命中缓存、失败和 HTTP 改用浏览器都计数，同后端同 URL 重读复用本次结果。默认最多 10 次模型迭代、3 分钟任务时限。 / The default is six distinct `(URL, backend)` reads, including cache hits, failures and backend changes; repeated calls reuse the task's observation. Ten model iterations and a three-minute task timeout bound each analysis.
 - 周报 `weekly.max_input_chars` 默认 120000；输入超过上限时任务失败并保留完整输入快照，不通过丢弃条目缩小输入。 / `weekly.max_input_chars` defaults to 120000; oversized digest jobs fail with the full input snapshot preserved, rather than dropping entries to fit.
-- `weekly.enabled` 默认关闭；启用后按 `weekly.timezone` 和配置的星期、时间调度，默认时区为 `Asia/Shanghai`。 / `weekly.enabled` defaults to false. When enabled, digests follow `weekly.timezone` and the configured weekday and time; the default timezone is `Asia/Shanghai`.
+- V1 的 `weekly.enabled` 调度由旧服务使用；V2 `run` 不调度周报。`digest` CLI 可手动生成周报，日期按 `weekly.timezone` 解释。 / The V1 service uses `weekly.enabled` for scheduling; V2 `run` does not schedule digests. The `digest` CLI remains available, with dates interpreted in `weekly.timezone`.
 
 ## 日志与隐私 / Logs and privacy
 
-启用 `agent.streaming` 后，通过 SSE 接收模型输出；逐段 SSE 日志目前关闭。info 日志记录模型轮次、完整工具参数、工具结果摘要和 token 用量；非流式模式还会记录完整模型回复。日志可能包含提交内容或提取文本。SQLite 归档也包含提交和来源正文，请妥善保管本地日志和数据库。
+SQLite 保存 owner 私聊、Task 目标与成果、个人记忆及投递记录。它可能包含敏感个人信息和消息历史；妥善保管 `storage.path` 指向的数据库与本地日志。
 
-With `agent.streaming` enabled, model output is received over SSE; per-chunk SSE logs are currently disabled. Info logs record model turns, complete tool arguments, tool result previews, and token usage. Non-streaming mode also logs the full model response. Logs may contain submitted text or extracted content. SQLite archives contain submissions and source text; protect local logs and database files.
+SQLite stores owner messages, Task goals and results, personal memories, and delivery records. It can contain sensitive personal information and message history; protect the database at `storage.path` and local logs.
 
 本地测试和构建不能代替真实外部联调。模型 endpoint、X 页面和 Telegram bot 需要在目标部署环境分别验证。
 
@@ -291,6 +291,6 @@ Local tests and builds do not replace external integration checks. Validate the 
 
 ## 设计 / Design
 
-架构、数据流、可靠性和安全契约见[设计说明](docs/DESIGN.md)。
+V2 的 Task、记忆、恢复边界和 CLI 见[设计说明](docs/V2-DESIGN.md)；V1 阅读归档架构见[旧版设计](docs/DESIGN.md)。
 
-See the [design document](docs/DESIGN.md) for architecture, data flows, and reliability and security contracts.
+See the [V2 design](docs/V2-DESIGN.md) for Tasks, memory, recovery, and CLI behavior. The [legacy design](docs/DESIGN.md) covers the V1 reading archive.

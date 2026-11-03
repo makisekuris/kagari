@@ -10,8 +10,12 @@ storage:
 
 telegram:
   # Use KAGARI_TELEGRAM_TOKEN for the credential.
-  allowed_user_ids: []
-  target_chat_ids: [] # Empty sends results to the submitting private chat; set multiple IDs to fan out.
+  allowed_user_ids: [] # Set exactly one positive Telegram user ID for personal mode.
+  target_chat_ids: [] # Must stay empty for `kagari run`; replies go to the owner's private chat.
+
+personal:
+  task_concurrency: 4
+  task_budget: 30m # Cumulative execution time per Task, including automatic planning; waiting is excluded.
 
 profile_path: profile.md
 log_level: info
@@ -37,7 +41,7 @@ agent:
   streaming: false # Enables Responses SSE for analysis and weekly digests; per-chunk SSE logs are disabled.
 
 weekly:
-  enabled: false # Enable after choosing your delivery target and time.
+  enabled: false # Legacy reading service setting; personal mode does not schedule digests.
   timezone: Asia/Shanghai
   weekday: 1 # 0=Sunday, 1=Monday, ..., 6=Saturday.
   time: "09:00"
