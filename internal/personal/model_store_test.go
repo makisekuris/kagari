@@ -3,6 +3,7 @@ package personal
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,11 +47,29 @@ func TestMainAgentForgetToolAppliesToRealStore(t *testing.T) {
 	}
 }
 
-func TestMemoryFailureCannotBeSilencedByModel(t *testing.T) {
-	fixture := &responsesFixture{t: t, responses: []fixtureResponse{responseText(`{"text":"记忆更新失败，需要确认。","notify":false}`)}}
-	main := MainAgent{Store: &toolRepo{}, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 2}
-	output, err := main.Think(context.Background(), TurnInput{Event: Event{ID: 1, Kind: EventMemory, Text: "memory failed"}})
-	if err != nil || output.Silent {
-		t.Fatalf("important memory event suppressed: %+v, %v", output, err)
+func TestMainAgentReportsSilentMemoryFailureWhenUserQueriesRun(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t, ":memory:", time.Minute)
+	source := openUserEvent(t, s, 1, 1, "I prefer concise answers.")
+	finishEvent(t, s, source, TurnOutput{}, nil)
+	run, err := s.ClaimRun(ctx, RunMemoryReview)
+	if err != nil || run == nil {
+		t.Fatalf("memory run: %+v, %v", run, err)
+	}
+	if err := s.FinishMemoryReview(ctx, run.ID, MemoryReview{}, "memory review unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	event := openUserEvent(t, s, 2, 2, "Show the memory run result.")
+	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
+		responseTool("get_run", runArgs{RunID: run.ID}, "get-memory-run"),
+		responseText(`{"text":"记忆整理失败，尚未更新。","notify":false}`),
+	}}
+	main := MainAgent{Store: s, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 3}
+	output, err := main.Think(ctx, TurnInput{Event: event})
+	if err != nil || output.Silent || output.Text == "" {
+		t.Fatalf("memory query must reply: %+v, %v", output, err)
+	}
+	if len(fixture.requests) != 2 || !strings.Contains(requestInput(fixture.requests[1]), "memory review unavailable") {
+		t.Fatal("stored memory failure was not returned by get_run")
 	}
 }

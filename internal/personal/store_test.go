@@ -556,11 +556,12 @@ func TestMemoryProvenanceCASForgetReplayAndQuietReview(t *testing.T) {
 	if failedRun.Status != RunFailed || failedRun.Error == "" {
 		t.Fatalf("CAS conflict was not recorded: %+v", failedRun)
 	}
-	conflictEvent, err := s.ClaimEvent(ctx)
-	if err != nil || conflictEvent == nil || conflictEvent.Kind != EventMemory || conflictEvent.RunID != secondExplicit.ID {
-		t.Fatalf("CAS conflict callback = (%+v,%v)", conflictEvent, err)
+	if callback, err := s.ClaimEvent(ctx); err != nil || callback != nil {
+		t.Fatalf("CAS conflict created callback: (%+v,%v)", callback, err)
 	}
-	finishEvent(t, s, *conflictEvent, TurnOutput{}, nil)
+	if delivery, err := s.ClaimDelivery(ctx); err != nil || delivery != nil {
+		t.Fatalf("CAS conflict created delivery: (%+v,%v)", delivery, err)
+	}
 	secondReview, err := s.ClaimRun(ctx, RunMemory)
 	if err != nil || secondReview == nil || secondReview.Kind != RunMemoryReview {
 		t.Fatalf("second automatic review = (%+v,%v)", secondReview, err)

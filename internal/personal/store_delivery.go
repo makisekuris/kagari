@@ -16,8 +16,9 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*Outgoing, error) {
 	defer tx.Rollback()
 	now := time.Now().UTC()
 	var id int64
-	err = tx.QueryRowContext(ctx, `SELECT d.id FROM personal_outbox d
-		WHERE d.status='pending' AND d.next_attempt_at<=?
+	// Keep legacy memory notifications for inspection without sending them.
+	err = tx.QueryRowContext(ctx, `SELECT d.id FROM personal_outbox d JOIN personal_events e ON e.id=d.event_id
+		WHERE e.kind<>'memory' AND d.status='pending' AND d.next_attempt_at<=?
 		AND NOT EXISTS(SELECT 1 FROM personal_outbox p WHERE p.event_id=d.event_id AND p.part<d.part AND p.status<>'sent')
 		ORDER BY d.id LIMIT 1`, timestamp(now)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {

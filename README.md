@@ -208,9 +208,9 @@ V2 accepts tasks and requests to cancel or continue them in the owner's Telegram
 忘记我偏好简洁回答这件事。
 ```
 
-每条直接用户消息处理后都会排队检查稳定事实和偏好。记忆维护是异步的；查询个人记忆可确认已生效的内容。Task 和记忆工具只改写本地 personal 数据，不开放任意文件写入、命令执行或外部写操作；Task 可以只读网页。Telegram 回复全部使用普通文本，每条 outbox 分段最多 3500 个 UTF-16 单元；每段最多尝试三次，包含首次尝试。发送结果未知时不会自动重发，避免重复消息。
+每条直接用户消息处理后都会排队检查稳定事实和偏好。记忆维护异步且静默，包括失败和需要澄清的情况；结果与错误保留在 Run 中，查询个人记忆可确认已生效的内容。Task 和记忆工具只改写本地 personal 数据，不开放任意文件写入、命令执行或外部写操作；Task 可以只读网页。Telegram 回复全部使用普通文本，每条 outbox 分段最多 3500 个 UTF-16 单元；每段最多尝试三次，包含首次尝试。发送结果未知时不会自动重发，避免重复消息。
 
-After each direct user message, a background reviewer checks for durable facts and preferences. Memory updates are asynchronous; query memories to confirm what has taken effect. Task and memory tools change local personal data but do not allow arbitrary file writes, command execution, or external writes; Tasks can read web pages. Telegram replies use plain text, split into outbox parts of at most 3500 UTF-16 units. Each part gets at most three total attempts, including the first. An unknown send outcome is not retried automatically, to avoid duplicate messages.
+After each direct user message, a background reviewer checks for durable facts and preferences. Memory maintenance is asynchronous and silent, including failures and clarification. Results and errors remain in Runs; query memories to confirm what has taken effect. Task and memory tools change local personal data but do not allow arbitrary file writes, command execution, or external writes; Tasks can read web pages. Telegram replies use plain text, split into outbox parts of at most 3500 UTF-16 units. Each part gets at most three total attempts, including the first. An unknown send outcome is not retried automatically, to avoid duplicate messages.
 
 V2 的 Task 状态、阶段成果、预算、记忆和回执保存在 `storage.path` 指向的 SQLite 文件中。启动后，中断的后台阶段沿用剩余预算重新排队。中断的主对话保留已经提交的操作并说明中断，未提交的要求需要重新提出，以免重复建任务。发送中断的消息标记为结果不确定；旧 V1 表不会迁移为 personal Task。
 

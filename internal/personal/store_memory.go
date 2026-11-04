@@ -190,15 +190,6 @@ func applyMemoryChange(ctx context.Context, tx *sql.Tx, sourceEventID, runID int
 	return &Memory{Key: change.Key, Value: value, Version: version, SourceEventID: sourceEventID, Deleted: deletedFlag != 0, UpdatedAt: time.Now().UTC()}, true, nil
 }
 
-func insertMemoryEvent(ctx context.Context, tx *sql.Tx, runID int64, text string) error {
-	if runeLen(text) > maxTaskChars {
-		text = string([]rune(text)[:maxTaskChars])
-	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,run_id,status,created_at) VALUES('memory',?,?, 'queued',?)`,
-		text, runID, timestamp(time.Now()))
-	return err
-}
-
 func (s *Store) ApplyMemory(ctx context.Context, runID int64) error {
 	if runID <= 0 {
 		return errors.New("personal: run ID must be positive")
@@ -237,18 +228,12 @@ func (s *Store) ApplyMemory(ctx context.Context, runID int64) error {
 		if _, updateErr := tx.ExecContext(ctx, `UPDATE personal_runs SET status='failed',error=? WHERE id=? AND status='running'`, err.Error(), runID); updateErr != nil {
 			return updateErr
 		}
-		if eventErr := insertMemoryEvent(ctx, tx, runID, "记忆操作未能完成："+err.Error()); eventErr != nil {
-			return eventErr
-		}
 		return tx.Commit()
 	}
 	memory, applied, err := applyMemoryChange(ctx, tx, eventID, runID, change, sourceText, false)
 	if err != nil {
 		if _, updateErr := tx.ExecContext(ctx, `UPDATE personal_runs SET status='failed',error=? WHERE id=? AND status='running'`, err.Error(), runID); updateErr != nil {
 			return updateErr
-		}
-		if eventErr := insertMemoryEvent(ctx, tx, runID, "记忆操作未能完成："+err.Error()); eventErr != nil {
-			return eventErr
 		}
 		return tx.Commit()
 	}
@@ -380,17 +365,9 @@ func (s *Store) FinishMemoryReview(ctx context.Context, runID int64, review Memo
 		if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='failed',result=?,error=? WHERE id=? AND status='running'`, string(raw), failureText, runID); err != nil {
 			return err
 		}
-		if err := insertMemoryEvent(ctx, tx, runID, failureText); err != nil {
-			return err
-		}
 	} else {
 		if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='completed',result=?,error='' WHERE id=? AND status='running'`, string(raw), runID); err != nil {
 			return err
-		}
-		if review.Question != "" {
-			if err := insertMemoryEvent(ctx, tx, runID, review.Question); err != nil {
-				return err
-			}
 		}
 	}
 	return tx.Commit()

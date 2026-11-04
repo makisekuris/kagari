@@ -89,7 +89,7 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 		return TurnOutput{}, err
 	}
 	notify := response.Notify
-	if input.Event.Kind == EventUser || input.Event.Kind == EventMemory || tools.mustNotify || taskOutcomeRequiresNotification(input) {
+	if input.Event.Kind == EventUser || tools.mustNotify || taskOutcomeRequiresNotification(input) {
 		notify = true
 	}
 	return TurnOutput{Text: response.Text, TaskID: tools.taskID(), Silent: !notify}, nil

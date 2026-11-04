@@ -17,6 +17,10 @@ func (r *Runtime) turn(ctx context.Context) (bool, error) {
 	if err != nil || event == nil {
 		return false, err
 	}
+	if event.Kind == EventMemory {
+		// Older versions may have queued memory callbacks before maintenance became silent.
+		return true, r.Store.CompleteEvent(ctx, event.ID, TurnOutput{Silent: true}, nil)
+	}
 	input, err := r.context(ctx, *event)
 	if err != nil {
 		return true, err
@@ -83,7 +87,7 @@ func (r *Runtime) turn(ctx context.Context) (bool, error) {
 	if thinkErr != nil || (!output.Silent && strings.TrimSpace(output.Text) == "") || (event.Kind == EventUser && output.Silent) {
 		r.Log.Warn("personal conversation turn failed", zap.Int64("event_id", event.ID), zap.String("reason", logging.ErrorReason(thinkErr)))
 		output = TurnOutput{Text: "这轮回复未能完成。已提交的任务和记忆操作仍保留，可以继续查询。", TaskID: event.TaskID}
-		if event.Kind == EventTask || event.Kind == EventMemory {
+		if event.Kind == EventTask {
 			output.Text = fmt.Sprintf("后台结果（执行 #%d）：\n%s", event.RunID, clip(event.Text, 6000))
 		}
 	}
@@ -122,8 +126,6 @@ func (r *Runtime) recoverTurn(ctx context.Context, event Event, task *Task) erro
 			output.Text = fmt.Sprintf("任务 #%d 的状态已保存（%s），此前的回复被中断。\n\n%s", task.ID, task.Status, clip(task.Summary, 6000))
 		}
 		output.TaskID = task.ID
-	} else if event.Kind == EventMemory {
-		output.Text = "记忆维护需要处理：\n" + clip(event.Text, 6000)
 	}
 	return r.publish(ctx, event, output)
 }
