@@ -150,7 +150,7 @@ func assertWorkspaceToolNames(t *testing.T, request map[string]any) {
 		names = append(names, raw.(map[string]any)["name"].(string))
 	}
 	slices.Sort(names)
-	if !slices.Equal(names, []string{"edit_file", "ls", "read_file", "read_url", "write_file"}) {
+	if !slices.Equal(names, []string{"edit_file", "ls", "read_attachment", "read_file", "read_url", "write_attachment", "write_file"}) {
 		t.Fatalf("unexpected task tools: %v", names)
 	}
 }

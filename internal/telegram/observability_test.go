@@ -3,11 +3,8 @@ package telegram
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"testing"
 	"time"
-
-	"kagari/internal/personal"
 
 	"github.com/go-telegram/bot/models"
 	"go.uber.org/zap"
@@ -15,15 +12,9 @@ import (
 )
 
 // A duplicate update must not look like a second accepted message in a trace.
-// Use the real inbox transaction rather than a mock that invents event IDs.
 func TestPersonalInputLogsCommittedIdentityAndDuplicate(t *testing.T) {
-	s, err := personal.NewStore(filepath.Join(t.TempDir(), "personal.db"), time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
 	core, observed := observer.New(zap.InfoLevel)
-	c, err := newPersonalClient(personalConfig(), s, zap.New(core), "https://telegram.test", nil)
+	c, err := newPersonalClient(personalConfig(), &channelInboxFixture{}, newChannelFilesFixture(), zap.New(core), "https://telegram.test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +29,7 @@ func TestPersonalInputLogsCommittedIdentityAndDuplicate(t *testing.T) {
 		t.Fatalf("input records: %d", len(entries))
 	}
 	first, second := entries[0].ContextMap(), entries[1].ContextMap()
-	if first["outcome"] != "accepted" || first["event_id"] != int64(1) || first["message_id"] != int64(10) {
+	if first["outcome"] != "accepted" || first["event_id"] != int64(1) || first["message_id"] != "10" {
 		t.Fatalf("accepted identity: %v", first)
 	}
 	if second["outcome"] != "duplicate" || second["event_id"] != nil || second["payload"] != nil {

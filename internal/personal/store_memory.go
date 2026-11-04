@@ -207,7 +207,7 @@ func (s *Store) MemoryReviewInput(ctx context.Context, runID int64) (MemoryRevie
 	if err := s.db.QueryRowContext(ctx, `SELECT kind,status FROM personal_events WHERE id=?`, eventID).Scan(&sourceKind, &eventStatus); err != nil {
 		return input, err
 	}
-	event, err := readEvent(ctx, s.db, eventID)
+	event, err := s.readEvent(ctx, s.db, eventID)
 	if err != nil {
 		return MemoryReviewInput{}, err
 	}
@@ -231,9 +231,12 @@ func (s *Store) MemoryReviewInput(ctx context.Context, runID int64) (MemoryRevie
 	return input, rows.Err()
 }
 
-func readEvent(ctx context.Context, db *sql.DB, id int64) (Event, error) {
+func (s *Store) readEvent(ctx context.Context, db *sql.DB, id int64) (Event, error) {
 	event, err := scanEvent(db.QueryRowContext(ctx, `SELECT `+eventColumns+` FROM personal_events WHERE id=?`, id))
 	if err != nil {
+		return Event{}, err
+	}
+	if err := s.refreshAttachments(ctx, db, event.Attachments); err != nil {
 		return Event{}, err
 	}
 	return *event, nil

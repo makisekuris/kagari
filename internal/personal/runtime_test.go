@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
+	"kagari/internal/channel"
 )
 
 func eventually(t *testing.T, check func() bool) {
@@ -39,8 +41,10 @@ func receive[T any](t *testing.T, ch <-chan T) T {
 
 func testRuntime(s Repository) *Runtime {
 	return &Runtime{Store: s, Log: zap.NewNop(), idleDelay: 5 * time.Millisecond,
-		Prepare:      func(text string) ([]string, error) { return []string{text}, nil },
-		Send:         func(context.Context, string) (int64, error) { return 1, nil },
+		Prepare: func(text string) ([]string, error) { return []string{text}, nil },
+		Send: func(context.Context, channel.Content) (channel.Receipt, error) {
+			return channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner"}, nil
+		},
 		ReviewMemory: func(context.Context, MemoryReviewInput) (MemoryReview, error) { return MemoryReview{}, nil },
 	}
 }
@@ -108,7 +112,10 @@ func TestRuntimeFourTasksLeaveConversationAndMemoryResponsive(t *testing.T) {
 		}
 		return MemoryReview{Changes: []MemoryChange{{Operation: "put", Key: "reply_style", Value: "简短回复", Evidence: in.Event.Text}}}, nil
 	}
-	r.Send = func(_ context.Context, text string) (int64, error) { sent <- text; return receipts.Add(1), nil }
+	r.Send = func(_ context.Context, content channel.Content) (channel.Receipt, error) {
+		sent <- content.Text
+		return channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner", MessageID: fmt.Sprint(receipts.Add(1))}, nil
+	}
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
 	t.Cleanup(func() {
@@ -119,9 +126,7 @@ func TestRuntimeFourTasksLeaveConversationAndMemoryResponsive(t *testing.T) {
 	})
 	add := func(id int64, text string) {
 		t.Helper()
-		if _, err := s.AcceptInput(ctx, id, &Input{MessageID: id, Text: text}); err != nil {
-			t.Fatal(err)
-		}
+		acceptInput(t, s, strconv.FormatInt(id, 10), sourceInput(strconv.FormatInt(id, 10), text))
 	}
 	add(1, "start five")
 	seen := map[int64]bool{}

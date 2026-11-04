@@ -11,21 +11,28 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"kagari/internal/channel"
 	"kagari/internal/domain"
 )
 
 const maxTaskChars = 32_000
 const maxTitleChars = 200
 
-const taskColumns = `id,title,goal,context,revision,status,summary,budget_ms,used_ms,updated_at`
+const taskColumns = `id,title,goal,context,attachments,revision,status,summary,budget_ms,used_ms,updated_at`
 const runColumns = `id,task_id,revision,event_id,kind,input,status,result,error,elapsed_ms`
 
 func scanTask(row scanner) (*Task, error) {
 	var task Task
-	var updated string
-	if err := row.Scan(&task.ID, &task.Title, &task.Goal, &task.Context, &task.Revision, &task.Status,
+	var updated, attachments string
+	if err := row.Scan(&task.ID, &task.Title, &task.Goal, &task.Context, &attachments, &task.Revision, &task.Status,
 		&task.Summary, &task.BudgetMS, &task.UsedMS, &updated); err != nil {
 		return nil, err
+	}
+	if err := json.Unmarshal([]byte(attachments), &task.Attachments); err != nil {
+		return nil, fmt.Errorf("personal: decode task attachments: %w", err)
+	}
+	if task.Attachments == nil {
+		task.Attachments = []channel.Attachment{}
 	}
 	var err error
 	task.UpdatedAt, err = parseTimestamp(updated)
@@ -51,6 +58,11 @@ func validateTaskInput(title string, input TaskInput) error {
 		runeLen(input.Step) > maxTaskChars || runeLen(input.Previous) > maxTaskChars {
 		return errors.New("personal: task input exceeds its size limit")
 	}
+	for _, attachment := range input.Attachments {
+		if attachment.ID == "" || attachment.Size < 0 || attachment.Size > channel.MaxFileBytes {
+			return errors.New("personal: task attachments must have a valid local ID and size")
+		}
+	}
 	return nil
 }
 
@@ -62,6 +74,71 @@ func encodeTaskInput(input TaskInput) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+func (s *Store) canonicalTaskAttachments(ctx context.Context, tx *sql.Tx, attachments []channel.Attachment) ([]channel.Attachment, error) {
+	if len(attachments) == 0 {
+		return nil, nil
+	}
+	result := make([]channel.Attachment, 0, len(attachments))
+	for _, item := range attachments {
+		canonical, err := s.validateStoredAttachment(ctx, tx, item.ID)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, canonical)
+	}
+	return result, nil
+}
+
+func mergeAttachments(groups ...[]channel.Attachment) []channel.Attachment {
+	seen := map[string]bool{}
+	merged := []channel.Attachment{}
+	for _, group := range groups {
+		for _, attachment := range group {
+			if attachment.ID == "" || seen[attachment.ID] {
+				continue
+			}
+			seen[attachment.ID] = true
+			merged = append(merged, attachment)
+		}
+	}
+	return merged
+}
+
+func previousStageAttachments(ctx context.Context, tx *sql.Tx, taskID int64) ([]channel.Attachment, error) {
+	var raw string
+	err := tx.QueryRowContext(ctx, `SELECT result FROM personal_runs WHERE task_id=? AND kind='task' ORDER BY id DESC LIMIT 1`, taskID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && raw == "") {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var result StageResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return nil, err
+	}
+	return result.Attachments, nil
+}
+
+func (s *Store) refreshRunAttachments(ctx context.Context, query attachmentQuery, run *Run) error {
+	if run == nil || run.Kind != RunTask {
+		return nil
+	}
+	var input TaskInput
+	if err := json.Unmarshal([]byte(run.Input), &input); err != nil {
+		return err
+	}
+	if err := s.refreshAttachments(ctx, query, input.Attachments); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	run.Input = string(raw)
+	return nil
 }
 
 func requestKeyValid(key string) bool { return strings.TrimSpace(key) != "" && runeLen(key) <= 256 }
@@ -178,15 +255,19 @@ func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string
 	if err := validateTaskInput(title, input); err != nil {
 		return Task{}, Run{}, err
 	}
-	payload, err := encodeRequest(requestPayload{Title: title, Input: input})
-	if err != nil {
-		return Task{}, Run{}, err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Task{}, Run{}, err
 	}
 	defer tx.Rollback()
+	input.Attachments, err = s.canonicalTaskAttachments(ctx, tx, input.Attachments)
+	if err != nil {
+		return Task{}, Run{}, err
+	}
+	payload, err := encodeRequest(requestPayload{Title: title, Input: input})
+	if err != nil {
+		return Task{}, Run{}, err
+	}
 	if err := requireUserEvent(ctx, tx, eventID, true); err != nil {
 		return Task{}, Run{}, err
 	}
@@ -214,8 +295,12 @@ func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string
 		return Task{}, Run{}, err
 	}
 	now := time.Now().UTC()
-	res, err := tx.ExecContext(ctx, `INSERT INTO personal_tasks(title,goal,context,revision,status,budget_ms,updated_at)
-		VALUES(?,?,?,1,'queued',?,?)`, title, input.Goal, input.Context, s.taskBudgetMS, timestamp(now))
+	attachments, err := json.Marshal(input.Attachments)
+	if err != nil {
+		return Task{}, Run{}, err
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO personal_tasks(title,goal,context,attachments,revision,status,budget_ms,updated_at)
+		VALUES(?,?,?,?,1,'queued',?,?)`, title, input.Goal, input.Context, string(attachments), s.taskBudgetMS, timestamp(now))
 	if err != nil {
 		return Task{}, Run{}, err
 	}
@@ -223,7 +308,7 @@ func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string
 	if err != nil {
 		return Task{}, Run{}, err
 	}
-	task := Task{ID: taskID, Title: title, Goal: input.Goal, Context: input.Context, Revision: 1,
+	task := Task{ID: taskID, Title: title, Goal: input.Goal, Context: input.Context, Attachments: input.Attachments, Revision: 1,
 		Status: TaskQueued, BudgetMS: s.taskBudgetMS, UpdatedAt: now}
 	run, err := taskRun(ctx, tx, task, eventID, input, now)
 	if err != nil {
@@ -247,15 +332,19 @@ func (s *Store) ReviseTask(ctx context.Context, eventID int64, key string, taskI
 	if err := validateTaskInput("task", input); err != nil {
 		return Task{}, Run{}, err
 	}
-	payload, err := encodeRequest(requestPayload{TaskID: taskID, Revision: expectedRevision, Input: input})
-	if err != nil {
-		return Task{}, Run{}, err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Task{}, Run{}, err
 	}
 	defer tx.Rollback()
+	input.Attachments, err = s.canonicalTaskAttachments(ctx, tx, input.Attachments)
+	if err != nil {
+		return Task{}, Run{}, err
+	}
+	payload, err := encodeRequest(requestPayload{TaskID: taskID, Revision: expectedRevision, Input: input})
+	if err != nil {
+		return Task{}, Run{}, err
+	}
 	if err := requireUserEvent(ctx, tx, eventID, true); err != nil {
 		return Task{}, Run{}, err
 	}
@@ -307,11 +396,15 @@ func (s *Store) ReviseTask(ctx context.Context, eventID int64, key string, taskI
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='cancelled' WHERE task_id=? AND status IN ('queued','running')`, taskID); err != nil {
 		return Task{}, Run{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET goal=?,context=?,revision=?,status=?,updated_at=? WHERE id=? AND revision=?`,
-		input.Goal, input.Context, newRevision, newStatus, timestamp(now), taskID, expectedRevision); err != nil {
+	attachments, err := json.Marshal(input.Attachments)
+	if err != nil {
 		return Task{}, Run{}, err
 	}
-	task.Goal, task.Context, task.Revision, task.Status, task.UpdatedAt = input.Goal, input.Context, newRevision, newStatus, now
+	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET goal=?,context=?,attachments=?,revision=?,status=?,updated_at=? WHERE id=? AND revision=?`,
+		input.Goal, input.Context, string(attachments), newRevision, newStatus, timestamp(now), taskID, expectedRevision); err != nil {
+		return Task{}, Run{}, err
+	}
+	task.Goal, task.Context, task.Attachments, task.Revision, task.Status, task.UpdatedAt = input.Goal, input.Context, input.Attachments, newRevision, newStatus, now
 	run, err := taskRun(ctx, tx, *task, eventID, input, now)
 	if err != nil {
 		return Task{}, Run{}, err
@@ -457,7 +550,15 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 		return Task{}, Run{}, errors.New("personal: task budget exhausted; explicit extension required")
 	}
 	previous := taskCheckpoint(ctx, tx, taskID, task.Summary)
-	input := TaskInput{Goal: task.Goal, Context: task.Context, Step: step, Previous: previous}
+	stageAttachments, err := previousStageAttachments(ctx, tx, taskID)
+	if err != nil {
+		return Task{}, Run{}, err
+	}
+	input := TaskInput{Goal: task.Goal, Context: task.Context, Step: step, Previous: previous,
+		Attachments: mergeAttachments(task.Attachments, stageAttachments)}
+	if err := s.refreshAttachments(ctx, tx, input.Attachments); err != nil {
+		return Task{}, Run{}, err
+	}
 	if err := validateTaskInput(task.Title, input); err != nil {
 		return Task{}, Run{}, err
 	}
@@ -465,10 +566,14 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='cancelled' WHERE task_id=? AND status='queued'`, taskID); err != nil {
 		return Task{}, Run{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET budget_ms=?,status='queued',updated_at=? WHERE id=? AND revision=?`, task.BudgetMS, timestamp(now), taskID, expectedRevision); err != nil {
+	attachments, err := json.Marshal(input.Attachments)
+	if err != nil {
 		return Task{}, Run{}, err
 	}
-	task.Status, task.UpdatedAt = TaskQueued, now
+	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET attachments=?,budget_ms=?,status='queued',updated_at=? WHERE id=? AND revision=?`, string(attachments), task.BudgetMS, timestamp(now), taskID, expectedRevision); err != nil {
+		return Task{}, Run{}, err
+	}
+	task.Attachments, task.Status, task.UpdatedAt = input.Attachments, TaskQueued, now
 	run, err := taskRun(ctx, tx, *task, eventID, input, now)
 	if err != nil {
 		return Task{}, Run{}, err
@@ -547,7 +652,14 @@ func (s *Store) Task(ctx context.Context, id int64) (*Task, error) {
 	if id <= 0 {
 		return nil, nil
 	}
-	return scanTaskOrNil(s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM personal_tasks WHERE id=?`, id))
+	task, err := scanTaskOrNil(s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM personal_tasks WHERE id=?`, id))
+	if err != nil || task == nil {
+		return task, err
+	}
+	if err := s.refreshAttachments(ctx, s.db, task.Attachments); err != nil {
+		return nil, err
+	}
+	return task, nil
 }
 
 func scanTaskOrNil(row scanner) (*Task, error) {
@@ -578,7 +690,18 @@ func (s *Store) Tasks(ctx context.Context, limit int) ([]Task, error) {
 		}
 		tasks = append(tasks, *task)
 	}
-	return tasks, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range tasks {
+		if err := s.refreshAttachments(ctx, s.db, tasks[i].Attachments); err != nil {
+			return nil, err
+		}
+	}
+	return tasks, nil
 }
 
 func (s *Store) Run(ctx context.Context, id int64) (*Run, error) {
@@ -589,7 +712,10 @@ func (s *Store) Run(ctx context.Context, id int64) (*Run, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return run, err
+	if err != nil || run == nil {
+		return run, err
+	}
+	return run, s.refreshRunAttachments(ctx, s.db, run)
 }
 
 func (s *Store) Runs(ctx context.Context, taskID int64, limit int) ([]Run, error) {
@@ -617,6 +743,14 @@ func (s *Store) Runs(ctx context.Context, taskID int64, limit int) ([]Run, error
 	}
 	for i, j := 0, len(runs)-1; i < j; i, j = i+1, j-1 {
 		runs[i], runs[j] = runs[j], runs[i]
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range runs {
+		if err := s.refreshRunAttachments(ctx, s.db, &runs[i]); err != nil {
+			return nil, err
+		}
 	}
 	return runs, nil
 }
@@ -675,6 +809,9 @@ func (s *Store) ClaimRun(ctx context.Context, kind RunKind) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := s.refreshRunAttachments(ctx, tx, run); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -721,15 +858,19 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 	if runeLen(result.Summary) > maxTaskChars || runeLen(failure) > maxTaskChars {
 		return errors.New("personal: stage result exceeds its size limit")
 	}
-	raw, err := json.Marshal(result)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	result.Attachments, err = s.canonicalTaskAttachments(ctx, tx, result.Attachments)
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
 	var taskID, revision int64
 	var runStatus RunStatus
 	var kind RunKind
@@ -804,6 +945,7 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 
 // Full evidence stays in Run.Result; subsequent stages receive a bounded, valid summary.
 func stageCheckpoint(runID int64, result StageResult) string {
+	result.Attachments = nil
 	checkpoint := struct {
 		RunID int64 `json:"run_id"`
 		StageResult

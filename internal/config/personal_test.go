@@ -70,3 +70,22 @@ func TestPersonalLoggingValidation(t *testing.T) {
 		t.Fatalf("accepted maximum safely convertible logging config: %v", err)
 	}
 }
+
+func TestWeixinConfigDoesNotRequireTelegram(t *testing.T) {
+	t.Chdir(t.TempDir())
+	unsetLoggingEnv(t)
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Model.Name, cfg.Model.APIKey, cfg.Model.BaseURL = "fixture", "test", "https://example.com/v1"
+	cfg.Personal.Channel = "weixin"
+	cfg.Telegram = Telegram{}
+	if err := cfg.ValidatePersonal(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Personal.Channel = "unknown"
+	if err := cfg.ValidatePersonal(); err == nil {
+		t.Fatal("unknown channel accepted")
+	}
+}

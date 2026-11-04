@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"kagari/internal/channel"
 	"kagari/internal/logging"
 )
 
@@ -187,10 +188,10 @@ func TestStoreDeliveryAndRecoveryLogCommittedState(t *testing.T) {
 	if err != nil || delivery == nil {
 		t.Fatalf("claim delivery = (%+v,%v)", delivery, err)
 	}
-	if err := s.UpdateDelivery(ctx, delivery.ID, "uncertain", 0, "remote result unknown", time.Now().Add(time.Minute)); err != nil {
+	if err := s.UpdateDelivery(ctx, delivery.ID, "uncertain", channel.Receipt{}, "remote result unknown", time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpdateDelivery(ctx, delivery.ID, "uncertain", 0, "ignored retry detail", time.Now().Add(2*time.Minute)); err != nil {
+	if err := s.UpdateDelivery(ctx, delivery.ID, "uncertain", channel.Receipt{}, "ignored retry detail", time.Now().Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	assertStoreOutcome(t, logs, 2, "delivery.update", "saved")

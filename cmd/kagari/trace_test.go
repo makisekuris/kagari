@@ -34,7 +34,7 @@ func TestTraceReadsLargeCallsAndReportsMissingTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.AcceptInput(ctx, 1, &personal.Input{MessageID: 10, Text: "private chat"})
+	id, err := acceptTestInput(ctx, s, "private chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestTraceSeparatesStoreIdentityAndMissingEventHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcceptInput(ctx, 1, &personal.Input{MessageID: 10, Text: "hello"}); err != nil {
+	if _, err := acceptTestInput(ctx, s, "hello"); err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
@@ -205,7 +205,7 @@ func TestTraceSelectsTaskBeforeSharedSourceEvent(t *testing.T) {
 	}
 	defer session.Close()
 	ctx = logging.WithLogger(ctx, session.Logger)
-	eventID, err := s.AcceptInput(ctx, 1, &personal.Input{MessageID: 10, Text: "Start two tasks"})
+	eventID, err := acceptTestInput(ctx, s, "Start two tasks")
 	if err != nil {
 		t.Fatal(err)
 	}

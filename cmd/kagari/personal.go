@@ -14,12 +14,14 @@ import (
 	"kagari/internal/agent"
 	"kagari/internal/app"
 	"kagari/internal/browser"
+	"kagari/internal/channel"
 	"kagari/internal/config"
 	"kagari/internal/domain"
 	"kagari/internal/logging"
 	"kagari/internal/persona"
 	"kagari/internal/personal"
 	"kagari/internal/telegram"
+	"kagari/internal/weixin"
 
 	"go.uber.org/zap"
 )
@@ -38,10 +40,6 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 		return err
 	}
 	defer s.Close()
-	ownerID := cfg.Telegram.AllowedUserIDs[0]
-	if err := s.BindOwner(ctx, ownerID); err != nil {
-		return err
-	}
 	storeID, err := s.EnsureIdentity(ctx)
 	if err != nil {
 		return err
@@ -87,19 +85,34 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 		}
 	}
 	main := &personal.MainAgent{Store: s, Log: log, Model: engine.Model, Persona: role.Prompt(), Profile: engine.Profile, MaxIterations: cfg.Agent.MaxIterations, Timeout: cfg.Agent.Timeout}
-	client, err := telegram.NewPersonal(cfg.Telegram, s, log)
+	var client channel.Client
+	if cfg.Personal.Channel == "weixin" {
+		credentials, loadErr := weixin.LoadCredentials(credentialPath(cfg))
+		if loadErr != nil {
+			return fmt.Errorf("load Weixin credentials; run kagari weixin login: %w", loadErr)
+		}
+		if err := s.BindChannel(ctx, "weixin", credentials.AccountID, credentials.UserID, false); err != nil {
+			return err
+		}
+		client, err = weixin.New(credentialPath(cfg), s, s, log)
+	} else {
+		telegramClient, createErr := telegram.NewPersonal(cfg.Telegram, s, s, log)
+		if createErr != nil {
+			return createErr
+		}
+		if err := s.BindChannel(ctx, "telegram", telegramClient.AccountID(), strconv.FormatInt(cfg.Telegram.AllowedUserIDs[0], 10), false); err != nil {
+			return err
+		}
+		client = telegramClient
+	}
 	if err != nil {
 		return err
 	}
-	adapter := telegram.Adapter(client.Send)
 	workspaceDirectory := filepath.Join(cfg.Storage.Path+".workspaces", storeID)
 	runtime := &personal.Runtime{
 		Store: s, Think: main.Think, Execute: personal.TaskExecutor(engine, s, workspaceDirectory), ReviewMemory: main.ReviewMemory,
 		TaskConcurrency: cfg.Personal.TaskConcurrency, Poll: client.Poll, Log: log,
-		Prepare: func(text string) ([]string, error) { return adapter.Prepare(domain.Content{Text: text}) },
-		Send: func(ctx context.Context, text string) (int64, error) {
-			return client.Send(ctx, ownerID, domain.Content{Text: text})
-		},
+		Prepare: channel.PrepareText, Send: client.Send, Ready: client.Ready,
 	}
 	return runtime.Run(ctx)
 }

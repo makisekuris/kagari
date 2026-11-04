@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"kagari/internal/channel"
 	"kagari/internal/domain"
 )
 
@@ -27,7 +28,7 @@ func TestThinkBoundsTaskCallbackAndKeepsFullRunAvailable(t *testing.T) {
 	repo.runs[currentRun.ID] = currentRun
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("get_run", map[string]any{"run_id": currentRun.ID}, "get-full-run"),
-		responseText(`{"text":"Saved the report at reports/report.md.","notify":true}`),
+		responseText(`{"text":"Saved the report at reports/report.md.","notify":true,"attachments":[]}`),
 	}}
 	_, err = newMainAgent(t, fixture, repo).Think(context.Background(), TurnInput{
 		Event: Event{ID: 90, Kind: EventTask, TaskID: 7, RunID: currentRun.ID},
@@ -139,7 +140,7 @@ func TestBoundedTaskResultDropsWholeFilePathsWithMarker(t *testing.T) {
 	if err := json.Unmarshal([]byte(boundedRaw), &bounded); err != nil {
 		t.Fatalf("bounded result is invalid JSON: %v", err)
 	}
-	if runeLen(boundedRaw) > maxTaskRunes || len(bounded.Files) == 0 || !strings.Contains(bounded.Summary, "file paths were omitted") {
+	if runeLen(boundedRaw) > maxTaskRunes || len(bounded.Files) == 0 || !strings.Contains(bounded.Summary, "file references were omitted") {
 		t.Fatalf("oversized file list was not bounded with a marker: %d runes, %+v", runeLen(boundedRaw), bounded)
 	}
 	for i, path := range bounded.Files {
@@ -152,6 +153,54 @@ func TestBoundedTaskResultDropsWholeFilePathsWithMarker(t *testing.T) {
 	}
 }
 
+func TestBoundedTaskResultKeepsFilesAndAttachmentsWithLongSummary(t *testing.T) {
+	result := StageResult{
+		Summary: strings.Repeat("Detailed result. ", 400),
+		Files:   []string{"reports/final report.md"},
+		Attachments: []channel.Attachment{
+			{ID: "immutable-file-id", Name: "final report.md", MIME: "text/markdown", Size: 2048},
+		},
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundedRaw := boundedTaskResult(string(raw))
+	var bounded StageResult
+	if !json.Valid([]byte(boundedRaw)) || json.Unmarshal([]byte(boundedRaw), &bounded) != nil {
+		t.Fatalf("bounded result is not valid JSON: %q", boundedRaw)
+	}
+	if runeLen(boundedRaw) > maxTaskRunes || len(bounded.Files) != 1 || bounded.Files[0] != result.Files[0] {
+		t.Fatalf("workspace path lost or result over budget: %d runes, %+v", runeLen(boundedRaw), bounded)
+	}
+	if len(bounded.Attachments) != 1 || bounded.Attachments[0].ID != result.Attachments[0].ID {
+		t.Fatalf("attachment ID lost or result over budget: %d runes, %+v", runeLen(boundedRaw), bounded)
+	}
+}
+
+func TestTaskOutcomeArtifactsRequireNotification(t *testing.T) {
+	results := map[string]StageResult{
+		"sources":     {Sources: []domain.Source{{ID: "source-1"}}},
+		"files":       {Files: []string{"reports/final.md"}},
+		"attachments": {Attachments: []channel.Attachment{{ID: "attachment-1"}}},
+	}
+	for name, result := range results {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := TurnInput{
+				Event:      Event{Kind: EventTask, TaskID: 7},
+				CurrentRun: &Run{TaskID: 7, Result: string(raw)},
+			}
+			if !taskOutcomeRequiresNotification(input) {
+				t.Fatal("task result artifact did not require notification")
+			}
+		})
+	}
+}
+
 func mustMarshal(t *testing.T, value any) string {
 	t.Helper()
 	raw, err := json.Marshal(value)
@@ -159,4 +208,24 @@ func mustMarshal(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+func TestBoundedTaskResultDropsWholeAttachmentsWithMarker(t *testing.T) {
+	result := StageResult{Summary: "Saved attachments."}
+	for i := 0; i < 50; i++ {
+		result.Attachments = append(result.Attachments, channel.Attachment{ID: fmt.Sprintf("attachment-%032d", i), Name: strings.Repeat("report", 30)})
+	}
+	boundedRaw := boundedTaskResult(mustMarshal(t, result))
+	var bounded StageResult
+	if err := json.Unmarshal([]byte(boundedRaw), &bounded); err != nil {
+		t.Fatal(err)
+	}
+	if runeLen(boundedRaw) > maxTaskRunes || len(bounded.Attachments) == 0 || len(bounded.Attachments) >= len(result.Attachments) || !strings.Contains(bounded.Summary, "file references were omitted") {
+		t.Fatalf("unexpected bounded references: %s", boundedRaw)
+	}
+	for i, attachment := range bounded.Attachments {
+		if attachment.ID != result.Attachments[i].ID {
+			t.Fatalf("attachment ID was changed: %q", attachment.ID)
+		}
+	}
 }

@@ -3,6 +3,7 @@ package personal
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"kagari/internal/channel"
 )
 
 // OpenExisting is deliberately separate from NewStore: diagnostic commands may
@@ -39,7 +42,7 @@ func OpenExisting(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, baseDir: filepath.Dir(abs)}, nil
 }
 
 type EventRecord struct {
@@ -48,14 +51,15 @@ type EventRecord struct {
 }
 
 type DeliveryRecord struct {
-	ID       int64  `json:"id"`
-	EventID  int64  `json:"event_id"`
-	Part     int    `json:"part"`
-	Text     string `json:"text,omitempty"`
-	Status   string `json:"status"`
-	Attempts int    `json:"attempts"`
-	Receipt  *int64 `json:"receipt,omitempty"`
-	Detail   string `json:"detail,omitempty"`
+	ID           int64            `json:"id"`
+	EventID      int64            `json:"event_id"`
+	Part         int              `json:"part"`
+	Text         string           `json:"text,omitempty"`
+	Status       string           `json:"status"`
+	Attempts     int              `json:"attempts"`
+	AttachmentID string           `json:"attachment_id,omitempty"`
+	Receipt      *channel.Receipt `json:"receipt,omitempty"`
+	Detail       string           `json:"detail,omitempty"`
 }
 
 type DiagnosticSnapshot struct {
@@ -69,13 +73,17 @@ type DiagnosticSnapshot struct {
 
 func scanEventRecord(row scanner) (EventRecord, error) {
 	var record EventRecord
-	var task, run, message, reply sql.NullInt64
-	var created string
-	err := row.Scan(&record.ID, &record.Kind, &record.Text, &task, &run, &message, &reply, &record.Interrupted, &created, &record.Status)
+	var task, run sql.NullInt64
+	var attachments, created string
+	err := row.Scan(&record.ID, &record.Kind, &record.Text, &task, &run, &record.Channel, &record.Account, &record.Sender,
+		&record.MessageID, &record.ReplyToID, &attachments, &record.Interrupted, &created, &record.Status)
 	if err != nil {
 		return record, err
 	}
-	record.TaskID, record.RunID, record.MessageID, record.ReplyToID = task.Int64, run.Int64, message.Int64, reply.Int64
+	record.TaskID, record.RunID = task.Int64, run.Int64
+	if err := json.Unmarshal([]byte(attachments), &record.Attachments); err != nil {
+		return record, err
+	}
 	record.CreatedAt, err = parseTimestamp(created)
 	return record, err
 }
@@ -97,7 +105,18 @@ func (s *Store) RecentEvents(ctx context.Context, limit int) ([]EventRecord, err
 		}
 		result = append(result, event)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range result {
+		if err := s.refreshAttachments(ctx, s.db, result[i].Attachments); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 // Diagnostic reads one database snapshot, then releases its transaction before
@@ -174,6 +193,11 @@ func (s *Store) Diagnostic(ctx context.Context, eventID, taskID int64) (Diagnost
 	if err != nil {
 		return result, err
 	}
+	for i := range result.Events {
+		if err := s.refreshAttachments(ctx, tx, result.Events[i].Attachments); err != nil {
+			return result, err
+		}
+	}
 	eventList := inspectionIDs(eventIDs)
 	rows, err = tx.QueryContext(ctx, `SELECT `+taskColumns+` FROM personal_tasks WHERE id IN (`+taskList+`) ORDER BY id`)
 	if err != nil {
@@ -209,15 +233,26 @@ func (s *Store) Diagnostic(ctx context.Context, eventID, taskID int64) (Diagnost
 	if err != nil {
 		return result, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT id,event_id,part,text,status,attempts,receipt,detail FROM personal_outbox WHERE event_id IN (`+eventList+`) ORDER BY id`)
+	rows, err = tx.QueryContext(ctx, `SELECT id,event_id,part,text,attachment_id,status,attempts,
+		receipt_channel,receipt_account,receipt_conversation,receipt_message_id,detail
+		FROM personal_outbox WHERE event_id IN (`+eventList+`) ORDER BY id`)
 	if err != nil {
 		return result, err
 	}
 	for rows.Next() {
 		var delivery DeliveryRecord
-		if err := rows.Scan(&delivery.ID, &delivery.EventID, &delivery.Part, &delivery.Text, &delivery.Status, &delivery.Attempts, &delivery.Receipt, &delivery.Detail); err != nil {
+		var receipt channel.Receipt
+		var attachmentID sql.NullString
+		var receiptChannel, receiptAccount, receiptConversation, receiptMessageID string
+		if err := rows.Scan(&delivery.ID, &delivery.EventID, &delivery.Part, &delivery.Text, &attachmentID, &delivery.Status,
+			&delivery.Attempts, &receiptChannel, &receiptAccount, &receiptConversation, &receiptMessageID, &delivery.Detail); err != nil {
 			rows.Close()
 			return result, err
+		}
+		delivery.AttachmentID = attachmentID.String
+		receipt.Channel, receipt.Account, receipt.Conversation, receipt.MessageID = receiptChannel, receiptAccount, receiptConversation, receiptMessageID
+		if receipt != (channel.Receipt{}) {
+			delivery.Receipt = &receipt
 		}
 		result.Deliveries = append(result.Deliveries, delivery)
 	}

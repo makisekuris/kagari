@@ -17,7 +17,7 @@ const personalFormatInstruction = `Format the supplied assistant draft into the 
 
 Remove internal notes, process commentary, and duplicate drafts. Preserve the draft's supported facts and action states exactly: queued task work remains queued, completed work remains completed, and failed work remains failed. Never turn a promise into a completed action or a failed memory change into a success. A successful memory change is already committed; do not describe it as queued. Do not add facts, permissions, or tasks.
 
-Return only a JSON object with exactly two fields: {"text": string, "notify": boolean}. Keep text concise and preserve the draft's language. If the draft explicitly provides a notify value, preserve it; otherwise use true.`
+Return only a JSON object with exactly three fields: {"text": string, "notify": boolean, "attachments": string[]}. Use an empty attachments array unless the draft explicitly selected existing attachment IDs; preserve those IDs exactly. Keep text concise and preserve the draft's language. If the draft explicitly provides a notify value, preserve it; otherwise use true.`
 
 // Formatting has no repository or tools, so repairing a draft cannot replay mutations.
 func (a *MainAgent) formatTurn(ctx context.Context, raw string) (personalTurnResponse, error) {
@@ -56,10 +56,11 @@ func personalTurnOutputOption() model.Option {
 	return personalJSONOutputOption("personal_turn", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"text":   map[string]any{"type": "string"},
-			"notify": map[string]any{"type": "boolean"},
+			"text":        map[string]any{"type": "string"},
+			"notify":      map[string]any{"type": "boolean"},
+			"attachments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		},
-		"required":             []string{"text", "notify"},
+		"required":             []string{"text", "notify", "attachments"},
 		"additionalProperties": false,
 	})
 }

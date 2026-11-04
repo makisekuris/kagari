@@ -22,7 +22,7 @@ func TestPersonalInspectionDoesNotRecoverServiceWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	id, err := s.AcceptInput(ctx, 1, &personal.Input{MessageID: 1, Text: "research"})
+	id, err := acceptTestInput(ctx, s, "research")
 	if err != nil {
 		t.Fatal(err)
 	}

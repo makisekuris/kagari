@@ -3,6 +3,8 @@ package personal
 import (
 	"encoding/json"
 	"strings"
+
+	"kagari/internal/channel"
 )
 
 func boundedTaskResult(raw string) string {
@@ -24,6 +26,13 @@ func boundedTaskResult(raw string) string {
 		source.Title, source.Author = limitRunes(source.Title, 200), limitRunes(source.Author, 128)
 		source.Reason, source.ReadMethod = limitRunes(source.Reason, 256), limitRunes(source.ReadMethod, 64)
 	}
+	for i := range result.Attachments {
+		attachment := &result.Attachments[i]
+		attachment.Name = limitRunes(attachment.Name, 200)
+		attachment.MIME = limitRunes(attachment.MIME, 128)
+		attachment.Error = limitRunes(attachment.Error, 256)
+	}
+	attachments := append([]channel.Attachment(nil), result.Attachments...)
 	for {
 		encoded, _ := json.Marshal(result)
 		if runeLen(string(encoded)) <= maxTaskRunes {
@@ -38,14 +47,26 @@ func boundedTaskResult(raw string) string {
 		}
 	}
 
-	result.Summary = "[Some file paths were omitted.]"
+	result.Summary = "[Some file references were omitted; use get_run for the full result.]"
 	result.Files = nil
-	for _, file := range files {
-		result.Files = append(result.Files, file)
-		encoded, _ := json.Marshal(result)
-		if runeLen(string(encoded)) > maxTaskRunes {
-			result.Files = result.Files[:len(result.Files)-1]
-			break
+	result.Attachments = nil
+	filesFit, attachmentsFit := true, true
+	for i := 0; i < len(files) || i < len(attachments); i++ {
+		if i < len(files) && filesFit {
+			result.Files = append(result.Files, files[i])
+			encoded, _ := json.Marshal(result)
+			if runeLen(string(encoded)) > maxTaskRunes {
+				result.Files = result.Files[:len(result.Files)-1]
+				filesFit = false
+			}
+		}
+		if i < len(attachments) && attachmentsFit {
+			result.Attachments = append(result.Attachments, attachments[i])
+			encoded, _ := json.Marshal(result)
+			if runeLen(string(encoded)) > maxTaskRunes {
+				result.Attachments = result.Attachments[:len(result.Attachments)-1]
+				attachmentsFit = false
+			}
 		}
 	}
 	encoded, _ := json.Marshal(result)

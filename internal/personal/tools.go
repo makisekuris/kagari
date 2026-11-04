@@ -26,9 +26,10 @@ type personalToolReply struct {
 }
 
 type createTaskArgs struct {
-	Title   string `json:"title"`
-	Goal    string `json:"goal"`
-	Context string `json:"context"`
+	Title       string   `json:"title"`
+	Goal        string   `json:"goal"`
+	Context     string   `json:"context"`
+	Attachments []string `json:"attachments,omitempty"`
 }
 
 type taskArgs struct {
@@ -36,10 +37,11 @@ type taskArgs struct {
 }
 
 type reviseTaskArgs struct {
-	TaskID           int64  `json:"task_id"`
-	ExpectedRevision int64  `json:"expected_revision"`
-	Goal             string `json:"goal"`
-	Context          string `json:"context"`
+	TaskID           int64    `json:"task_id"`
+	ExpectedRevision int64    `json:"expected_revision"`
+	Goal             string   `json:"goal"`
+	Context          string   `json:"context"`
+	Attachments      []string `json:"attachments,omitempty"`
 }
 
 type cancelTaskArgs struct {
@@ -180,11 +182,15 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		if strings.TrimSpace(a.Title) == "" || strings.TrimSpace(a.Goal) == "" {
 			return toolError(fmt.Errorf("title and goal are required")), nil
 		}
+		attachments, err := resolveAttachments(ctx, p.store, a.Attachments)
+		if err != nil {
+			return toolError(err), nil
+		}
 		key, err := p.requestKey("create_task", a)
 		if err != nil {
 			return toolError(err), nil
 		}
-		task, run, err := p.store.CreateTask(ctx, p.event.ID, key, a.Title, TaskInput{Goal: a.Goal, Context: a.Context})
+		task, run, err := p.store.CreateTask(ctx, p.event.ID, key, a.Title, TaskInput{Goal: a.Goal, Context: a.Context, Attachments: attachments})
 		if err != nil {
 			return toolError(err), nil
 		}
@@ -227,18 +233,32 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	updateTask, err := utils.InferTool("update_task", "由直接用户事件更新任务目标，并排队新版本。使用当前 revision。", func(ctx context.Context, a reviseTaskArgs) (personalToolReply, error) {
+	updateTask, err := utils.InferTool("update_task", "由直接用户事件更新任务目标，并排队新版本。使用当前 revision；省略 attachments 保留原材料，空数组清除选定材料。", func(ctx context.Context, a reviseTaskArgs) (personalToolReply, error) {
 		if err := p.directUserMutation(); err != nil {
 			return toolError(err), nil
 		}
 		if a.TaskID <= 0 || a.ExpectedRevision <= 0 || strings.TrimSpace(a.Goal) == "" {
 			return toolError(fmt.Errorf("task_id, expected_revision and goal are required")), nil
 		}
+		attachments, err := resolveAttachments(ctx, p.store, a.Attachments)
+		if err != nil {
+			return toolError(err), nil
+		}
+		if a.Attachments == nil {
+			current, err := p.store.Task(ctx, a.TaskID)
+			if err != nil {
+				return toolError(err), nil
+			}
+			if current == nil {
+				return toolError(fmt.Errorf("task not found")), nil
+			}
+			attachments = current.Attachments
+		}
 		key, err := p.requestKey("update_task", a)
 		if err != nil {
 			return toolError(err), nil
 		}
-		task, run, err := p.store.ReviseTask(ctx, p.event.ID, key, a.TaskID, a.ExpectedRevision, TaskInput{Goal: a.Goal, Context: a.Context})
+		task, run, err := p.store.ReviseTask(ctx, p.event.ID, key, a.TaskID, a.ExpectedRevision, TaskInput{Goal: a.Goal, Context: a.Context, Attachments: attachments})
 		if err != nil {
 			return toolError(err), nil
 		}

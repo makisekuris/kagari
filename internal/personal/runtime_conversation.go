@@ -95,10 +95,14 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 	if ctx.Err() != nil {
 		return true, ctx.Err()
 	}
-	if thinkErr != nil || (!output.Silent && strings.TrimSpace(output.Text) == "") || (event.Kind == EventUser && output.Silent) {
+	if thinkErr != nil || (!output.Silent && strings.TrimSpace(output.Text) == "" && len(output.Attachments) == 0) || (event.Kind == EventUser && output.Silent) {
 		outcome = "fallback_reply"
 		log.Warn("conversation.model.failed", logging.ErrorFields(thinkErr)...)
-		output = TurnOutput{Text: "这轮回复未能完成。已提交的任务和记忆操作仍保留，可以继续查询。", TaskID: event.TaskID}
+		fallback := "这轮回复未能完成。已提交的任务和记忆操作仍保留，可以继续查询。"
+		if errors.Is(thinkErr, ErrAttachmentUnavailable) {
+			fallback = "要发送的附件已删除或不可用，未发送。请重新上传或重新生成文件。"
+		}
+		output = TurnOutput{Text: fallback, TaskID: event.TaskID}
 		if event.Kind == EventTask {
 			output.Text = fmt.Sprintf("后台结果（执行 #%d）：\n%s", event.RunID, clip(event.Text, 6000))
 		}
@@ -118,6 +122,13 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 		} else if current != nil && current.Status == TaskWaitingBudget {
 			output = TurnOutput{TaskID: task.ID, Text: fmt.Sprintf("任务 #%d 已用完本轮执行预算，等待你选择是否继续。\n\n%s", task.ID, clip(current.Summary, 6000))}
 		}
+	}
+	if errors.Is(thinkErr, ErrAttachmentUnavailable) && !strings.Contains(output.Text, "要发送的附件已删除或不可用") {
+		if output.Text != "" {
+			output.Text += "\n\n"
+		}
+		output.Text += "要发送的附件已删除或不可用，未发送。请重新上传或重新生成文件。"
+		output.Attachments = nil
 	}
 	if output.Silent {
 		outcome = "silent"
@@ -149,14 +160,29 @@ func (r *Runtime) publish(ctx context.Context, event Event, output TurnOutput) e
 	if output.Silent {
 		return r.Store.CompleteEvent(ctx, event.ID, TurnOutput{TaskID: output.TaskID, Silent: true}, nil)
 	}
-	chunks, err := r.Prepare(output.Text)
-	if err != nil {
-		return err
+	var chunks []string
+	if output.Text != "" {
+		var err error
+		chunks, err = r.Prepare(output.Text)
+		if err != nil {
+			return err
+		}
 	}
-	if len(chunks) == 0 {
+	if len(chunks) == 0 && len(output.Attachments) == 0 {
 		return errors.New("personal delivery produced no message")
 	}
-	return r.Store.CompleteEvent(ctx, event.ID, output, chunks)
+	if err := r.Store.CompleteEvent(ctx, event.ID, output, chunks); err != nil {
+		if !errors.Is(err, ErrAttachmentUnavailable) || len(output.Attachments) == 0 {
+			return err
+		}
+		fallback := TurnOutput{TaskID: output.TaskID, Text: "要发送的附件已删除或不可用，未发送。请重新上传或重新生成文件。"}
+		fallbackChunks, prepareErr := r.Prepare(fallback.Text)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		return r.Store.CompleteEvent(ctx, event.ID, fallback, fallbackChunks)
+	}
+	return nil
 }
 
 func (r *Runtime) context(ctx context.Context, event Event) (TurnInput, error) {

@@ -28,6 +28,7 @@ type Model struct {
 }
 
 type Personal struct {
+	Channel         string        `mapstructure:"channel"`
 	TaskConcurrency int           `mapstructure:"task_concurrency"`
 	TaskBudget      time.Duration `mapstructure:"task_budget"`
 }

@@ -6,12 +6,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"kagari/internal/channel"
 )
 
 func testStore(t *testing.T, path string, budget time.Duration) *Store {
+	t.Helper()
+	s := emptyTestStore(t, path, budget)
+	if err := s.BindChannel(context.Background(), "telegram", "test-bot", "test-owner", false); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func emptyTestStore(t *testing.T, path string, budget time.Duration) *Store {
 	t.Helper()
 	s, err := NewStore(path, budget)
 	if err != nil {
@@ -21,12 +33,25 @@ func testStore(t *testing.T, path string, budget time.Duration) *Store {
 	return s
 }
 
-func openUserEvent(t *testing.T, s *Store, updateID, messageID int64, text string) Event {
+func sourceInput(messageID, text string) Input {
+	return Input{Channel: "telegram", Account: "test-bot", Sender: "test-owner", MessageID: messageID, Text: text}
+}
+
+func acceptInput(t *testing.T, s *Store, cursor string, input Input) int64 {
 	t.Helper()
-	id, err := s.AcceptInput(context.Background(), updateID, &Input{MessageID: messageID, Text: text})
+	ids, err := s.AcceptBatch(context.Background(), input.Channel, input.Account, cursor, []Input{input})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(ids) != 1 {
+		t.Fatalf("AcceptBatch returned %d IDs", len(ids))
+	}
+	return ids[0]
+}
+
+func openUserEvent(t *testing.T, s *Store, updateID, messageID int64, text string) Event {
+	t.Helper()
+	id := acceptInput(t, s, strconv.FormatInt(updateID, 10), sourceInput(strconv.FormatInt(messageID, 10), text))
 	event, err := s.ClaimEvent(context.Background())
 	if err != nil || event == nil || event.ID != id {
 		t.Fatalf("ClaimEvent() = (%+v, %v), want event %d", event, err, id)
@@ -50,28 +75,13 @@ func finishEvent(t *testing.T, s *Store, event Event, output TurnOutput, chunks 
 	}
 }
 
-func TestStoreRestartOwnerOffsetAndV1Preservation(t *testing.T) {
+func TestStoreRestartBindingCursorIdentityAndChannelIsolation(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "personal.db")
-	legacy, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := legacy.Exec(`CREATE TABLE jobs(id INTEGER PRIMARY KEY, payload TEXT); INSERT INTO jobs VALUES(1,'keep')`); err != nil {
-		t.Fatal(err)
-	}
-	if err := legacy.Close(); err != nil {
-		t.Fatal(err)
-	}
 	s := testStore(t, path, 30*time.Minute)
-	if err := s.BindOwner(ctx, 42); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.BindOwner(ctx, 42); err != nil {
-		t.Fatalf("same owner rebind: %v", err)
-	}
-	if err := s.BindOwner(ctx, 43); err == nil {
-		t.Fatal("different owner was accepted")
+	storeID, err := s.EnsureIdentity(ctx)
+	if err != nil || storeID == "" {
+		t.Fatalf("EnsureIdentity() = (%q,%v)", storeID, err)
 	}
 	event := openUserEvent(t, s, 100, 900, "Make a durable task")
 	task, _ := createTask(t, s, event, "create", "research", "Compare options", "scope")
@@ -80,38 +90,78 @@ func TestStoreRestartOwnerOffsetAndV1Preservation(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT task_id FROM personal_events WHERE id=?`, event.ID).Scan(&associatedTask); err != nil || associatedTask.Valid {
 		t.Fatalf("zero TaskID created an association: (%+v,%v)", associatedTask, err)
 	}
-	if id, err := s.AcceptInput(ctx, 100, &Input{MessageID: 901, Text: "duplicate"}); err != nil || id != 0 {
-		t.Fatalf("duplicate update = (%d,%v), want ignored", id, err)
+	if id := acceptInput(t, s, "101", sourceInput("900", "duplicate telegram message")); id != 0 {
+		t.Fatalf("duplicate source created event %d", id)
 	}
-	if _, err := s.AcceptInput(ctx, 101, &Input{MessageID: 900, Text: "duplicate Telegram message"}); err == nil {
-		t.Fatal("duplicate external message ID was accepted")
+	if cursor, err := s.Cursor(ctx, "telegram", "test-bot"); err != nil || cursor != "101" {
+		t.Fatalf("Cursor() = (%q,%v)", cursor, err)
 	}
-	if offset, err := s.Offset(ctx); err != nil || offset != 101 {
-		t.Fatalf("failed input advanced offset: (%d,%v)", offset, err)
+	if err := s.BindChannel(ctx, "weixin", "wx-bot", "wx-owner", false); err != nil {
+		t.Fatal(err)
 	}
-	if id, err := s.AcceptInput(ctx, 105, nil); err != nil || id != 0 {
-		t.Fatalf("offset-only update = (%d,%v)", id, err)
-	}
-	if offset, err := s.Offset(ctx); err != nil || offset != 106 {
-		t.Fatalf("Offset() = (%d,%v), want 106", offset, err)
+	weixinInput := Input{Channel: "weixin", Account: "wx-bot", Sender: "wx-owner", MessageID: "900", Text: "same ID on Weixin"}
+	weixinIDs, err := s.AcceptBatch(ctx, "weixin", "wx-bot", "opaque:next", []Input{weixinInput})
+	if err != nil || len(weixinIDs) != 1 || weixinIDs[0] == 0 {
+		t.Fatalf("cross-channel same ID = (%v,%v)", weixinIDs, err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
 	s2 := testStore(t, path, 30*time.Minute)
-	if err := s2.BindOwner(ctx, 43); err == nil {
-		t.Fatal("restart changed the bound owner")
+	gotIdentity, err := s2.Identity(ctx)
+	if err != nil || gotIdentity != storeID {
+		t.Fatalf("restarted store identity = (%q,%v)", gotIdentity, err)
 	}
-	if offset, err := s2.Offset(ctx); err != nil || offset != 106 {
-		t.Fatalf("restarted Offset() = (%d,%v)", offset, err)
+	if cursor, err := s2.Cursor(ctx, "telegram", "test-bot"); err != nil || cursor != "101" {
+		t.Fatalf("restarted Cursor() = (%q,%v)", cursor, err)
+	}
+	if err := s2.BindChannel(ctx, "telegram", "other-bot", "test-owner", false); err == nil {
+		t.Fatal("account change bypassed explicit rebind")
+	}
+	if err := s2.BindChannel(ctx, "telegram", "test-bot", "other-owner", false); err == nil {
+		t.Fatal("sender change bypassed explicit rebind")
+	}
+	if err := s2.CheckChannelBinding(ctx, "telegram", "other-bot", "other-owner", true); err != nil {
+		t.Fatalf("dry-run rebind check: %v", err)
+	}
+	if err := s2.BindChannel(ctx, "telegram", "test-bot", "test-owner", false); err != nil {
+		t.Fatalf("dry-run changed the binding: %v", err)
+	}
+	if err := s2.BindChannel(ctx, "telegram", "other-bot", "other-owner", true); err != nil {
+		t.Fatalf("explicit rebind: %v", err)
+	}
+	if _, err := s2.AcceptBatch(ctx, "telegram", "other-bot", "102", []Input{sourceInput("901", "old sender")}); err == nil {
+		t.Fatal("old bound sender remained authorized")
 	}
 	got, err := s2.Task(ctx, task.ID)
 	if err != nil || got == nil || got.Goal != "Compare options" || got.Context != "scope" || got.BudgetMS != int64((30*time.Minute)/time.Millisecond) {
 		t.Fatalf("persisted Task() = (%+v,%v)", got, err)
 	}
-	var payload string
-	if err := s2.db.QueryRowContext(ctx, `SELECT payload FROM jobs WHERE id=1`).Scan(&payload); err != nil || payload != "keep" {
-		t.Fatalf("legacy V1 row = (%q,%v)", payload, err)
+}
+
+func TestStoreRefusesUnrecognizedPersonalSchemaWithoutDeletingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-personal.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE personal_state(id INTEGER PRIMARY KEY); INSERT INTO personal_state VALUES(1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(path, time.Minute); err == nil {
+		t.Fatal("unrecognized personal schema was accepted")
+	}
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM personal_state`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("old schema was changed: count=%d err=%v", count, err)
 	}
 }
 
@@ -480,8 +530,8 @@ func TestMemoryProvenanceCASForgetReplayAndQuietReview(t *testing.T) {
 	firstText := "I prefer concise summaries in Chinese."
 	first := openUserEvent(t, s, 1, 301, firstText)
 	finishEvent(t, s, first, TurnOutput{Silent: true}, nil)
-	if id, err := s.AcceptInput(ctx, 1, &Input{MessageID: 302, Text: "duplicate"}); err != nil || id != 0 {
-		t.Fatalf("duplicate source = (%d,%v)", id, err)
+	if id := acceptInput(t, s, "1", sourceInput("301", "duplicate payload")); id != 0 {
+		t.Fatalf("duplicate source created event %d", id)
 	}
 	var reviews int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_runs WHERE event_id=? AND kind='memory_review'`, first.ID).Scan(&reviews); err != nil || reviews != 1 {
@@ -509,10 +559,9 @@ func TestMemoryProvenanceCASForgetReplayAndQuietReview(t *testing.T) {
 	if delivery, err := s.ClaimDelivery(ctx); err != nil || delivery != nil {
 		t.Fatalf("silent event created delivery: (%+v,%v)", delivery, err)
 	}
-	material, err := s.AcceptInput(ctx, 2, &Input{MessageID: 303, Text: "a forwarded article", Material: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	materialInput := sourceInput("303", "a forwarded article")
+	materialInput.Material = true
+	material := acceptInput(t, s, "2", materialInput)
 	materialEvent, err := s.ClaimEvent(ctx)
 	if err != nil || materialEvent == nil || materialEvent.ID != material {
 		t.Fatalf("material event = (%+v,%v)", materialEvent, err)
@@ -677,36 +726,39 @@ func TestOutboxOrderReceiptsReplyLinkingAndUnknownRecovery(t *testing.T) {
 	if err != nil || first == nil || first.Text != "first" || first.Attempts != 1 || first.TaskID != task.ID {
 		t.Fatalf("first delivery = (%+v,%v)", first, err)
 	}
-	if err := s.UpdateDelivery(ctx, first.ID, "sent", 9001, "", time.Time{}); err != nil {
+	firstReceipt := channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner", MessageID: "9001"}
+	if err := s.UpdateDelivery(ctx, first.ID, "sent", firstReceipt, "", time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpdateDelivery(ctx, first.ID, "sent", 9001, "", time.Time{}); err != nil {
+	if err := s.UpdateDelivery(ctx, first.ID, "sent", firstReceipt, "", time.Time{}); err != nil {
 		t.Fatalf("same sent receipt retry: %v", err)
 	}
 	second, err := s.ClaimDelivery(ctx)
 	if err != nil || second == nil || second.Text != "second" {
 		t.Fatalf("second delivery = (%+v,%v)", second, err)
 	}
-	if err := s.UpdateDelivery(ctx, second.ID, "uncertain", 0, "response lost", time.Now().Add(time.Hour)); err != nil {
+	if err := s.UpdateDelivery(ctx, second.ID, "uncertain", channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner"}, "response lost", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if next, err := s.ClaimDelivery(ctx); err != nil || next != nil {
-		t.Fatalf("third chunk passed uncertain second: (%+v,%v)", next, err)
+	third, err := s.ClaimDelivery(ctx)
+	if err != nil || third == nil || third.Text != "third" {
+		t.Fatalf("third chunk stayed blocked after uncertain second: (%+v,%v)", third, err)
+	}
+	if err := s.UpdateDelivery(ctx, third.ID, "sent", channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner"}, "", time.Time{}); err != nil {
+		t.Fatal(err)
 	}
 
-	byReceipt, err := s.AcceptInput(ctx, 2, &Input{MessageID: 502, ReplyToID: 9001, Text: "Reply to the first answer"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	byReceiptInput := sourceInput("502", "Reply to the first answer")
+	byReceiptInput.ReplyToID = "9001"
+	byReceipt := acceptInput(t, s, "2", byReceiptInput)
 	replyEvent, err := s.ClaimEvent(ctx)
 	if err != nil || replyEvent == nil || replyEvent.ID != byReceipt || replyEvent.TaskID != task.ID {
 		t.Fatalf("receipt reply link = (%+v,%v)", replyEvent, err)
 	}
 	finishEvent(t, s, *replyEvent, TurnOutput{}, nil)
-	byInbound, err := s.AcceptInput(ctx, 3, &Input{MessageID: 503, ReplyToID: 501, Text: "Reply to my source"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	byInboundInput := sourceInput("503", "Reply to my source")
+	byInboundInput.ReplyToID = "501"
+	byInbound := acceptInput(t, s, "3", byInboundInput)
 	inboundReply, err := s.ClaimEvent(ctx)
 	if err != nil || inboundReply == nil || inboundReply.ID != byInbound || inboundReply.TaskID != task.ID {
 		t.Fatalf("inbound reply link = (%+v,%v)", inboundReply, err)
@@ -869,11 +921,11 @@ func TestCancelTaskIdempotenceAndLateStageNoop(t *testing.T) {
 	finishEvent(t, s, continueEvent, TurnOutput{}, nil)
 }
 
-func TestPersonalSchemaKeepsTenTablesWithoutDerivedColumns(t *testing.T) {
+func TestPersonalSchemaKeepsChannelTablesWithoutDerivedColumns(t *testing.T) {
 	s := testStore(t, ":memory:", time.Minute)
 	var tables int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'personal_%'`).Scan(&tables); err != nil || tables != 10 {
-		t.Fatalf("personal tables = (%d,%v), want 10", tables, err)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'personal_%'`).Scan(&tables); err != nil || tables != 13 {
+		t.Fatalf("personal tables = (%d,%v), want 13", tables, err)
 	}
 	for _, field := range []struct{ table, column string }{
 		{"personal_runs", "remaining_ms"},
