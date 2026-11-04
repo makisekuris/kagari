@@ -10,6 +10,7 @@ import (
 
 type SendError struct {
 	Reason     string
+	APICode    int // Zero when the transport cannot establish a remote response code.
 	RetryAfter time.Duration
 	Permanent  bool
 	Uncertain  bool

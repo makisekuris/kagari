@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
+	"time"
 
 	"kagari/internal/agent"
 	"kagari/internal/app"
 	"kagari/internal/browser"
 	"kagari/internal/config"
 	"kagari/internal/domain"
+	"kagari/internal/logging"
 	"kagari/internal/persona"
 	"kagari/internal/personal"
 	"kagari/internal/telegram"
@@ -20,7 +23,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func runPersonal(ctx context.Context, cfg config.Config, read func(context.Context, string) (domain.Source, error), log *zap.Logger) error {
+func runPersonal(ctx context.Context, cfg config.Config, read func(context.Context, string) (domain.Source, error), log *zap.Logger) (runErr error) {
 	if err := cfg.ValidatePersonal(); err != nil {
 		return err
 	}
@@ -38,6 +41,39 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 	if err := s.BindOwner(ctx, ownerID); err != nil {
 		return err
 	}
+	storeID, err := s.EnsureIdentity(ctx)
+	if err != nil {
+		return err
+	}
+	directory := cfg.Logging.Directory
+	if directory == "" {
+		directory = logging.DefaultDirectory(cfg.Storage.Path)
+	}
+	var level zap.AtomicLevel
+	if err := level.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
+		return err
+	}
+	session, err := logging.Open(logging.Options{
+		Directory: directory, StoreID: storeID, Console: os.Stderr, Level: level.Level(),
+		RotateBytes: cfg.Logging.RotateMiB << 20, MaxBytes: cfg.Logging.MaxTotalMiB << 20,
+		MaxAge:  time.Duration(cfg.Logging.RetentionDays) * 24 * time.Hour,
+		Secrets: []string{cfg.Model.APIKey, cfg.Telegram.Token},
+	})
+	if err != nil {
+		return fmt.Errorf("initialize service logs: %w", err)
+	}
+	log = session.Logger
+	ctx = logging.WithLogger(ctx, log)
+	defer func() {
+		if runErr != nil {
+			log.Error("service.stopped", logging.ErrorFields(runErr)...)
+		} else {
+			log.Info("service.stopped")
+		}
+		runErr = errors.Join(runErr, session.Close())
+	}()
+	// No polling or worker starts before the persistent log has opened successfully.
+	log.Info("service.starting", zap.String("log_directory", directory), zap.Int("task_concurrency", cfg.Personal.TaskConcurrency))
 	role := persona.Default()
 	engine, err := agent.New(ctx, cfg, read, nil, role)
 	if err != nil {
@@ -82,7 +118,7 @@ func inspectPersonal(ctx context.Context, cfg config.Config, args []string, out 
 			return errors.New("TASK_ID must be a positive integer")
 		}
 	}
-	s, err := personal.NewStore(cfg.Storage.Path, cfg.Personal.TaskBudget)
+	s, err := personal.OpenExisting(ctx, cfg.Storage.Path)
 	if err != nil {
 		return err
 	}

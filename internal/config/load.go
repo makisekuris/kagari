@@ -25,6 +25,7 @@ func Load(path string) (Config, error) {
 		"reader.max_links": 40, "reader.cache_ttl": "24h", "reader.allowed_non_public_cidrs": []string{},
 		"agent.max_sources":         6,
 		"personal.task_concurrency": 4, "personal.task_budget": "30m",
+		"logging.directory": "", "logging.rotate_mib": 50, "logging.max_total_mib": 1024, "logging.retention_days": 7,
 		"browser.enabled": false, "browser.command": "npx", "browser.args": []string{"-y", "@playwright/mcp@0.0.82", "--headless", "--isolated", "--codegen", "none"},
 		"agent.max_iterations": 10, "agent.timeout": "3m",
 		"agent.streaming": false,

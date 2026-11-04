@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 const maxMemoryKeyChars = 128
@@ -83,7 +85,10 @@ func (s *Store) WriteMemory(ctx context.Context, eventID int64, key string, chan
 		if err != nil {
 			return Memory{}, err
 		}
-		if err := tx.Commit(); err != nil {
+		if err := commitStoreOutcome(ctx, tx, "memory.write", "replayed", *memory,
+			zap.Int64("event_id", eventID), zap.Int64("memory_history_id", historyID),
+			zap.String("memory_key", memory.Key), zap.Int64("version", memory.Version),
+			zap.Bool("deleted", memory.Deleted), zap.String("memory_operation", change.Operation)); err != nil {
 			return Memory{}, err
 		}
 		return *memory, nil
@@ -102,7 +107,10 @@ func (s *Store) WriteMemory(ctx context.Context, eventID int64, key string, chan
 	if err := insertRequest(ctx, tx, eventID, key, "write_memory", payload, 0, 0, historyID); err != nil {
 		return Memory{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitStoreOutcome(ctx, tx, "memory.write", "applied", *memory,
+		zap.Int64("event_id", eventID), zap.Int64("memory_history_id", historyID),
+		zap.String("memory_key", memory.Key), zap.Int64("version", memory.Version),
+		zap.Bool("deleted", memory.Deleted), zap.String("memory_operation", change.Operation)); err != nil {
 		return Memory{}, err
 	}
 	return *memory, nil
@@ -253,7 +261,9 @@ func (s *Store) FinishMemoryReview(ctx context.Context, runID int64, review Memo
 		return errors.New("personal: FinishMemoryReview requires a review run")
 	}
 	if status == RunCompleted || status == RunFailed || status == RunCancelled {
-		return tx.Commit()
+		return commitStoreOutcome(ctx, tx, "memory.review.finish", "ignored_terminal", nil,
+			zap.Int64("event_id", eventID), zap.Int64("run_id", runID),
+			zap.String("run_status", string(status)), zap.Int("proposed_count", len(review.Changes)))
 	}
 	if status != RunRunning {
 		return fmt.Errorf("personal: cannot finish memory review %d in state %q", runID, status)
@@ -277,15 +287,21 @@ func (s *Store) FinishMemoryReview(ctx context.Context, runID int64, review Memo
 			seen[change.Key] = true
 		}
 	}
+	appliedMemories := make([]Memory, 0, len(review.Changes))
+	conflicts := 0
 	if failureText == "" && review.Question == "" {
 		for _, change := range review.Changes {
-			_, _, err := applyMemoryChange(ctx, tx, eventID, runID, change, sourceText, true)
+			memory, _, err := applyMemoryChange(ctx, tx, eventID, runID, change, sourceText, true)
 			if errors.Is(err, errMemoryVersionConflict) {
 				// Reviews are snapshots: version conflicts and facts superseded by newer input are skipped.
+				conflicts++
 				continue
 			}
 			if err != nil {
 				return err
+			}
+			if memory != nil {
+				appliedMemories = append(appliedMemories, *memory)
 			}
 		}
 	}
@@ -293,7 +309,9 @@ func (s *Store) FinishMemoryReview(ctx context.Context, runID int64, review Memo
 	if err != nil {
 		return err
 	}
+	finalStatus := RunCompleted
 	if failureText != "" {
+		finalStatus = RunFailed
 		if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='failed',result=?,error=? WHERE id=? AND status='running'`, string(raw), failureText, runID); err != nil {
 			return err
 		}
@@ -302,7 +320,11 @@ func (s *Store) FinishMemoryReview(ctx context.Context, runID int64, review Memo
 			return err
 		}
 	}
-	return tx.Commit()
+	payload := memoryReviewOutcomePayload{Review: review, Applied: appliedMemories, Failure: failureText}
+	return commitStoreOutcome(ctx, tx, "memory.review.finish", string(finalStatus), payload,
+		zap.Int64("event_id", eventID), zap.Int64("run_id", runID), zap.String("run_status", string(finalStatus)),
+		zap.Int("proposed_count", len(review.Changes)), zap.Int("applied_count", len(appliedMemories)),
+		zap.Int("skipped_count", len(review.Changes)-len(appliedMemories)), zap.Int("conflict_count", conflicts))
 }
 
 func scanMemory(row scanner) (*Memory, error) {

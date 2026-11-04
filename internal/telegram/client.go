@@ -147,15 +147,15 @@ func sendTelegram(bot *telegrambot.Bot, ctx context.Context, chatID int64, conte
 func sendError(err error) *SendError {
 	var limited *telegrambot.TooManyRequestsError
 	if errors.As(err, &limited) {
-		return &SendError{Reason: "Telegram rate limit", RetryAfter: retryAfter(limited.RetryAfter)}
+		return &SendError{Reason: "Telegram rate limit", APICode: 429, RetryAfter: retryAfter(limited.RetryAfter)}
 	}
 	switch {
 	case errors.Is(err, telegrambot.ErrorBadRequest):
-		return &SendError{Reason: "Telegram rejected the message", Permanent: true}
+		return &SendError{Reason: "Telegram rejected the message", APICode: 400, Permanent: true}
 	case errors.Is(err, telegrambot.ErrorUnauthorized):
-		return &SendError{Reason: "Telegram authorization failed", Permanent: true}
+		return &SendError{Reason: "Telegram authorization failed", APICode: 401, Permanent: true}
 	case errors.Is(err, telegrambot.ErrorForbidden):
-		return &SendError{Reason: "Telegram does not allow this message", Permanent: true}
+		return &SendError{Reason: "Telegram does not allow this message", APICode: 403, Permanent: true}
 	default:
 		return &SendError{Reason: "Telegram send outcome is unknown", Uncertain: true}
 	}

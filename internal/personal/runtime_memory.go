@@ -6,11 +6,19 @@ import (
 	"kagari/internal/logging"
 )
 
-func (r *Runtime) memory(ctx context.Context) (bool, error) {
+func (r *Runtime) memory(ctx context.Context) (worked bool, runErr error) {
 	run, err := r.Store.ClaimRun(ctx, RunMemoryReview)
 	if err != nil || run == nil {
 		return false, err
 	}
+	log := r.runLog(*run)
+	ctx = logging.WithLogger(ctx, log)
+	log.Info("memory.review.started")
+	defer func() {
+		if runErr != nil {
+			log.Warn("memory.review.persistence_failed", logging.ErrorFields(runErr)...)
+		}
+	}()
 	input, err := r.Store.MemoryReviewInput(ctx, run.ID)
 	if err != nil {
 		return true, err

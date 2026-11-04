@@ -17,6 +17,8 @@ import (
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"go.uber.org/zap"
+
+	"kagari/internal/logging"
 )
 
 const (
@@ -76,9 +78,16 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 		return TurnOutput{}, fmt.Errorf("encode personal input: %w", err)
 	}
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	observer := logging.NewCallbackObserver("think")
+	modelCtx, cancelModel := context.WithCancel(ctx)
 	// Some Responses endpoints suppress function calls when text.format also requires JSON Schema.
 	// Validate the final response locally; the memory-only reviewer can still use strict wire output.
-	output, err := consumePersonalEvents(runner.Query(ctx, string(encoded)))
+	output, err := consumePersonalEvents(runner.Query(modelCtx, string(encoded), adk.WithCallbacks(observer)))
+	if err != nil {
+		cancelModel()
+	}
+	observer.Wait()
+	cancelModel()
 	if err != nil {
 		return TurnOutput{}, err
 	}

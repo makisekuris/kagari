@@ -12,11 +12,24 @@ import (
 	"go.uber.org/zap"
 )
 
-func (r *Runtime) turn(ctx context.Context) (bool, error) {
+func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 	event, err := r.Store.ClaimEvent(ctx)
 	if err != nil || event == nil {
 		return false, err
 	}
+	log := r.eventLog(*event)
+	ctx = logging.WithLogger(ctx, log)
+	turnStarted := time.Now()
+	outcome := "completed"
+	log.Info("conversation.started", zap.Any("payload", event))
+	defer func() {
+		fields := []zap.Field{zap.Int64("elapsed_ms", time.Since(turnStarted).Milliseconds())}
+		if turnErr != nil {
+			log.Warn("conversation.failed", append(fields, logging.ErrorFields(turnErr)...)...)
+		} else {
+			log.Info("conversation.finished", append(fields, zap.String("outcome", outcome))...)
+		}
+	}()
 	input, err := r.context(ctx, *event)
 	if err != nil {
 		return true, err
@@ -28,6 +41,7 @@ func (r *Runtime) turn(ctx context.Context) (bool, error) {
 			return true, err
 		}
 		if input.CurrentRun == nil || task == nil || input.CurrentRun.Revision != task.Revision || task.Status == TaskCancelled {
+			outcome = "stale"
 			return true, r.Store.CompleteEvent(ctx, event.ID, TurnOutput{}, nil)
 		}
 		if task.Status == TaskWaitingBudget {
@@ -35,6 +49,7 @@ func (r *Runtime) turn(ctx context.Context) (bool, error) {
 		}
 	}
 	if event.Interrupted {
+		outcome = "recovered"
 		return true, r.recoverTurn(ctx, *event, task)
 	}
 	started := time.Now()
@@ -81,7 +96,8 @@ func (r *Runtime) turn(ctx context.Context) (bool, error) {
 		return true, ctx.Err()
 	}
 	if thinkErr != nil || (!output.Silent && strings.TrimSpace(output.Text) == "") || (event.Kind == EventUser && output.Silent) {
-		r.Log.Warn("personal conversation turn failed", zap.Int64("event_id", event.ID), zap.String("reason", logging.ErrorReason(thinkErr)))
+		outcome = "fallback_reply"
+		log.Warn("conversation.model.failed", logging.ErrorFields(thinkErr)...)
 		output = TurnOutput{Text: "这轮回复未能完成。已提交的任务和记忆操作仍保留，可以继续查询。", TaskID: event.TaskID}
 		if event.Kind == EventTask {
 			output.Text = fmt.Sprintf("后台结果（执行 #%d）：\n%s", event.RunID, clip(event.Text, 6000))
@@ -102,6 +118,9 @@ func (r *Runtime) turn(ctx context.Context) (bool, error) {
 		} else if current != nil && current.Status == TaskWaitingBudget {
 			output = TurnOutput{TaskID: task.ID, Text: fmt.Sprintf("任务 #%d 已用完本轮执行预算，等待你选择是否继续。\n\n%s", task.ID, clip(current.Summary, 6000))}
 		}
+	}
+	if output.Silent {
+		outcome = "silent"
 	}
 	return true, r.publish(ctx, *event, output)
 }
@@ -128,7 +147,7 @@ func (r *Runtime) recoverTurn(ctx context.Context, event Event, task *Task) erro
 
 func (r *Runtime) publish(ctx context.Context, event Event, output TurnOutput) error {
 	if output.Silent {
-		return r.Store.CompleteEvent(ctx, event.ID, TurnOutput{TaskID: output.TaskID}, nil)
+		return r.Store.CompleteEvent(ctx, event.ID, TurnOutput{TaskID: output.TaskID, Silent: true}, nil)
 	}
 	chunks, err := r.Prepare(output.Text)
 	if err != nil {

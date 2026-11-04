@@ -18,8 +18,14 @@ personal:
   task_budget: 30m # Cumulative execution time per Task, including automatic planning; waiting is excluded.
 
 profile_path: profile.md
-log_level: info
+log_level: info # V2 terminal level; file logs retain info+ and legacy CLI behavior is unchanged.
 max_attempts: 6 # Includes the first attempt; at most five retries.
+
+logging:
+  directory: "" # Empty uses kagari.logs beside storage.path; full payloads are logged after known credentials are redacted.
+  rotate_mib: 50
+  max_total_mib: 1024
+  retention_days: 7 # Rotated files are removed when they exceed this total-size cap or age limit.
 
 reader:
   timeout: 20s

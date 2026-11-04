@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 func (s *Store) ClaimDelivery(ctx context.Context) (*Outgoing, error) {
@@ -76,21 +78,29 @@ func (s *Store) UpdateDelivery(ctx context.Context, id int64, status string, rec
 		return err
 	}
 	defer tx.Rollback()
-	var oldStatus string
+	var oldStatus, oldDetail, oldNextAttemptAt string
 	var oldReceipt sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT status,receipt FROM personal_outbox WHERE id=?`, id).Scan(&oldStatus, &oldReceipt); err != nil {
+	var eventID int64
+	var taskID sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT d.status,d.receipt,d.detail,d.next_attempt_at,d.event_id,e.task_id
+		FROM personal_outbox d JOIN personal_events e ON e.id=d.event_id WHERE d.id=?`, id).
+		Scan(&oldStatus, &oldReceipt, &oldDetail, &oldNextAttemptAt, &eventID, &taskID); err != nil {
 		return err
 	}
 	if oldStatus == status {
 		if status != "sent" || oldReceipt.Valid && oldReceipt.Int64 == receipt {
-			return tx.Commit()
+			payload := deliveryOutcomePayload{Status: oldStatus, Receipt: oldReceipt.Int64, Detail: oldDetail, NextAttemptAt: oldNextAttemptAt}
+			return commitStoreOutcome(ctx, tx, "delivery.update", "unchanged", payload,
+				zap.Int64("delivery_id", id), zap.Int64("event_id", eventID), zap.Int64("task_id", taskID.Int64),
+				zap.String("status", oldStatus))
 		}
 	}
 	if oldStatus != "sending" {
 		return fmt.Errorf("personal: cannot update delivery %d in state %q", id, oldStatus)
 	}
+	nextAttemptAt := timestamp(retryAt)
 	res, err := tx.ExecContext(ctx, `UPDATE personal_outbox SET status=?,receipt=?,detail=?,next_attempt_at=? WHERE id=? AND status='sending'`,
-		status, nullableID(receipt), detail, timestamp(retryAt), id)
+		status, nullableID(receipt), detail, nextAttemptAt, id)
 	if err != nil {
 		return err
 	}
@@ -100,5 +110,8 @@ func (s *Store) UpdateDelivery(ctx context.Context, id int64, status string, rec
 		}
 		return errors.New("personal: delivery update lost")
 	}
-	return tx.Commit()
+	return commitStoreOutcome(ctx, tx, "delivery.update", "saved", deliveryOutcomePayload{
+		Status: status, Receipt: receipt, Detail: detail, NextAttemptAt: nextAttemptAt,
+	}, zap.Int64("delivery_id", id), zap.Int64("event_id", eventID), zap.Int64("task_id", taskID.Int64),
+		zap.String("status", status))
 }

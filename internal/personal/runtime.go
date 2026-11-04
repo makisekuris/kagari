@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"kagari/internal/logging"
+
 	"go.uber.org/zap"
 )
 
@@ -40,14 +42,16 @@ func (r *Runtime) Run(ctx context.Context) error {
 	if r.idleDelay <= 0 {
 		r.idleDelay = 200 * time.Millisecond
 	}
+	ctx = logging.WithLogger(ctx, r.Log)
 	if err := r.Store.Recover(ctx); err != nil {
 		return err
 	}
+	r.Log.Info("service.ready", zap.Int("task_concurrency", r.TaskConcurrency))
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var group sync.WaitGroup
 	failures := make(chan error, r.TaskConcurrency+4)
-	start := func(fn func(context.Context) error) {
+	start := func(name string, fn func(context.Context) error) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
@@ -56,19 +60,20 @@ func (r *Runtime) Run(ctx context.Context) error {
 				if err == nil {
 					err = errors.New("personal worker stopped unexpectedly")
 				}
+				r.Log.Error("service.worker.failed", append(logging.ErrorFields(err), zap.String("worker", name))...)
 				failures <- err
 				cancel()
 			}
 		}()
 	}
-	start(func(ctx context.Context) error { return r.loop(ctx, r.turn) })
+	start("conversation", func(ctx context.Context) error { return r.loop(ctx, r.turn) })
 	for i := 0; i < r.TaskConcurrency; i++ {
-		start(func(ctx context.Context) error { return r.loop(ctx, r.task) })
+		start("task", func(ctx context.Context) error { return r.loop(ctx, r.task) })
 	}
-	start(func(ctx context.Context) error { return r.loop(ctx, r.memory) })
-	start(func(ctx context.Context) error { return r.loop(ctx, r.deliver) })
+	start("memory", func(ctx context.Context) error { return r.loop(ctx, r.memory) })
+	start("delivery", func(ctx context.Context) error { return r.loop(ctx, r.deliver) })
 	if r.Poll != nil {
-		start(r.Poll)
+		start("telegram", r.Poll)
 	}
 	<-ctx.Done()
 	group.Wait()

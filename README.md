@@ -281,9 +281,27 @@ Clearing does not retract sent Telegram messages; V1 job IDs may be reused. `all
 
 ## 日志与隐私 / Logs and privacy
 
+V2 `make run` 在 stderr 显示阶段、关联 ID、耗时和结果摘要；应用将完整调用记录保存为 JSONL。默认 `data/kagari.db` 对应 `data/kagari.logs/`，按约 50 MiB 轮转，保留最近 7 天且总量不超过 1 GiB，先触发的限制生效。`logging` 配置可修改这些值；V2 的 `log_level` 只调整终端阈值，文件始终保留 info 及以上记录。
+
+V2 writes concise progress to stderr and full application call records to JSONL files. For `data/kagari.db`, the default directory is `data/kagari.logs/`. Files rotate around 50 MiB and expire after 7 days or when total storage reaches 1 GiB, whichever comes first. Configure these values under `logging`; V2 `log_level` controls the terminal threshold while files retain info and above.
+
+```sh
+./bin/kagari -config config.yaml events --limit 20
+./bin/kagari -config config.yaml trace --event 42
+./bin/kagari -config config.yaml trace --task 3 --full
+```
+
+`events` 提供近期事件 ID；`trace` 将关联日志与数据库当前状态放在一起，默认隐藏正文，`--full` 显示脱敏后的调用内容。查询使用只读数据库连接，不启动服务或恢复工作。记录范围、故障边界和验证依据见[观测性说明](docs/V2-OBSERVABILITY.md)。
+
+`events` lists recent event IDs. `trace` combines related historical records with current database state; `--full` includes redacted payloads. Inspection uses a read-only connection and does not start workers or recover work. See the [observability guide](docs/V2-OBSERVABILITY.md) for coverage, failure behavior, and test rationale.
+
 SQLite 保存 owner 私聊、Task 目标与成果、个人记忆及投递记录。它可能包含敏感个人信息和消息历史；妥善保管 `storage.path` 指向的数据库与本地日志。
 
 SQLite stores owner messages, Task goals and results, personal memories, and delivery records. It can contain sensitive personal information and message history; protect the database at `storage.path` and local logs.
+
+文件日志默认保留聊天正文、模型上下文与响应、工具定义、参数和结果。已配置的模型密钥、Telegram token 和明确的凭证字段会被屏蔽；普通正文中未知的秘密仍可能保留。日志目录权限为 0700、文件为 0600；请使用专用日志目录。
+
+File logs retain message bodies, model context and responses, tool definitions, arguments, and results. Configured model and Telegram credentials and explicit credential fields are redacted; unknown secrets in ordinary prose may remain. Log directories use mode 0700 and files 0600. Use a dedicated log directory.
 
 本地测试和构建不能代替真实外部联调。模型 endpoint、X 页面和 Telegram bot 需要在目标部署环境分别验证。
 

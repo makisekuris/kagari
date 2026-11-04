@@ -61,6 +61,32 @@ func TestAgentStreamingOverride(t *testing.T) {
 	}
 }
 
+func TestLoggingDefaultsAndEnvironment(t *testing.T) {
+	t.Chdir(t.TempDir())
+	unsetLoggingEnv(t)
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Logging != (Logging{RotateMiB: 50, MaxTotalMiB: 1024, RetentionDays: 7}) {
+		t.Fatalf("logging defaults = %+v", cfg.Logging)
+	}
+	t.Setenv("KAGARI_LOGGING_DIRECTORY", "var/kagari.logs")
+	t.Setenv("KAGARI_LOGGING_ROTATE_MIB", "25")
+	t.Setenv("KAGARI_LOGGING_MAX_TOTAL_MIB", "2048")
+	t.Setenv("KAGARI_LOGGING_RETENTION_DAYS", "30")
+	cfg, err = Load("")
+	if err != nil || cfg.Logging != (Logging{Directory: "var/kagari.logs", RotateMiB: 25, MaxTotalMiB: 2048, RetentionDays: 30}) {
+		t.Fatalf("logging environment = %+v, err=%v", cfg.Logging, err)
+	}
+}
+
+func TestLegacyValidationDoesNotRequireLoggingConfig(t *testing.T) {
+	if err := validConfigForTest().Validate(false, false); err != nil {
+		t.Fatalf("V1 validation rejected a config without logging fields: %v", err)
+	}
+}
+
 func TestDotEnvPrecedenceAndIsolation(t *testing.T) {
 	t.Chdir(t.TempDir())
 	unsetBrowserFallbackEnv(t)
@@ -202,6 +228,24 @@ func unsetBrowserFallbackEnv(t *testing.T) {
 		"KAGARI_READER_BROWSER_FALLBACK_ENDPOINT",
 		"KAGARI_READER_BROWSER_FALLBACK_HEADLESS",
 	} {
+		value, present := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+		key := key
+		t.Cleanup(func() {
+			if present {
+				_ = os.Setenv(key, value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+}
+
+func unsetLoggingEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{"KAGARI_LOGGING_DIRECTORY", "KAGARI_LOGGING_ROTATE_MIB", "KAGARI_LOGGING_MAX_TOTAL_MIB", "KAGARI_LOGGING_RETENTION_DAYS"} {
 		value, present := os.LookupEnv(key)
 		if err := os.Unsetenv(key); err != nil {
 			t.Fatal(err)

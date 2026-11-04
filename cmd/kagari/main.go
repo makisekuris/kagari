@@ -40,7 +40,7 @@ func run() error {
 	}
 	args := root.Args()
 	if len(args) == 0 {
-		return errors.New("commands: run, tasks, runs, memories, memory-history, read, analyze, digest, status, export, retry, retry-delivery, db")
+		return errors.New("commands: run, events, trace, tasks, runs, memories, memory-history, read, analyze, digest, status, export, retry, retry-delivery, db")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -64,6 +64,10 @@ func run() error {
 		return runDB(ctx, cfg.Storage.Path, args[1:], os.Stdout)
 	}
 	switch args[0] {
+	case "events":
+		return inspectEvents(ctx, cfg, args[1:], os.Stdout)
+	case "trace":
+		return inspectTrace(ctx, cfg, args[1:], os.Stdout)
 	case "tasks", "runs", "memories", "memory-history":
 		return inspectPersonal(ctx, cfg, args, os.Stdout)
 	}

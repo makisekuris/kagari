@@ -8,6 +8,9 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
+	"kagari/internal/logging"
 )
 
 func (s *Store) BindOwner(ctx context.Context, ownerID int64) error {
@@ -236,6 +239,7 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 	if status != EventRunning {
 		return fmt.Errorf("personal: cannot complete event %d in state %q", eventID, status)
 	}
+	discardedStaleCallback := false
 	if kind == EventTask {
 		current, err := currentTaskCallback(ctx, tx, eventID, callbackTaskID.Int64, callbackRunID.Int64)
 		if err != nil {
@@ -244,6 +248,7 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 		if !current {
 			// A user revision or cancellation may arrive while the callback is thinking.
 			output, chunks = TurnOutput{Silent: true}, nil
+			discardedStaleCallback = true
 		} else if output.TaskID != 0 && output.TaskID != callbackTaskID.Int64 {
 			return errors.New("personal: task callback cannot link its reply to another task")
 		}
@@ -262,6 +267,7 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 			return err
 		}
 	}
+	replyParts := 0
 	if !output.Silent && output.Text != "" {
 		now := timestamp(time.Now())
 		part := 0
@@ -273,6 +279,7 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 			if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,status,next_attempt_at) VALUES(?,?,?,'pending',?)`, eventID, part, chunk, now); err != nil {
 				return err
 			}
+			replyParts = part
 		}
 	}
 	if kind == EventUser {
@@ -282,7 +289,23 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 			return err
 		}
 	}
-	return tx.Commit()
+	outcome := "completed"
+	if discardedStaleCallback {
+		outcome = "discarded_stale_callback"
+	}
+	if err := commitStoreOutcome(ctx, tx, "event.complete", outcome, nil,
+		zap.Int64("event_id", eventID), zap.String("event_kind", string(kind)),
+		zap.Int64("task_id", taskID), zap.Int64("run_id", callbackRunID.Int64),
+		zap.String("event_status", string(EventCompleted)), zap.Bool("silent", output.Silent), zap.Int("reply_part_count", replyParts)); err != nil {
+		return err
+	}
+	if replyParts > 0 {
+		// Stale callbacks commit as completed too, but only inserted chunks represent a queued reply.
+		logging.FromContext(ctx).Info("conversation.reply_queued",
+			zap.Int64("event_id", eventID), zap.Int64("task_id", taskID), zap.Int64("run_id", callbackRunID.Int64),
+			zap.Int("parts", replyParts), zap.Any("payload", output.Text))
+	}
+	return nil
 }
 
 func currentTaskCallback(ctx context.Context, tx *sql.Tx, eventID, taskID, runID int64) (bool, error) {
@@ -317,34 +340,65 @@ func (s *Store) Recover(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
+	var summary recoveryOutcomePayload
 	// Callback time is absolute within one claim; task spend itself stays cumulative.
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_events SET status='queued',elapsed_ms=0,interrupted=1 WHERE status='running'`); err != nil {
+	res, err := tx.ExecContext(ctx, `UPDATE personal_events SET status='queued',elapsed_ms=0,interrupted=1 WHERE status='running'`)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,run_id,status,created_at)
+	if summary.RequeuedEvents, err = changedRows(res); err != nil {
+		return err
+	}
+	res, err = tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,run_id,status,created_at)
 		SELECT 'task','任务预算在中断前已用完；已有阶段成果已保留。',r.task_id,r.id,'queued',?
 		FROM personal_runs r JOIN personal_tasks t ON t.id=r.task_id
 		WHERE r.kind='task' AND r.status='running' AND t.status='running' AND r.revision=t.revision AND t.used_ms>=t.budget_ms
-		AND NOT EXISTS(SELECT 1 FROM personal_events e WHERE e.run_id=r.id)`, timestamp(time.Now())); err != nil {
+		AND NOT EXISTS(SELECT 1 FROM personal_events e WHERE e.run_id=r.id)`, timestamp(time.Now()))
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='failed',error=CASE WHEN error='' THEN 'task budget exhausted during interrupted run' ELSE error END
+	if summary.BudgetEvents, err = changedRows(res); err != nil {
+		return err
+	}
+	res, err = tx.ExecContext(ctx, `UPDATE personal_runs SET status='failed',error=CASE WHEN error='' THEN 'task budget exhausted during interrupted run' ELSE error END
 		WHERE kind='task' AND status='running' AND EXISTS(SELECT 1 FROM personal_tasks t WHERE t.id=personal_runs.task_id
-		AND t.status='running' AND t.revision=personal_runs.revision AND t.used_ms>=t.budget_ms)`); err != nil {
+		AND t.status='running' AND t.revision=personal_runs.revision AND t.used_ms>=t.budget_ms)`)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET status='waiting_budget',updated_at=?
-		WHERE status='running' AND used_ms>=budget_ms`, timestamp(time.Now())); err != nil {
+	if summary.FailedRuns, err = changedRows(res); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='queued' WHERE status='running'`); err != nil {
+	res, err = tx.ExecContext(ctx, `UPDATE personal_tasks SET status='waiting_budget',updated_at=?
+		WHERE status='running' AND used_ms>=budget_ms`, timestamp(time.Now()))
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET status='queued',updated_at=? WHERE status='running'`, timestamp(time.Now())); err != nil {
+	if summary.WaitingTasks, err = changedRows(res); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_outbox SET status='uncertain',detail='outcome unknown after restart' WHERE status='sending'`); err != nil {
+	res, err = tx.ExecContext(ctx, `UPDATE personal_runs SET status='queued' WHERE status='running'`)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if summary.RequeuedRuns, err = changedRows(res); err != nil {
+		return err
+	}
+	res, err = tx.ExecContext(ctx, `UPDATE personal_tasks SET status='queued',updated_at=? WHERE status='running'`, timestamp(time.Now()))
+	if err != nil {
+		return err
+	}
+	if summary.QueuedTasks, err = changedRows(res); err != nil {
+		return err
+	}
+	res, err = tx.ExecContext(ctx, `UPDATE personal_outbox SET status='uncertain',detail='outcome unknown after restart' WHERE status='sending'`)
+	if err != nil {
+		return err
+	}
+	if summary.UncertainSends, err = changedRows(res); err != nil {
+		return err
+	}
+	return commitStoreOutcome(ctx, tx, "store.recover", "recovered", summary,
+		zap.Int64("requeued_events", summary.RequeuedEvents), zap.Int64("requeued_runs", summary.RequeuedRuns),
+		zap.Int64("uncertain_sends", summary.UncertainSends))
 }

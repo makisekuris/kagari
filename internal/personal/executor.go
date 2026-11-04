@@ -51,6 +51,8 @@ func ReadingExecutor(engine *agent.Engine, store Repository) ExecuteFunc {
 			return StageResult{Summary: "Task stage context could not be prepared."}, err
 		}
 		stageEngine := *engine
+		stageEngine.Log = logging.FromContext(ctx)
+		stageEngine.ObserveV2 = true
 		var progressMu sync.Mutex
 		var progressErr error
 		setProgressError := func(err error) {

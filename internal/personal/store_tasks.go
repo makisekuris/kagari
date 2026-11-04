@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
 	"kagari/internal/domain"
 )
 
@@ -202,7 +203,9 @@ func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string
 		if err != nil {
 			return Task{}, Run{}, err
 		}
-		if err := tx.Commit(); err != nil {
+		if err := commitStoreOutcome(ctx, tx, "task.create", "replayed", taskOutcomePayload{Task: *task, Run: run},
+			zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID), zap.Int64("run_id", run.ID),
+			zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
 			return Task{}, Run{}, err
 		}
 		return *task, *run, nil
@@ -229,7 +232,9 @@ func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string
 	if err := insertRequest(ctx, tx, eventID, key, "create_task", payload, taskID, run.ID, 0); err != nil {
 		return Task{}, Run{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitStoreOutcome(ctx, tx, "task.create", "created", taskOutcomePayload{Task: task, Run: &run},
+		zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID), zap.Int64("run_id", run.ID),
+		zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
 		return Task{}, Run{}, err
 	}
 	return task, run, nil
@@ -267,7 +272,9 @@ func (s *Store) ReviseTask(ctx context.Context, eventID int64, key string, taskI
 		if err != nil {
 			return Task{}, Run{}, err
 		}
-		if err := tx.Commit(); err != nil {
+		if err := commitStoreOutcome(ctx, tx, "task.revise", "replayed", taskOutcomePayload{Task: *task, Run: run},
+			zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID), zap.Int64("run_id", run.ID),
+			zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
 			return Task{}, Run{}, err
 		}
 		return *task, *run, nil
@@ -312,7 +319,9 @@ func (s *Store) ReviseTask(ctx context.Context, eventID int64, key string, taskI
 	if err := insertRequest(ctx, tx, eventID, key, "revise_task", payload, taskID, run.ID, 0); err != nil {
 		return Task{}, Run{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitStoreOutcome(ctx, tx, "task.revise", "revised", taskOutcomePayload{Task: *task, Run: &run},
+		zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID), zap.Int64("run_id", run.ID),
+		zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
 		return Task{}, Run{}, err
 	}
 	return *task, run, nil
@@ -346,7 +355,9 @@ func (s *Store) CancelTask(ctx context.Context, eventID, taskID, expectedRevisio
 		return Task{}, fmt.Errorf("personal: task %d revision is %d, expected %d", taskID, task.Revision, expectedRevision)
 	}
 	if task.Status == TaskCancelled {
-		if err := tx.Commit(); err != nil {
+		if err := commitStoreOutcome(ctx, tx, "task.cancel", "unchanged", taskOutcomePayload{Task: *task},
+			zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID),
+			zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
 			return Task{}, err
 		}
 		return *task, nil
@@ -359,7 +370,9 @@ func (s *Store) CancelTask(ctx context.Context, eventID, taskID, expectedRevisio
 		return Task{}, err
 	}
 	task.Status, task.UpdatedAt = TaskCancelled, now
-	if err := tx.Commit(); err != nil {
+	if err := commitStoreOutcome(ctx, tx, "task.cancel", "cancelled", taskOutcomePayload{Task: *task},
+		zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID),
+		zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
 		return Task{}, err
 	}
 	return *task, nil
@@ -398,7 +411,9 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 		if err != nil {
 			return Task{}, Run{}, err
 		}
-		if err := tx.Commit(); err != nil {
+		if err := commitStoreOutcome(ctx, tx, "task.continue", "replayed", taskOutcomePayload{Task: *task, Run: run},
+			zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID), zap.Int64("run_id", run.ID),
+			zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
 			return Task{}, Run{}, err
 		}
 		return *task, *run, nil
@@ -461,7 +476,9 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 	if err := insertRequest(ctx, tx, eventID, key, "continue_task", payload, taskID, run.ID, 0); err != nil {
 		return Task{}, Run{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitStoreOutcome(ctx, tx, "task.continue", "continued", taskOutcomePayload{Task: *task, Run: &run},
+		zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID), zap.Int64("run_id", run.ID),
+		zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
 		return Task{}, Run{}, err
 	}
 	return *task, run, nil
@@ -518,7 +535,9 @@ func (s *Store) SettleTask(ctx context.Context, eventID, taskID, expectedRevisio
 		return Task{}, err
 	}
 	task.Status, task.Summary, task.UpdatedAt = status, summary, now
-	if err := tx.Commit(); err != nil {
+	if err := commitStoreOutcome(ctx, tx, "task.settle", "settled", taskOutcomePayload{Task: *task},
+		zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID),
+		zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
 		return Task{}, err
 	}
 	return *task, nil
@@ -719,7 +738,17 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 	}
 	if runStatus != RunRunning || kind != RunTask {
 		if runStatus == RunCancelled || runStatus == RunCompleted || runStatus == RunFailed {
-			return tx.Commit()
+			taskStatus := ""
+			if taskID > 0 {
+				task, err := scanTask(tx.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM personal_tasks WHERE id=?`, taskID))
+				if err != nil {
+					return err
+				}
+				taskStatus = string(task.Status)
+			}
+			return commitStoreOutcome(ctx, tx, "task.stage.finish", "ignored_terminal", nil,
+				zap.Int64("task_id", taskID), zap.Int64("run_id", runID), zap.Int64("revision", revision),
+				zap.String("run_status", string(runStatus)), zap.String("task_status", taskStatus))
 		}
 		return fmt.Errorf("personal: cannot finish run %d in state %q", runID, runStatus)
 	}
@@ -732,7 +761,9 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 		if err != nil {
 			return err
 		}
-		return tx.Commit()
+		return commitStoreOutcome(ctx, tx, "task.stage.finish", "discarded_stale", nil,
+			zap.Int64("task_id", taskID), zap.Int64("run_id", runID), zap.Int64("revision", revision),
+			zap.String("run_status", string(RunCancelled)), zap.String("task_status", string(task.Status)))
 	}
 	status := RunCompleted
 	if failure != "" {
@@ -766,7 +797,9 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 		VALUES('task',?,?,?,'queued',?)`, callbackText, taskID, runID, now); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitStoreOutcome(ctx, tx, "task.stage.finish", string(status), stageOutcomePayload{Result: result, Failure: failure},
+		zap.Int64("task_id", taskID), zap.Int64("run_id", runID), zap.Int64("revision", revision),
+		zap.String("run_status", string(status)), zap.String("task_status", string(taskStatus)))
 }
 
 // Full evidence stays in Run.Result; subsequent stages receive a bounded, valid summary.

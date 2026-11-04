@@ -22,6 +22,7 @@ const (
 
 type pollFailure struct {
 	code       int
+	httpStatus int
 	retryAfter time.Duration
 }
 
@@ -53,6 +54,7 @@ func pollUpdates(ctx context.Context, readOffset offsetReader, readUpdates updat
 		ctx = context.Background()
 	}
 	delay := time.Second
+	ready, failures := false, 0
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -70,14 +72,20 @@ func pollUpdates(ctx context.Context, readOffset offsetReader, readUpdates updat
 				return nil
 			}
 			var apiErr *pollFailure
+			fields := []zap.Field{}
+			if errors.As(err, &apiErr) {
+				fields = append(fields, zap.Int("api_code", apiErr.code), zap.Int("http_status", apiErr.httpStatus))
+			}
 			if errors.As(err, &apiErr) && (apiErr.code == http.StatusBadRequest || apiErr.code == http.StatusUnauthorized || apiErr.code == http.StatusForbidden) {
+				log.Error("telegram.polling.rejected", fields...)
 				return errors.New("Telegram polling request was rejected")
 			}
 			wait := delay
 			if errors.As(err, &apiErr) && apiErr.retryAfter > 0 {
 				wait = apiErr.retryAfter
 			}
-			log.Warn("Telegram polling failed; retrying", zap.Duration("retry_after", wait))
+			failures++
+			log.Warn("telegram.polling.failed", append(fields, zap.Duration("retry_after", wait), zap.Int("consecutive_failures", failures))...)
 			if !sleep(ctx, wait) {
 				return nil
 			}
@@ -87,6 +95,14 @@ func pollUpdates(ctx context.Context, readOffset offsetReader, readUpdates updat
 				delay = maxPollDelay
 			}
 			continue
+		}
+		if !ready {
+			log.Info("telegram.polling.ready")
+			ready = true
+		}
+		if failures > 0 {
+			log.Info("telegram.polling.recovered", zap.Int("consecutive_failures", failures))
+			failures = 0
 		}
 		delay = time.Second
 		for _, raw := range updates {
@@ -140,7 +156,7 @@ func getUpdates(ctx context.Context, client *http.Client, baseURL, token string,
 	var result updatesResponse
 	if json.Unmarshal(body, &result) != nil {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, &pollFailure{code: resp.StatusCode}
+			return nil, &pollFailure{code: resp.StatusCode, httpStatus: resp.StatusCode}
 		}
 		return nil, errors.New("Telegram polling response was invalid")
 	}
@@ -149,7 +165,7 @@ func getUpdates(ctx context.Context, client *http.Client, baseURL, token string,
 		if code == 0 {
 			code = resp.StatusCode
 		}
-		return nil, &pollFailure{code: code, retryAfter: retryAfter(result.Parameters.RetryAfter)}
+		return nil, &pollFailure{code: code, httpStatus: resp.StatusCode, retryAfter: retryAfter(result.Parameters.RetryAfter)}
 	}
 	return result.Result, nil
 }

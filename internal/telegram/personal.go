@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 	"kagari/internal/config"
 	"kagari/internal/domain"
+	"kagari/internal/logging"
 	"kagari/internal/personal"
 )
 
@@ -95,9 +96,26 @@ func (c *PersonalClient) acceptUpdate(ctx context.Context, update *models.Update
 			}
 		}
 	}
-	if _, err := c.inbox.AcceptInput(ctx, update.ID, input); err != nil {
+	eventID, err := c.inbox.AcceptInput(logging.WithLogger(ctx, c.log), update.ID, input)
+	if err != nil {
+		c.log.Error("telegram.input.failed", zap.Int64("update_id", update.ID))
 		return errors.New("Telegram update could not be saved")
 	}
+	outcome := "accepted"
+	if input == nil {
+		outcome = "filtered"
+	} else if eventID == 0 {
+		outcome = "duplicate"
+	}
+	fields := []zap.Field{zap.Int64("update_id", update.ID), zap.String("outcome", outcome)}
+	if input != nil {
+		fields = append(fields, zap.Int64("message_id", input.MessageID))
+	}
+	if eventID != 0 {
+		fields = append(fields, zap.Int64("event_id", eventID), zap.Any("payload", input))
+	}
+	// AcceptInput commits the event and offset together; only now is it accepted.
+	c.log.Info("telegram.input", fields...)
 	return nil
 }
 

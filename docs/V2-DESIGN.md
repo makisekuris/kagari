@@ -103,9 +103,14 @@ make run CONFIG=config.yaml
 ./bin/kagari -config config.yaml runs 1
 ./bin/kagari -config config.yaml memories 'answer style'
 ./bin/kagari -config config.yaml memory-history answer_style
+./bin/kagari -config config.yaml events --limit 20
+./bin/kagari -config config.yaml trace --event 42
+./bin/kagari -config config.yaml trace --task 1 --full
 ```
 
 `tasks` 可列出最近任务或查看一个 Task；`runs` 列出该 Task 的执行；`memories` 按键或值搜索当前生效的记忆；`memory-history` 查看指定键的变更，省略键时查看最近变更。旧的 `read`、`analyze`、`digest`、`status`、`export`、`retry`、`retry-delivery` 和 `db` CLI 仍用于 V1 阅读归档工作，不属于 V2 personal Task 管理入口。
+
+`events` 列出近期事件及状态；`trace` 按事件或 Task 关联主对话、模型、工具、后台执行、记忆维护和投递日志，并附当前数据库快照。默认只显示元数据，`--full` 显示脱敏后的正文。V2 服务自动保存日志并输出终端摘要，配置与失败语义见[观测性说明](V2-OBSERVABILITY.md)。
 
 ## 6. 首版边界
 

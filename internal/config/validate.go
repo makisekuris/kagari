@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const (
+	maxLoggingSizeMiB       int64 = (1<<63 - 1) / (1 << 20)
+	maxLoggingRetentionDays int64 = (1<<63 - 1) / (24 * int64(time.Hour))
+)
+
 // ValidatePersonal checks the single owner's service, independently of archive CLI commands.
 func (c Config) ValidatePersonal() error {
 	if err := c.Validate(true, true); err != nil {
@@ -19,6 +24,16 @@ func (c Config) ValidatePersonal() error {
 	}
 	if c.Personal.TaskConcurrency < 1 || c.Personal.TaskBudget < time.Millisecond {
 		return errors.New("personal.task_concurrency must be positive and personal.task_budget at least 1ms")
+	}
+	// Check conversion bounds before runtime turns MiB and days into bytes and time.Duration.
+	if c.Logging.RotateMiB < 1 || c.Logging.RotateMiB > maxLoggingSizeMiB || c.Logging.MaxTotalMiB < 1 || c.Logging.MaxTotalMiB > maxLoggingSizeMiB {
+		return errors.New("logging.rotate_mib and logging.max_total_mib must be positive MiB values that fit in int64 bytes")
+	}
+	if c.Logging.RetentionDays < 1 || int64(c.Logging.RetentionDays) > maxLoggingRetentionDays {
+		return errors.New("logging.retention_days must be positive and fit in time.Duration")
+	}
+	if c.Logging.RotateMiB > c.Logging.MaxTotalMiB {
+		return errors.New("logging.rotate_mib must not exceed logging.max_total_mib")
 	}
 	return nil
 }

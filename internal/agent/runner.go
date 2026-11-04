@@ -71,7 +71,7 @@ func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schem
 				return output, usage, usageReported, errModelResponseRefused
 			}
 		}
-		if !variant.IsStreaming {
+		if !variant.IsStreaming && !e.ObserveV2 {
 			e.logMessage(msg, false, turn)
 		}
 		var b strings.Builder
@@ -82,7 +82,7 @@ func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schem
 			}
 			if block.FunctionToolCall != nil {
 				toolCall = true
-				if variant.IsStreaming {
+				if variant.IsStreaming && !e.ObserveV2 {
 					e.logToolCall(block.FunctionToolCall, turn)
 				}
 			}

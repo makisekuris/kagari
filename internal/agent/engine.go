@@ -43,6 +43,7 @@ type Engine struct {
 	CachedSource  func(context.Context, string) (*domain.Source, error)
 	OpenBrowser   func(context.Context) (func(context.Context, string) (domain.Source, error), func(), error)
 	Log           *zap.Logger
+	ObserveV2     bool
 	personaPrompt string
 }
 
@@ -225,7 +226,22 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 	stage = "model"
 	modelCalled = true
 	// Keep function calls available on endpoints that suppress tools under a text JSON Schema.
-	it := runner.Query(ctx, e.analysisInput(s, session.sources))
+	modelCtx := ctx
+	var modelCancel context.CancelFunc
+	var callbackOpts []adk.AgentRunOption
+	if e.ObserveV2 {
+		observer := logging.NewCallbackObserver("analyze")
+		modelCtx, modelCancel = context.WithCancel(ctx)
+		callbackOpts = append(callbackOpts, adk.WithCallbacks(observer))
+		defer func() {
+			if err != nil {
+				modelCancel()
+			}
+			observer.Wait()
+			modelCancel()
+		}()
+	}
+	it := runner.Query(modelCtx, e.analysisInput(s, session.sources), callbackOpts...)
 	var rawOutput string
 	rawOutput, result.Usage, usageReported, err = e.consumeEvents(it, e.Config.Agent.MaxIterations)
 	if err != nil {

@@ -13,6 +13,7 @@ type Config struct {
 	Agent       Agent    `mapstructure:"agent"`
 	Personal    Personal `mapstructure:"personal"`
 	Weekly      Weekly   `mapstructure:"weekly"`
+	Logging     Logging  `mapstructure:"logging"`
 	ProfilePath string   `mapstructure:"profile_path"`
 	LogLevel    string   `mapstructure:"log_level"`
 	MaxAttempts int      `mapstructure:"max_attempts"` // 包含首次尝试；处理任务和已知未发送的投递共用上限。
@@ -77,6 +78,13 @@ type Weekly struct {
 	Weekday       int    `mapstructure:"weekday"`
 	Time          string `mapstructure:"time"`
 	MaxInputChars int    `mapstructure:"max_input_chars"`
+}
+
+type Logging struct {
+	Directory     string `mapstructure:"directory"`
+	RotateMiB     int64  `mapstructure:"rotate_mib"`
+	MaxTotalMiB   int64  `mapstructure:"max_total_mib"`
+	RetentionDays int    `mapstructure:"retention_days"`
 }
 
 const DefaultWeeklyInputChars = 120000

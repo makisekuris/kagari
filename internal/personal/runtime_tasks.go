@@ -4,14 +4,23 @@ import (
 	"context"
 	"time"
 
+	"go.uber.org/zap"
 	"kagari/internal/logging"
 )
 
-func (r *Runtime) task(ctx context.Context) (bool, error) {
+func (r *Runtime) task(ctx context.Context) (worked bool, runErr error) {
 	run, err := r.Store.ClaimRun(ctx, RunTask)
 	if err != nil || run == nil {
 		return false, err
 	}
+	log := r.runLog(*run)
+	ctx = logging.WithLogger(ctx, log)
+	log.Info("run.started", zap.Int64("remaining_ms", run.RemainingMS), zap.Any("payload", run.Input))
+	defer func() {
+		if runErr != nil {
+			log.Warn("run.execution.failed", logging.ErrorFields(runErr)...)
+		}
+	}()
 	remaining := time.Duration(run.RemainingMS) * time.Millisecond
 	if remaining <= 0 {
 		remaining = time.Millisecond

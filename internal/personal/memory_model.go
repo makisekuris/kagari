@@ -10,6 +10,8 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	"kagari/internal/logging"
 )
 
 func (a *MainAgent) ReviewMemory(ctx context.Context, input MemoryReviewInput) (MemoryReview, error) {
@@ -41,7 +43,14 @@ func (a *MainAgent) ReviewMemory(ctx context.Context, input MemoryReviewInput) (
 		return MemoryReview{}, fmt.Errorf("encode memory review input: %w", err)
 	}
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
-	output, err := consumePersonalEvents(runner.Query(ctx, string(encoded), adk.WithChatModelOptions([]model.Option{memoryReviewOutputOption()})))
+	observer := logging.NewCallbackObserver("memory_review")
+	modelCtx, cancelModel := context.WithCancel(ctx)
+	output, err := consumePersonalEvents(runner.Query(modelCtx, string(encoded), adk.WithChatModelOptions([]model.Option{memoryReviewOutputOption()}), adk.WithCallbacks(observer)))
+	if err != nil {
+		cancelModel()
+	}
+	observer.Wait()
+	cancelModel()
 	if err != nil {
 		return MemoryReview{}, err
 	}
