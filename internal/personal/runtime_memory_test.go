@@ -2,65 +2,77 @@ package personal
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
 
-func TestRuntimeCompletesLegacyMemoryCallbacksSilently(t *testing.T) {
-	for _, status := range []string{"queued", "running"} {
-		t.Run(status, func(t *testing.T) {
-			ctx := context.Background()
-			s := testStore(t, ":memory:", time.Minute)
-			event := openUserEvent(t, s, 1, 1, "I prefer concise answers.")
-			finishEvent(t, s, event, TurnOutput{}, nil)
-			run, err := s.ClaimRun(ctx, RunMemory)
-			if err != nil || run == nil {
-				t.Fatalf("claim memory run: %+v, %v", run, err)
+func TestRuntimeMemoryReviewResultsStaySilent(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t, ":memory:", time.Minute)
+	r := testRuntime(s)
+	r.ReviewMemory = func(_ context.Context, input MemoryReviewInput) (MemoryReview, error) {
+		switch input.Event.Text {
+		case "I prefer short answers.":
+			return MemoryReview{Changes: []MemoryChange{{Operation: "put", Key: "answer_style", Value: "short", Evidence: input.Event.Text}}}, nil
+		case "Review failed.":
+			return MemoryReview{}, errors.New("review failed")
+		default:
+			return MemoryReview{Question: "Should this preference apply to reports?"}, nil
+		}
+	}
+
+	for i, text := range []string{"I prefer short answers.", "Review failed.", "I sometimes prefer short answers."} {
+		event := openUserEvent(t, s, int64(i+1), int64(i+1), text)
+		finishEvent(t, s, event, TurnOutput{Silent: true}, nil)
+		if worked, err := r.memory(ctx); err != nil || !worked {
+			t.Fatalf("review %q: worked=%v err=%v", text, worked, err)
+		}
+		var runID int64
+		if err := s.db.QueryRowContext(ctx, `SELECT id FROM personal_runs WHERE event_id=? AND kind=?`, event.ID, RunMemoryReview).Scan(&runID); err != nil {
+			t.Fatal(err)
+		}
+		run, err := s.Run(ctx, runID)
+		if err != nil || run == nil {
+			t.Fatalf("review run for %q: %+v, %v", text, run, err)
+		}
+		switch text {
+		case "I prefer short answers.":
+			if run.Status != RunCompleted {
+				t.Fatalf("successful review status: %+v", run)
 			}
-			if err := s.FinishMemoryReview(ctx, run.ID, MemoryReview{}, "review failed"); err != nil {
-				t.Fatal(err)
+		case "Review failed.":
+			if run.Status != RunFailed || run.Error == "" {
+				t.Fatalf("failed review status: %+v", run)
 			}
-			// Reproduce a callback persisted by an older service version.
-			res, err := s.db.ExecContext(ctx, `INSERT INTO personal_events(kind,text,run_id,status,created_at) VALUES('memory','review failed',?,?,?)`, run.ID, status, timestamp(time.Now()))
-			if err != nil {
-				t.Fatal(err)
+		default:
+			var review MemoryReview
+			if run.Status != RunCompleted || json.Unmarshal([]byte(run.Result), &review) != nil || review.Question == "" {
+				t.Fatalf("clarification review was not retained: %+v", run)
 			}
-			callbackID, err := res.LastInsertId()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if status == "running" {
-				if err := s.Recover(ctx); err != nil {
-					t.Fatal(err)
-				}
-			}
-			r := testRuntime(s)
-			r.Think = func(context.Context, TurnInput) (TurnOutput, error) {
-				t.Fatal("memory callback invoked the conversation model")
-				return TurnOutput{}, nil
-			}
-			r.Prepare = func(string) ([]string, error) {
-				t.Fatal("memory callback prepared a notification")
-				return nil, nil
-			}
-			if worked, err := r.turn(ctx); err != nil || !worked {
-				t.Fatalf("memory callback: worked=%v, %v", worked, err)
-			}
-			var storedStatus EventStatus
-			if err := s.db.QueryRowContext(ctx, `SELECT status FROM personal_events WHERE id=?`, callbackID).Scan(&storedStatus); err != nil || storedStatus != EventCompleted {
-				t.Fatalf("callback status: %s, %v", storedStatus, err)
-			}
-			storedRun, err := s.Run(ctx, run.ID)
-			if err != nil || storedRun == nil || storedRun.Status != RunFailed || storedRun.Error != "review failed" {
-				t.Fatalf("memory failure lost: %+v, %v", storedRun, err)
-			}
-			var messages int
-			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_history WHERE event_id=?`, callbackID).Scan(&messages); err != nil || messages != 0 {
-				t.Fatalf("memory callback entered conversation history: %d, %v", messages, err)
-			}
-			if delivery, err := s.ClaimDelivery(ctx); err != nil || delivery != nil {
-				t.Fatalf("memory callback notified: %+v, %v", delivery, err)
-			}
-		})
+		}
+	}
+	if worked, err := r.memory(ctx); err != nil || worked {
+		t.Fatalf("empty review queue: worked=%v err=%v", worked, err)
+	}
+	if memory, err := s.Memory(ctx, "answer_style"); err != nil || memory == nil || memory.Value != "short" {
+		t.Fatalf("successful review was not applied: %+v, %v", memory, err)
+	}
+	var callbacks, outbox int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_events WHERE kind='memory'`).Scan(&callbacks); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox`).Scan(&outbox); err != nil {
+		t.Fatal(err)
+	}
+	if callbacks != 0 || outbox != 0 {
+		t.Fatalf("memory review emitted callbacks or messages: callbacks=%d outbox=%d", callbacks, outbox)
+	}
+	if event, err := s.ClaimEvent(ctx); err != nil || event != nil {
+		t.Fatalf("memory review queued a conversation event: %+v, %v", event, err)
+	}
+	if delivery, err := s.ClaimDelivery(ctx); err != nil || delivery != nil {
+		t.Fatalf("memory review queued a delivery: %+v, %v", delivery, err)
 	}
 }

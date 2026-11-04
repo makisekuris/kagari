@@ -16,6 +16,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
+	"go.uber.org/zap"
 )
 
 const (
@@ -28,9 +29,10 @@ const (
 	maxMemoryRunes     = 1_500
 )
 
-// MainAgent handles the owner's conversation and queues task or memory work.
+// MainAgent handles the owner's conversation and manages tasks and memory.
 type MainAgent struct {
 	Store         Repository
+	Log           *zap.Logger
 	Model         model.AgenticModel
 	Persona       string
 	Profile       string
@@ -56,7 +58,7 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 	ctx, cancel := context.WithTimeout(ctx, a.Timeout)
 	defer cancel()
 
-	tools := &personalTools{store: a.Store, input: input, event: input.Event, taskIDs: make(map[int64]struct{})}
+	tools := &personalTools{store: a.Store, log: a.Log, input: input, event: input.Event, taskIDs: make(map[int64]struct{})}
 	registeredTools, err := tools.build()
 	if err != nil {
 		return TurnOutput{}, fmt.Errorf("build personal tools: %w", err)
@@ -134,11 +136,7 @@ func taskOutcomeRequiresNotification(input TurnInput) bool {
 	if input.CurrentRun != nil && input.CurrentRun.TaskID == input.Event.TaskID {
 		var result StageResult
 		if json.Unmarshal([]byte(input.CurrentRun.Result), &result) == nil {
-			switch result.Outcome {
-			case "done", "needs_user", "failed":
-				return true
-			}
-			if result.Outcome == "review" && len(result.Sources) > 0 {
+			if len(result.Sources) > 0 {
 				return true
 			}
 		}

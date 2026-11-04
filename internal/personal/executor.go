@@ -28,27 +28,27 @@ const (
 func ReadingExecutor(engine *agent.Engine, store Repository) ExecuteFunc {
 	return func(ctx context.Context, run Run, progress func(string) error) (StageResult, error) {
 		if engine == nil {
-			return StageResult{Outcome: "failed", Summary: "Task stage could not start: reading engine is unavailable."}, errors.New("personal: reading engine is unavailable")
+			return StageResult{Summary: "Task stage could not start: reading engine is unavailable."}, errors.New("personal: reading engine is unavailable")
 		}
 		if store == nil {
-			return StageResult{Outcome: "failed", Summary: "Task stage could not start: personal store is unavailable."}, errors.New("personal: personal store is unavailable")
+			return StageResult{Summary: "Task stage could not start: personal store is unavailable."}, errors.New("personal: personal store is unavailable")
 		}
 		if run.Kind != RunTask {
-			return StageResult{Outcome: "failed", Summary: "Task stage could not start: run is not a task run."}, fmt.Errorf("personal: reading executor cannot execute run kind %q", run.Kind)
+			return StageResult{Summary: "Task stage could not start: run is not a task run."}, fmt.Errorf("personal: reading executor cannot execute run kind %q", run.Kind)
 		}
 
 		input, err := decodeTaskInput(run.Input)
 		if err != nil {
-			return StageResult{Outcome: "failed", Summary: "Task stage input could not be read."}, err
+			return StageResult{Summary: "Task stage input could not be read."}, err
 		}
 		memories, err := store.Memories(ctx, "", readingMemoryLimit)
 		if err != nil {
-			return StageResult{Outcome: "failed", Summary: "Task stage could not load its personal background."}, fmt.Errorf("personal: load task memories: %w", err)
+			return StageResult{Summary: "Task stage could not load its personal background."}, fmt.Errorf("personal: load task memories: %w", err)
 		}
 
 		submission, err := readingSubmission(input, memories)
 		if err != nil {
-			return StageResult{Outcome: "failed", Summary: "Task stage context could not be prepared."}, err
+			return StageResult{Summary: "Task stage context could not be prepared."}, err
 		}
 		stageEngine := *engine
 		var progressMu sync.Mutex
@@ -104,7 +104,7 @@ func ReadingExecutor(engine *agent.Engine, store Repository) ExecuteFunc {
 
 		prepared, err := stageEngine.Prepare(submission)
 		if err != nil {
-			return StageResult{Outcome: "failed", Summary: "Task stage could not prepare its reading request."}, err
+			return StageResult{Summary: "Task stage could not prepare its reading request."}, err
 		}
 		result, analyzeErr := stageEngine.Analyze(ctx, prepared)
 		progressMu.Lock()
@@ -115,12 +115,11 @@ func ReadingExecutor(engine *agent.Engine, store Repository) ExecuteFunc {
 		}
 		if analyzeErr != nil {
 			return StageResult{
-				Outcome: "failed",
 				Summary: partialReadingSummary(result, analyzeErr),
 				Sources: result.Sources,
 			}, analyzeErr
 		}
-		return StageResult{Outcome: "review", Summary: result.Body, Sources: result.Sources}, nil
+		return StageResult{Summary: result.Body, Sources: result.Sources}, nil
 	}
 }
 

@@ -83,7 +83,7 @@ func (s *Store) AcceptInput(ctx context.Context, updateID int64, input *Input) (
 		if input.Material {
 			role = "material"
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text,task_id) VALUES(?,?,?,?)`, eventID, role, input.Text, nullableID(taskID)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text) VALUES(?,?,?)`, eventID, role, input.Text); err != nil {
 			return 0, err
 		}
 	}
@@ -115,8 +115,8 @@ func replyTaskID(ctx context.Context, tx *sql.Tx, replyToID int64) (int64, error
 		return 0, nil
 	}
 	var id sql.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT task_id FROM personal_outbox
-		WHERE receipt=? AND status='sent' AND task_id IS NOT NULL ORDER BY id DESC LIMIT 1`, replyToID).Scan(&id)
+	err := tx.QueryRowContext(ctx, `SELECT e.task_id FROM personal_outbox d JOIN personal_events e ON e.id=d.event_id
+		WHERE d.receipt=? AND d.status='sent' AND e.task_id IS NOT NULL ORDER BY d.id DESC LIMIT 1`, replyToID).Scan(&id)
 	if err == nil && id.Valid {
 		return id.Int64, nil
 	}
@@ -195,8 +195,8 @@ func (s *Store) History(ctx context.Context, eventID int64, limit int) ([]Messag
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT event_id,role,text,task_id FROM personal_history
-		WHERE event_id<? ORDER BY event_id DESC,id DESC LIMIT ?`, eventID, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT h.event_id,h.role,h.text,e.task_id FROM personal_history h JOIN personal_events e ON e.id=h.event_id
+		WHERE h.event_id<? ORDER BY h.event_id DESC,h.id DESC LIMIT ?`, eventID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -257,11 +257,8 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_events SET status='completed',task_id=? WHERE id=? AND status='running'`, nullableID(taskID), eventID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_history SET task_id=? WHERE event_id=? AND role IN ('user','material')`, nullableID(taskID), eventID); err != nil {
-		return err
-	}
 	if output.Text != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text,task_id) VALUES(?,'assistant',?,?)`, eventID, output.Text, nullableID(taskID)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text) VALUES(?,'assistant',?)`, eventID, output.Text); err != nil {
 			return err
 		}
 	}
@@ -273,7 +270,7 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 				continue
 			}
 			part++
-			if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,task_id,part,text,status,next_attempt_at) VALUES(?,?,?,?,'pending',?)`, eventID, nullableID(taskID), part, chunk, now); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,status,next_attempt_at) VALUES(?,?,?,'pending',?)`, eventID, part, chunk, now); err != nil {
 				return err
 			}
 		}

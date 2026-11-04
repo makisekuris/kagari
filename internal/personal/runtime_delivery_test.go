@@ -63,38 +63,3 @@ func TestRuntimeDeliveryClassifiesUnknownAndRetriesOnlyKnownFailures(t *testing.
 		})
 	}
 }
-
-func TestRuntimeSkipsLegacyMemoryNotificationsAndDeliversUserReplies(t *testing.T) {
-	ctx := context.Background()
-	s := testStore(t, ":memory:", time.Minute)
-	res, err := s.db.ExecContext(ctx, `INSERT INTO personal_events(kind,text,status,created_at) VALUES('memory','review failed','running',?)`, timestamp(time.Now()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	callbackID, err := res.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CompleteEvent(ctx, callbackID, TurnOutput{Text: "memory failed"}, []string{"memory failed"}); err != nil {
-		t.Fatal(err)
-	}
-	event := openUserEvent(t, s, 1, 1, "What is saved in memory?")
-	finishEvent(t, s, event, TurnOutput{Text: "query reply"}, []string{"query reply"})
-	r := testRuntime(s)
-	r.Send = func(_ context.Context, text string) (int64, error) {
-		if text != "query reply" {
-			t.Fatalf("unexpected notification: %q", text)
-		}
-		return 123, nil
-	}
-	if worked, err := r.deliver(ctx); err != nil || !worked {
-		t.Fatalf("user reply: worked=%v, %v", worked, err)
-	}
-	if worked, err := r.deliver(ctx); err != nil || worked {
-		t.Fatalf("memory notification delivered: worked=%v, %v", worked, err)
-	}
-	var attempts int
-	if err := s.db.QueryRowContext(ctx, `SELECT attempts FROM personal_outbox WHERE event_id=?`, callbackID).Scan(&attempts); err != nil || attempts != 0 {
-		t.Fatalf("legacy notification was removed or sent: attempts=%d, %v", attempts, err)
-	}
-}

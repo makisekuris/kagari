@@ -14,18 +14,18 @@
 | --- | ---: | --- |
 | 主对话 | 1 | 处理用户消息和任务回调；串行组织对话回复 |
 | Task 执行器 | `personal.task_concurrency`，默认 4 | 执行互相独立的读取、研究与内容生成任务；同一 Task 同时只有一个有效 Run |
-| 记忆维护 | 1 | 串行处理用户输入后的自动记忆检查及显式记忆变更 |
+| 记忆维护 | 1 | 串行处理用户输入后的自动记忆检查 |
 | 消息投递 | 1 | 按顺序发送已保存的回复并记录 Telegram 回执 |
 
 模型只在处理消息、Task 或记忆操作时调用。待处理工作保存在 SQLite；Worker 每 200ms 检查队列，空闲时不调用模型。
 
 ## 2. Task、Run 与预算
 
-**Task** 保存持续目标、约束、版本、阶段摘要和累计执行预算。**Run** 是推进一个 Task 的一次执行，保存该次执行的输入、结果、错误和耗时。阶段成果写入 Task 与 Run；新 Run 沿用原目标和已保存成果，不把上次模型调用的位置当成可恢复检查点。
+**Task** 保存持续目标、约束、版本、阶段摘要和累计执行预算。**Run** 保存一次 Task 执行或自动记忆 review 的输入、结果、错误和耗时；只有 Task Run 有关联 Task。Task 阶段结果只有摘要和来源，Store 根据执行错误与预算决定状态：成功进入 `awaiting_review`，失败进入 `failed`，预算耗尽时优先进入 `waiting_budget`。新 Run 沿用原目标和已保存成果，不把上次模型调用的位置当成可恢复检查点。
 
 Task 状态包括 `queued`、`running`、`awaiting_review`、`waiting_input`、`waiting_budget`、`completed`、`failed` 和 `cancelled`。Run 状态包括 `queued`、`running`、`completed`、`failed` 和 `cancelled`。等待使用者的 Task 不占执行槽。
 
-`personal.task_budget` 默认是 `30m`，按每个 Task 累计。Task Run 和对应任务回调的执行时间计入预算；排队及等待使用者不计。重启和自动继续不会重置预算。预算耗尽后保存已有阶段成果并等待使用者；用户明确授权续用时，可增加一个配置额度。`personal.task_concurrency` 默认是 `4`，必须为正数。
+`personal.task_budget` 默认是 `30m`，按每个 Task 累计。Task Run 和对应任务回调的执行时间计入预算；排队及等待使用者不计。重启和自动继续不会重置预算。`ClaimRun` 领取 Task Run 时根据 Task 的剩余预算计算 `RemainingMS`，该值只供运行时使用，不写入数据库或 JSON。预算耗尽后保存已有阶段成果并等待使用者；用户明确授权续用时，可增加一个配置额度。`personal.task_concurrency` 默认是 `4`，必须为正数。
 
 主 Agent 的 Task 工具包括 `create_task`、`list_tasks`、`get_task`、`update_task`、`cancel_task`、`continue_task` 和 `settle_task`；Run 工具包括 `get_run` 与 `list_runs`。Task 执行使用只读 `read_url`，启用浏览器时也可使用 `browse_url`。改目标会创建新版本，旧版本的迟到结果不能覆盖新目标。后台回调只能继续或结束自己的 Task，不能创建其他目标，也不能延长预算。长任务只排队执行，不声称在当前对话回合内已完成。
 
@@ -33,21 +33,36 @@ Task 状态包括 `queued`、`running`、`awaiting_review`、`waiting_input`、`
 
 ## 3. 自动记忆与遗忘
 
-每条直接用户消息处理完成后，记忆维护器会异步检查本条消息中的稳定事实和偏好。它只使用当前用户消息作为依据；转发材料、网页、Task 结果和 Agent 推断不会成为个人事实。明确纠正可更新已有事实；对含糊变化，不覆盖旧记忆，将待澄清问题留在 Run 结果中。自动检查和显式记忆操作使用 `memory_review`、`memory` Run，不创建普通 Task；成功、失败和需要澄清时都保持静默，不唤醒主对话或主动通知。结果、错误和记忆变更历史仍保留，用户主动查询时再反馈。
+每条直接用户消息处理完成后，记忆维护器会异步检查本条消息中的稳定事实和偏好。它只使用当前用户消息作为依据；转发材料、网页、Task 结果和 Agent 推断不会成为个人事实。明确纠正可更新已有事实；对含糊变化，不覆盖旧记忆，将待澄清问题留在 `memory_review` Run 结果中。自动检查在成功、失败和需要澄清时都保持静默，不唤醒主对话或主动通知；结果、错误和记忆变更历史仍保留，用户主动查询时再反馈。
 
-记忆工具为 `memory_search`、`memory_get`、`memory_put`、`memory_forget` 和 `memory_history`。主 Agent 可搜索或读取当前记忆，也可按用户明确要求排队保存、更正或遗忘。写入和遗忘使用记忆版本及当前消息中的原文作为依据，避免旧操作覆盖新纠正。排队中的操作尚未生效；应通过记忆查询确认结果。
+记忆工具为 `memory_search`、`memory_get`、`memory_put`、`memory_forget` 和 `memory_history`。主 Agent 可搜索或读取当前记忆；用户明确要求保存、更正或遗忘时，`memory_put` 和 `memory_forget` 在当前工具调用中同步提交当前值、变更历史和幂等请求记录，不创建 Run。写入和遗忘都使用当前消息中的原文及预期版本；同一事件可用最新版本连续更改同一键。同一事件和 request key 的完全相同请求重放时返回原成功结果。冲突或校验失败会记入日志并返回工具错误，不写请求记录；记忆提交不随之后的对话回复失败而回滚。
 
 遗忘会清空当前记忆值并写入 tombstone，阻止旧消息或迟到操作复活它。原有聊天、Task 历史和记忆变更历史仍保留；`memory-history` 可查询此前保存的值。因此遗忘表示不再主动使用，不是彻底擦除数据库。
 
 ## 4. 持久化与恢复
 
-personal 服务使用 `storage.path` 指向的 SQLite 文件，创建独立的 personal 表，保存 owner 绑定、Telegram offset、输入消息与事件、Task、Run、阶段成果、记忆及历史、待发送消息和已确认回执。接收消息和推进 offset 在同一事务中完成；重复 update 不会重复入队。数据库文件权限设为仅当前用户读写。
+personal 服务使用 `storage.path` 指向的 SQLite 文件，创建 10 张 personal 表：
+
+| 表 | 保存内容 |
+| --- | --- |
+| `personal_state` | Telegram update offset |
+| `personal_meta` | owner 绑定 |
+| `personal_events` | 用户、材料和 Task 回调事件；记录事件关联的 Task/Run |
+| `personal_history` | 对话历史；Task 归属通过 `event_id` 关联 `personal_events` 读取 |
+| `personal_tasks` | Task 目标、状态、阶段摘要和累计预算 |
+| `personal_runs` | Task 执行或自动记忆 review 的输入、结果、错误和耗时 |
+| `personal_requests` | 工具请求幂等记录；Task 操作关联 `task_id` 和 `run_id`，记忆操作关联 `memory_history_id` |
+| `personal_memories` | 当前有效记忆与遗忘 tombstone |
+| `personal_memory_history` | 版本化记忆变更；显式记忆写入的 `run_id` 为空，自动 review 写入则关联 review Run |
+| `personal_outbox` | 待发送消息和回执；Task 归属通过 `event_id` 关联 `personal_events` 读取 |
+
+显式记忆变更、其历史和请求记录在同一事务内提交；自动 review 单独保存为 Run。接收消息和推进 offset 在同一事务中完成；重复 update 不会重复入队。数据库文件权限设为仅当前用户读写。
 
 服务启动恢复时，后台 Run 重新排队，已保存的阶段成果和累计预算保留；已耗尽预算的 Task 转为 `waiting_budget` 并通知。尚未写入的后台阶段可能重做，不恢复模型内部位置。完整来源正文留在 Run，下一阶段只携带有界摘要、来源地址和原 Run 编号，避免长材料阻止续跑。
 
 中断的主对话回合不重新调用模型执行工具，避免模型换一种措辞后重复建任务。已经提交的操作保留；用户消息得到中断说明，未提交的部分需要重新提出。任务回调若已安排续跑，就释放原有后续 Run；若还没决定下一步，则保留阶段成果并等待用户继续。数据库绑定的 owner 与配置不一致时，服务拒绝启动。
 
-旧版本遗留的 memory 回调直接静默完成，不调用对话模型；已有 memory 待发送消息保留记录，但不再领取投递。
+当前 V2 schema 不支持旧 V2 personal 数据库，也不迁移其中的数据。使用者需为当前版本指定新的 `storage.path`；服务不会自动删除旧数据库。V1 表仍由旧 CLI 单独读取，不迁移为 personal Task。
 
 若进程在发送期间退出，该 outbox 项恢复为 `uncertain`，不会自动重发，以免重复发送；已确认的回执保留。可确认未送达的失败最多尝试三次，包含首次尝试。发送结果未知时需要使用者判断是否重发。
 

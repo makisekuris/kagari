@@ -104,15 +104,11 @@ func TestLivePersonalForgetAndHistory(t *testing.T) {
 	if !t.Run("forget_and_old_review_replay", func(t *testing.T) {
 		event := openUserEvent(t, s, 2, 2, "请忘掉我的长期饮料偏好，以后不要从旧聊天恢复它。")
 		output := livePersonalThink(t, ctx, a, livePersonalInput(t, ctx, s, event))
+		forgotten, err := s.Memory(ctx, original.Key)
+		if err != nil || forgotten == nil || !forgotten.Deleted || forgotten.Value != "" || forgotten.Version != original.Version+1 {
+			t.Fatal("mechanism FAIL: explicit forgetting was not persisted by the tool call")
+		}
 		finishEvent(t, s, event, output, nil)
-		var queued int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_runs WHERE event_id=? AND kind='memory' AND json_extract(input,'$.operation')='forget'`, event.ID).Scan(&queued); err != nil {
-			t.Fatal(err)
-		}
-		if queued != 1 {
-			t.Fatalf("mechanism FAIL: explicit forgetting queued %d forget mutations, want one", queued)
-		}
-		livePersonalMemoryStep(t, ctx, runtime) // Explicit forget, before the automatic review of the same event.
 		livePersonalMemoryStep(t, ctx, runtime)
 		got, err := s.Memory(ctx, original.Key)
 		if err != nil || got == nil || !got.Deleted || got.Value != "" || got.Version != original.Version+1 {
@@ -125,7 +121,7 @@ func TestLivePersonalForgetAndHistory(t *testing.T) {
 		if err != nil || got == nil || !got.Deleted || got.Value != "" {
 			t.Fatal("mechanism FAIL: replaying a completed old review resurrected forgotten data")
 		}
-		t.Log("mechanism PASS: forget tool → queued mutation → worker → tombstone; semantic PASS: old review replay did not restore the value")
+		t.Log("mechanism PASS: forget tool → synchronous write → tombstone; semantic PASS: old review replay did not restore the value")
 	}) {
 		return
 	}
@@ -157,12 +153,10 @@ func TestLivePersonalRecallAfterRestart(t *testing.T) {
 	}
 	code := hex.EncodeToString(random)
 	event := openUserEvent(t, s, 1, 1, "请记住我的虚构编辑器配色代号是 "+code+"。")
-	if _, err := s.QueueMemory(ctx, event.ID, "seed-editor", MemoryChange{Operation: "put", Key: "editor.color_code", Value: "虚构编辑器配色代号 " + code, Evidence: event.Text}); err != nil {
+	if _, err := s.WriteMemory(ctx, event.ID, "seed-editor", MemoryChange{Operation: "put", Key: "editor.color_code", Value: "虚构编辑器配色代号 " + code, Evidence: event.Text}); err != nil {
 		t.Fatal(err)
 	}
 	finishEvent(t, s, event, TurnOutput{}, nil)
-	runtime := &Runtime{Store: s}
-	livePersonalMemoryStep(t, ctx, runtime)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -200,10 +194,9 @@ func TestLivePersonalTaskCallbacks(t *testing.T) {
 			if err != nil || claimed == nil || claimed.ID != run.ID {
 				t.Fatal("mechanism FAIL: task seed was not claimable")
 			}
-			result := StageResult{Outcome: "review", Summary: "已核实月费：甲每月10元，乙每月20元。离线能力尚未核实，原目标尚未完成。", NextStep: "继续核实甲、乙的离线能力，再给出包含月费与离线能力的对照结论。"}
+			result := StageResult{Summary: "已核实月费：甲每月10元，乙每月20元。离线能力尚未核实，原目标尚未完成。下一步需继续核实甲、乙的离线能力，再给出包含月费与离线能力的对照结论。"}
 			if outcome == "settle_completed_goal" {
-				// Keep outcome=review so completion must be the main agent's persisted decision.
-				result = StageResult{Outcome: "review", Summary: "核实已全部完成：甲月费10元，支持离线；乙月费20元，不支持离线。完整对照结论：甲更便宜且有离线能力；乙月费更高且无离线能力。原目标要求的两项已全部有明确依据，无后续事项。"}
+				result = StageResult{Summary: "核实已全部完成：甲月费10元，支持离线；乙月费20元，不支持离线。完整对照结论：甲更便宜且有离线能力；乙月费更高且无离线能力。原目标要求的两项已全部有明确依据，无后续事项。"}
 			}
 			if err := s.FinishStage(ctx, run.ID, result, ""); err != nil {
 				t.Fatal(err)
@@ -263,12 +256,12 @@ func TestLivePersonalReadingStage(t *testing.T) {
 	if err := s.FinishStage(ctx, run.ID, result, logging.ErrorReason(executeErr)); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("reading stage duration=%s reads=%d outcome=%s error=%s", time.Since(started).Round(time.Millisecond), reads, result.Outcome, logging.ErrorReason(executeErr))
+	t.Logf("reading stage duration=%s reads=%d sources=%d error=%s", time.Since(started).Round(time.Millisecond), reads, len(result.Sources), logging.ErrorReason(executeErr))
 	if reads == 0 {
 		t.Fatal("mechanism FAIL: ReadingExecutor did not invoke read_url against the controlled page")
 	}
 	persisted, err := s.Run(ctx, run.ID)
-	if executeErr != nil || err != nil || persisted == nil || persisted.Status != RunCompleted || result.Outcome != "review" || !strings.Contains(result.Summary, code) || len(result.Sources) != 1 || !strings.Contains(persisted.Result, code) {
+	if executeErr != nil || err != nil || persisted == nil || persisted.Status != RunCompleted || !strings.Contains(result.Summary, code) || len(result.Sources) != 1 || !strings.Contains(persisted.Result, code) {
 		t.Fatal("semantic FAIL: reading stage did not return and persist the random evidence value")
 	}
 	t.Log("mechanism PASS: ReadingExecutor read_url → controlled page → persisted real Store stage; semantic PASS: answer contains random source evidence")

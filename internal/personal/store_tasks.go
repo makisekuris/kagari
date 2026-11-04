@@ -17,7 +17,7 @@ const maxTaskChars = 32_000
 const maxTitleChars = 200
 
 const taskColumns = `id,title,goal,context,revision,status,summary,budget_ms,used_ms,updated_at`
-const runColumns = `id,task_id,revision,event_id,kind,input,status,result,error,elapsed_ms,remaining_ms`
+const runColumns = `id,task_id,revision,event_id,kind,input,status,result,error,elapsed_ms`
 
 func scanTask(row scanner) (*Task, error) {
 	var task Task
@@ -35,7 +35,7 @@ func scanRun(row scanner) (*Run, error) {
 	var run Run
 	var taskID sql.NullInt64
 	if err := row.Scan(&run.ID, &taskID, &run.Revision, &run.EventID, &run.Kind, &run.Input, &run.Status,
-		&run.Result, &run.Error, &run.ElapsedMS, &run.RemainingMS); err != nil {
+		&run.Result, &run.Error, &run.ElapsedMS); err != nil {
 		return nil, err
 	}
 	run.TaskID = taskID.Int64
@@ -129,26 +129,26 @@ func encodeRequest(payload requestPayload) (string, error) {
 	return string(raw), err
 }
 
-func previousRequest(ctx context.Context, tx *sql.Tx, eventID int64, key, operation, payload string) (taskID, runID int64, found bool, err error) {
+func previousRequest(ctx context.Context, tx *sql.Tx, eventID int64, key, operation, payload string) (taskID, runID, memoryHistoryID int64, found bool, err error) {
 	var storedOperation, storedPayload string
-	var storedTaskID sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT operation,payload,task_id,run_id FROM personal_requests WHERE event_id=? AND request_key=?`, eventID, key).
-		Scan(&storedOperation, &storedPayload, &storedTaskID, &runID)
+	var storedTaskID, storedRunID, storedMemoryHistoryID sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT operation,payload,task_id,run_id,memory_history_id FROM personal_requests WHERE event_id=? AND request_key=?`, eventID, key).
+		Scan(&storedOperation, &storedPayload, &storedTaskID, &storedRunID, &storedMemoryHistoryID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, false, nil
+		return 0, 0, 0, false, nil
 	}
 	if err != nil {
-		return 0, 0, false, err
+		return 0, 0, 0, false, err
 	}
 	if storedOperation != operation || storedPayload != payload {
-		return 0, 0, false, errors.New("personal: request key reused with different input")
+		return 0, 0, 0, false, errors.New("personal: request key reused with different input")
 	}
-	return storedTaskID.Int64, runID, true, nil
+	return storedTaskID.Int64, storedRunID.Int64, storedMemoryHistoryID.Int64, true, nil
 }
 
-func insertRequest(ctx context.Context, tx *sql.Tx, eventID int64, key, operation, payload string, taskID, runID int64) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO personal_requests(event_id,request_key,operation,payload,task_id,run_id) VALUES(?,?,?,?,?,?)`,
-		eventID, key, operation, payload, nullableID(taskID), runID)
+func insertRequest(ctx context.Context, tx *sql.Tx, eventID int64, key, operation, payload string, taskID, runID, memoryHistoryID int64) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO personal_requests(event_id,request_key,operation,payload,task_id,run_id,memory_history_id) VALUES(?,?,?,?,?,?,?)`,
+		eventID, key, operation, payload, nullableID(taskID), nullableID(runID), nullableID(memoryHistoryID))
 	return err
 }
 
@@ -157,8 +157,8 @@ func taskRun(ctx context.Context, tx *sql.Tx, task Task, eventID int64, input Ta
 	if err != nil {
 		return Run{}, err
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO personal_runs(task_id,revision,event_id,kind,input,status,remaining_ms,created_at)
-		VALUES(?,?,?,'task',?,'queued',?,?)`, task.ID, task.Revision, eventID, encoded, remainingMS(task.BudgetMS, task.UsedMS), timestamp(now))
+	res, err := tx.ExecContext(ctx, `INSERT INTO personal_runs(task_id,revision,event_id,kind,input,status,created_at)
+		VALUES(?,?,?,'task',?,'queued',?)`, task.ID, task.Revision, eventID, encoded, timestamp(now))
 	if err != nil {
 		return Run{}, err
 	}
@@ -167,7 +167,7 @@ func taskRun(ctx context.Context, tx *sql.Tx, task Task, eventID int64, input Ta
 		return Run{}, err
 	}
 	return Run{ID: id, TaskID: task.ID, Revision: task.Revision, EventID: eventID, Kind: RunTask,
-		Input: encoded, Status: RunQueued, RemainingMS: remainingMS(task.BudgetMS, task.UsedMS)}, nil
+		Input: encoded, Status: RunQueued}, nil
 }
 
 func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string, input TaskInput) (Task, Run, error) {
@@ -189,7 +189,7 @@ func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string
 	if err := requireUserEvent(ctx, tx, eventID, true); err != nil {
 		return Task{}, Run{}, err
 	}
-	taskID, runID, found, err := previousRequest(ctx, tx, eventID, key, "create_task", payload)
+	taskID, runID, _, found, err := previousRequest(ctx, tx, eventID, key, "create_task", payload)
 	if err != nil {
 		return Task{}, Run{}, err
 	}
@@ -226,7 +226,7 @@ func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string
 	if err != nil {
 		return Task{}, Run{}, err
 	}
-	if err := insertRequest(ctx, tx, eventID, key, "create_task", payload, taskID, run.ID); err != nil {
+	if err := insertRequest(ctx, tx, eventID, key, "create_task", payload, taskID, run.ID, 0); err != nil {
 		return Task{}, Run{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -254,7 +254,7 @@ func (s *Store) ReviseTask(ctx context.Context, eventID int64, key string, taskI
 	if err := requireUserEvent(ctx, tx, eventID, true); err != nil {
 		return Task{}, Run{}, err
 	}
-	gotTaskID, runID, found, err := previousRequest(ctx, tx, eventID, key, "revise_task", payload)
+	gotTaskID, runID, _, found, err := previousRequest(ctx, tx, eventID, key, "revise_task", payload)
 	if err != nil {
 		return Task{}, Run{}, err
 	}
@@ -309,7 +309,7 @@ func (s *Store) ReviseTask(ctx context.Context, eventID int64, key string, taskI
 	if err != nil {
 		return Task{}, Run{}, err
 	}
-	if err := insertRequest(ctx, tx, eventID, key, "revise_task", payload, taskID, run.ID); err != nil {
+	if err := insertRequest(ctx, tx, eventID, key, "revise_task", payload, taskID, run.ID, 0); err != nil {
 		return Task{}, Run{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -385,7 +385,7 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 	if kind != EventUser && kind != EventTask {
 		return Task{}, Run{}, errors.New("personal: continue requires a user event or authorized task callback")
 	}
-	gotTaskID, runID, found, err := previousRequest(ctx, tx, eventID, key, "continue_task", payload)
+	gotTaskID, runID, _, found, err := previousRequest(ctx, tx, eventID, key, "continue_task", payload)
 	if err != nil {
 		return Task{}, Run{}, err
 	}
@@ -458,7 +458,7 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 	if err != nil {
 		return Task{}, Run{}, err
 	}
-	if err := insertRequest(ctx, tx, eventID, key, "continue_task", payload, taskID, run.ID); err != nil {
+	if err := insertRequest(ctx, tx, eventID, key, "continue_task", payload, taskID, run.ID, 0); err != nil {
 		return Task{}, Run{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -603,7 +603,7 @@ func (s *Store) Runs(ctx context.Context, taskID int64, limit int) ([]Run, error
 }
 
 func (s *Store) ClaimRun(ctx context.Context, kind RunKind) (*Run, error) {
-	if kind != RunTask && kind != RunMemory && kind != RunMemoryReview {
+	if kind != RunTask && kind != RunMemoryReview {
 		return nil, fmt.Errorf("personal: unknown run kind %q", kind)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -617,15 +617,10 @@ func (s *Store) ClaimRun(ctx context.Context, kind RunKind) (*Run, error) {
 			WHERE r.kind='task' AND r.status='queued' AND e.status='completed' AND t.status='queued' AND t.revision=r.revision
 			AND t.used_ms<t.budget_ms AND NOT EXISTS(SELECT 1 FROM personal_runs active WHERE active.task_id=t.id AND active.revision=t.revision AND active.status='running')
 			ORDER BY r.id LIMIT 1`
-	} else if kind == RunMemory {
-		query = `SELECT r.id FROM personal_runs r JOIN personal_events e ON e.id=r.event_id
-			WHERE r.kind IN ('memory','memory_review') AND r.status='queued' AND e.status='completed'
-			AND NOT EXISTS(SELECT 1 FROM personal_runs active WHERE active.kind IN ('memory','memory_review') AND active.status='running')
-			ORDER BY r.id LIMIT 1`
 	} else {
 		query = `SELECT r.id FROM personal_runs r JOIN personal_events e ON e.id=r.event_id
 			WHERE r.kind='memory_review' AND r.status='queued' AND e.status='completed'
-			AND NOT EXISTS(SELECT 1 FROM personal_runs active WHERE active.kind IN ('memory','memory_review') AND active.status='running')
+			AND NOT EXISTS(SELECT 1 FROM personal_runs active WHERE active.kind='memory_review' AND active.status='running')
 			ORDER BY r.id LIMIT 1`
 	}
 	var id int64
@@ -642,7 +637,7 @@ func (s *Store) ClaimRun(ctx context.Context, kind RunKind) (*Run, error) {
 			return nil, err
 		}
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='running',remaining_ms=? WHERE id=? AND status='queued'`, remaining, id)
+	res, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='running' WHERE id=? AND status='queued'`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -664,6 +659,7 @@ func (s *Store) ClaimRun(ctx context.Context, kind RunKind) (*Run, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	run.RemainingMS = remaining
 	return run, nil
 }
 
@@ -703,10 +699,7 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 	if runID <= 0 {
 		return errors.New("personal: run ID must be positive")
 	}
-	if result.Outcome != "review" && result.Outcome != "done" && result.Outcome != "needs_user" && result.Outcome != "failed" {
-		return fmt.Errorf("personal: invalid stage outcome %q", result.Outcome)
-	}
-	if runeLen(result.Summary) > maxTaskChars || runeLen(result.NextStep) > maxTaskChars || runeLen(failure) > maxTaskChars {
+	if runeLen(result.Summary) > maxTaskChars || runeLen(failure) > maxTaskChars {
 		return errors.New("personal: stage result exceeds its size limit")
 	}
 	raw, err := json.Marshal(result)
@@ -742,27 +735,19 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 		return tx.Commit()
 	}
 	status := RunCompleted
-	if failure != "" || result.Outcome == "failed" {
+	if failure != "" {
 		status = RunFailed
 	}
 	taskStatus := TaskAwaitingReview
-	switch result.Outcome {
-	case "done":
-		taskStatus = TaskCompleted
-	case "needs_user":
-		taskStatus = TaskWaitingInput
-	case "failed":
-		taskStatus = TaskFailed
-	}
 	if status == RunFailed {
 		taskStatus = TaskFailed
 	}
-	if remainingMS(task.BudgetMS, task.UsedMS) == 0 && taskStatus != TaskCompleted {
+	if remainingMS(task.BudgetMS, task.UsedMS) == 0 {
 		taskStatus = TaskWaitingBudget
 	}
 	now := timestamp(time.Now())
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status=?,result=?,error=?,remaining_ms=? WHERE id=? AND status='running'`,
-		status, string(raw), failure, remainingMS(task.BudgetMS, task.UsedMS), runID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status=?,result=?,error=? WHERE id=? AND status='running'`,
+		status, string(raw), failure, runID); err != nil {
 		return err
 	}
 	summary := task.Summary
@@ -776,9 +761,6 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 	callbackText := result.Summary
 	if failure != "" {
 		callbackText = failure
-	}
-	if callbackText == "" {
-		callbackText = result.NextStep
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,run_id,status,created_at)
 		VALUES('task',?,?,?,'queued',?)`, callbackText, taskID, runID, now); err != nil {
@@ -794,7 +776,6 @@ func stageCheckpoint(runID int64, result StageResult) string {
 		StageResult
 	}{RunID: runID, StageResult: result}
 	checkpoint.Summary = clip(result.Summary, 12000)
-	checkpoint.NextStep = clip(result.NextStep, 2000)
 	checkpoint.Sources = make([]domain.Source, 0, len(result.Sources))
 	for _, source := range result.Sources {
 		checkpoint.Sources = append(checkpoint.Sources, domain.Source{ID: clip(source.ID, 128), URL: clip(source.URL, 512), Title: clip(source.Title, 200), Status: source.Status})
@@ -808,7 +789,6 @@ func stageCheckpoint(runID int64, result StageResult) string {
 			checkpoint.Sources = checkpoint.Sources[:len(checkpoint.Sources)-1]
 		} else {
 			checkpoint.Summary = clip(checkpoint.Summary, runeLen(checkpoint.Summary)/2)
-			checkpoint.NextStep = clip(checkpoint.NextStep, runeLen(checkpoint.NextStep)/2)
 		}
 	}
 }
@@ -846,7 +826,7 @@ func (s *Store) AccountRun(ctx context.Context, runID int64, elapsed time.Durati
 			return 0, errors.New("personal: task used time overflow")
 		}
 		task.UsedMS += delta
-		if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET elapsed_ms=?,remaining_ms=? WHERE id=? AND status='running'`, elapsedMS, remainingMS(task.BudgetMS, task.UsedMS), runID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET elapsed_ms=? WHERE id=? AND status='running'`, elapsedMS, runID); err != nil {
 			return 0, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET used_ms=?,updated_at=? WHERE id=? AND revision=?`, task.UsedMS, timestamp(time.Now()), taskID, revision); err != nil {

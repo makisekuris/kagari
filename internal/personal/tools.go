@@ -10,6 +10,7 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
+	"go.uber.org/zap"
 )
 
 type personalToolReply struct {
@@ -95,6 +96,7 @@ type memoryHistoryArgs struct {
 
 type personalTools struct {
 	store      Repository
+	log        *zap.Logger
 	input      TurnInput
 	event      Event
 	taskIDs    map[int64]struct{}
@@ -152,6 +154,13 @@ func (p *personalTools) requestKey(name string, input any) (string, error) {
 
 func toolError(err error) personalToolReply {
 	return personalToolReply{OK: false, Error: err.Error()}
+}
+
+func (p *personalTools) memoryError(key, operation string, err error) personalToolReply {
+	if p.log != nil {
+		p.log.Warn("personal memory change failed", zap.Int64("event_id", p.event.ID), zap.String("key", key), zap.String("operation", operation), zap.Error(err))
+	}
+	return toolError(err)
 }
 
 func (p *personalTools) taskByID(id int64) *Task {
@@ -411,57 +420,43 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	memoryPut, err := utils.InferTool("memory_put", "仅按用户当前消息中的明确记忆请求排队保存或更正。evidence 必须是当前消息的原文子串。", func(ctx context.Context, a memoryPutArgs) (personalToolReply, error) {
+	memoryPut, err := utils.InferTool("memory_put", "仅按用户当前消息中的明确记忆请求保存或更正，成功后立即持久化。evidence 必须是当前消息的原文子串。", func(ctx context.Context, a memoryPutArgs) (personalToolReply, error) {
 		if err := p.directUserMutation(); err != nil {
-			return toolError(err), nil
+			return p.memoryError(a.Key, "put", err), nil
 		}
 		if strings.TrimSpace(a.Key) == "" || strings.TrimSpace(a.Value) == "" || a.ExpectedVersion < 0 || !strings.Contains(p.event.Text, a.Evidence) || strings.TrimSpace(a.Evidence) == "" {
-			return toolError(fmt.Errorf("key, value, nonnegative expected_version and an exact current-message evidence quote are required")), nil
-		}
-		current, err := p.store.Memory(ctx, a.Key)
-		if err != nil {
-			return toolError(err), nil
-		}
-		if (current == nil && a.ExpectedVersion != 0) || (current != nil && a.ExpectedVersion != current.Version) {
-			return toolError(fmt.Errorf("expected_version does not match the current memory")), nil
+			return p.memoryError(a.Key, "put", fmt.Errorf("key, value, nonnegative expected_version and an exact current-message evidence quote are required")), nil
 		}
 		key, err := p.requestKey("memory_put", a)
 		if err != nil {
-			return toolError(err), nil
+			return p.memoryError(a.Key, "put", err), nil
 		}
-		run, err := p.store.QueueMemory(ctx, p.event.ID, key, MemoryChange{Operation: "put", Key: a.Key, Value: a.Value, ExpectedVersion: a.ExpectedVersion, Evidence: a.Evidence})
+		memory, err := p.store.WriteMemory(ctx, p.event.ID, key, MemoryChange{Operation: "put", Key: a.Key, Value: a.Value, ExpectedVersion: a.ExpectedVersion, Evidence: a.Evidence})
 		if err != nil {
-			return toolError(err), nil
+			return p.memoryError(a.Key, "put", err), nil
 		}
-		return personalToolReply{OK: true, Queued: run.Status == RunQueued, Run: &run}, nil
+		return personalToolReply{OK: true, Memory: &memory}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	memoryForget, err := utils.InferTool("memory_forget", "仅按用户当前消息中的明确遗忘请求排队删除。先读取当前记忆的版本；evidence 必须是当前消息原文。", func(ctx context.Context, a memoryForgetArgs) (personalToolReply, error) {
+	memoryForget, err := utils.InferTool("memory_forget", "仅按用户当前消息中的明确遗忘请求删除。提供当前版本；evidence 必须是当前消息原文。成功后立即持久化。", func(ctx context.Context, a memoryForgetArgs) (personalToolReply, error) {
 		if err := p.directUserMutation(); err != nil {
-			return toolError(err), nil
+			return p.memoryError(a.Key, "forget", err), nil
 		}
 		if strings.TrimSpace(a.Key) == "" || a.ExpectedVersion <= 0 || !strings.Contains(p.event.Text, a.Evidence) || strings.TrimSpace(a.Evidence) == "" {
-			return toolError(fmt.Errorf("key, positive expected_version and an exact current-message evidence quote are required")), nil
-		}
-		memory, err := p.store.Memory(ctx, a.Key)
-		if err != nil {
-			return toolError(err), nil
-		}
-		if memory == nil || memory.Deleted || memory.Version != a.ExpectedVersion {
-			return toolError(fmt.Errorf("memory is missing, already forgotten or has a different version")), nil
+			return p.memoryError(a.Key, "forget", fmt.Errorf("key, positive expected_version and an exact current-message evidence quote are required")), nil
 		}
 		key, err := p.requestKey("memory_forget", a)
 		if err != nil {
-			return toolError(err), nil
+			return p.memoryError(a.Key, "forget", err), nil
 		}
-		run, err := p.store.QueueMemory(ctx, p.event.ID, key, MemoryChange{Operation: "forget", Key: a.Key, ExpectedVersion: a.ExpectedVersion})
+		memory, err := p.store.WriteMemory(ctx, p.event.ID, key, MemoryChange{Operation: "forget", Key: a.Key, ExpectedVersion: a.ExpectedVersion, Evidence: a.Evidence})
 		if err != nil {
-			return toolError(err), nil
+			return p.memoryError(a.Key, "forget", err), nil
 		}
-		return personalToolReply{OK: true, Queued: run.Status == RunQueued, Run: &run}, nil
+		return personalToolReply{OK: true, Memory: &memory}, nil
 	})
 	if err != nil {
 		return nil, err

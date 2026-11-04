@@ -50,7 +50,7 @@ func TestRuntimeRecoveredCallbackReleasesOnlyItsCommittedContinuation(t *testing
 	if _, err := s.ClaimRun(ctx, RunTask); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.FinishStage(ctx, first.ID, StageResult{Outcome: "review", Summary: "first result"}, ""); err != nil {
+	if err := s.FinishStage(ctx, first.ID, StageResult{Summary: "first result"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	callback, err := s.ClaimEvent(ctx)
@@ -90,7 +90,7 @@ func TestLongStageEvidenceRemainsQueryableAndCanContinue(t *testing.T) {
 	if _, err := s.ClaimRun(ctx, RunTask); err != nil {
 		t.Fatal(err)
 	}
-	result := StageResult{Outcome: "review", Summary: strings.Repeat("summary ", 4000), Sources: []domain.Source{{ID: "s1", URL: "https://example.com/source", Status: "ok", Content: strings.Repeat("evidence", 6000)}}}
+	result := StageResult{Summary: strings.Repeat("summary ", 4000), Sources: []domain.Source{{ID: "s1", URL: "https://example.com/source", Status: "ok", Content: strings.Repeat("evidence", 6000)}}}
 	if err := s.FinishStage(ctx, first.ID, result, ""); err != nil {
 		t.Fatal(err)
 	}

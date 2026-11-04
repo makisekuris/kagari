@@ -46,7 +46,7 @@ func TestReadingExecutorFramesTaskAndInjectsOnlyActiveBoundedMemory(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Outcome != "review" || result.Summary != "Stage report." {
+	if result.Summary != "Stage report." {
 		t.Fatalf("stage result=%+v", result)
 	}
 	if len(fixture.requests) != 1 {
@@ -81,7 +81,7 @@ func TestReadingExecutorReportsReadsAndClosesBrowser(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Outcome != "review" || len(result.Sources) != 1 || result.Sources[0].Content != "Step one." {
+		if len(result.Sources) != 1 || result.Sources[0].Content != "Step one." {
 			t.Fatalf("result=%+v", result)
 		}
 		if len(progress) != 1 || !strings.Contains(progress[0], "https://example.org/guide") {
@@ -144,7 +144,7 @@ func TestReadingExecutorCancellationKeepsPartialEvidence(t *testing.T) {
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v, want context cancellation", err)
 	}
-	if result.Outcome != "failed" || len(result.Sources) == 0 {
+	if len(result.Sources) == 0 {
 		t.Fatalf("partial result=%+v", result)
 	}
 	joinedSources := ""
@@ -166,7 +166,7 @@ func TestReadingExecutorRejectsBadTaskInputAndRetainsSourceEvidenceOnModelError(
 	t.Run("bad task input", func(t *testing.T) {
 		fixture := &responsesFixture{t: t}
 		result, err := ReadingExecutor(readingEngine(fixture, nil), newToolRepo())(context.Background(), Run{Kind: RunTask, Input: `{"goal":"x"} {}`}, nil)
-		if err == nil || result.Outcome != "failed" || !strings.Contains(err.Error(), "trailing JSON") {
+		if err == nil || !strings.Contains(err.Error(), "trailing JSON") {
 			t.Fatalf("result=%+v err=%v", result, err)
 		}
 	})
@@ -180,7 +180,7 @@ func TestReadingExecutorRejectsBadTaskInputAndRetainsSourceEvidenceOnModelError(
 			return domain.Source{ID: "evidence", URL: rawURL, Status: "ok", Content: "Observed text only."}, nil
 		})
 		result, err := ReadingExecutor(engine, newToolRepo())(context.Background(), executorRun(TaskInput{Goal: "Read the evidence."}), nil)
-		if err == nil || result.Outcome != "failed" {
+		if err == nil {
 			t.Fatalf("result=%+v err=%v", result, err)
 		}
 		if len(result.Sources) != 1 || !strings.Contains(result.Summary, "Observed text only.") || strings.Contains(result.Summary, "successfully completed") {

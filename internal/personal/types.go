@@ -14,7 +14,6 @@ const (
 	EventUser     EventKind = "user"
 	EventMaterial EventKind = "material"
 	EventTask     EventKind = "task"
-	EventMemory   EventKind = "memory"
 )
 
 type EventStatus string
@@ -29,7 +28,6 @@ type RunKind string
 
 const (
 	RunTask         RunKind = "task"
-	RunMemory       RunKind = "memory"
 	RunMemoryReview RunKind = "memory_review"
 )
 
@@ -114,17 +112,15 @@ type Run struct {
 	Result      string    `json:"result"`
 	Error       string    `json:"error"`
 	ElapsedMS   int64     `json:"elapsed_ms"`
-	RemainingMS int64     `json:"remaining_ms"`
+	RemainingMS int64     `json:"-"` // Computed from the task budget when this run is claimed.
 }
 
 type StageResult struct {
-	Outcome  string          `json:"outcome"` // review, done, needs_user, failed
-	Summary  string          `json:"summary"`
-	NextStep string          `json:"next_step,omitempty"`
-	Sources  []domain.Source `json:"sources,omitempty"`
+	Summary string          `json:"summary"`
+	Sources []domain.Source `json:"sources,omitempty"`
 }
 
-// Deleted entries retain only a version and key so an older queued write cannot resurrect them.
+// Deleted entries retain a tombstone so an older memory review cannot resurrect them.
 type Memory struct {
 	Key           string    `json:"key"`
 	Value         string    `json:"value"`
@@ -202,8 +198,7 @@ type Repository interface {
 	FinishStage(ctx context.Context, runID int64, result StageResult, failure string) error
 	AccountRun(ctx context.Context, runID int64, elapsed time.Duration) (time.Duration, error)
 	AccountEvent(ctx context.Context, eventID int64, elapsed time.Duration) error
-	QueueMemory(ctx context.Context, eventID int64, requestKey string, change MemoryChange) (Run, error)
-	ApplyMemory(context.Context, int64) error
+	WriteMemory(ctx context.Context, eventID int64, requestKey string, change MemoryChange) (Memory, error)
 	MemoryReviewInput(ctx context.Context, runID int64) (MemoryReviewInput, error)
 	FinishMemoryReview(ctx context.Context, runID int64, review MemoryReview, failure string) error
 	Memory(context.Context, string) (*Memory, error)

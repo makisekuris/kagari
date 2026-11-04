@@ -156,7 +156,7 @@ func TestTaskBudgetContinuesAcrossRestartAndCallbackAccounting(t *testing.T) {
 	if _, err := s.AccountRun(ctx, run.ID, 8*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.FinishStage(ctx, run.ID, StageResult{Outcome: "review", Summary: "First stage", NextStep: "Check two sources"}, ""); err != nil {
+	if err := s.FinishStage(ctx, run.ID, StageResult{Summary: "First stage"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.Task(ctx, task.ID)
@@ -214,8 +214,12 @@ func TestTaskBudgetContinuesAcrossRestartAndCallbackAccounting(t *testing.T) {
 		t.Fatalf("continued task changed budget across restart: (%+v,%v)", got, err)
 	}
 	runs, err := s.Runs(ctx, task.ID, 10)
-	if err != nil || len(runs) != 2 || runs[0].Result == "" || runs[1].Status != RunQueued || runs[1].RemainingMS != int64((19*time.Minute)/time.Millisecond) {
+	if err != nil || len(runs) != 2 || runs[0].Result == "" || runs[1].Status != RunQueued {
 		t.Fatalf("persisted stage/run history = (%+v,%v)", runs, err)
+	}
+	claimed, err := s.ClaimRun(ctx, RunTask)
+	if err != nil || claimed == nil || claimed.ID != nextRun.ID || claimed.RemainingMS != int64((19*time.Minute)/time.Millisecond) {
+		t.Fatalf("remaining budget at claim = (%+v,%v)", claimed, err)
 	}
 }
 
@@ -230,7 +234,7 @@ func TestCallbackAndRecoveryStopRunsAtCumulativeBudget(t *testing.T) {
 		if err != nil || run == nil {
 			t.Fatalf("claim run = (%+v,%v)", run, err)
 		}
-		if err := s.FinishStage(ctx, run.ID, StageResult{Outcome: "review", Summary: "checkpoint"}, ""); err != nil {
+		if err := s.FinishStage(ctx, run.ID, StageResult{Summary: "checkpoint"}, ""); err != nil {
 			t.Fatal(err)
 		}
 		callback, err := s.ClaimEvent(ctx)
@@ -274,7 +278,7 @@ func TestCallbackAndRecoveryStopRunsAtCumulativeBudget(t *testing.T) {
 		if _, err := s.AccountRun(ctx, first.ID, 10*time.Second); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.FinishStage(ctx, first.ID, StageResult{Outcome: "review", Summary: "saved stage one"}, ""); err != nil {
+		if err := s.FinishStage(ctx, first.ID, StageResult{Summary: "saved stage one"}, ""); err != nil {
 			t.Fatal(err)
 		}
 		callback, err := s.ClaimEvent(ctx)
@@ -342,7 +346,7 @@ func TestBudgetExtensionRequiresExplicitUserContinuation(t *testing.T) {
 	if _, err := s.AccountRun(ctx, run.ID, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.FinishStage(ctx, run.ID, StageResult{Outcome: "review", Summary: "partial"}, ""); err != nil {
+	if err := s.FinishStage(ctx, run.ID, StageResult{Summary: "partial"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	callback, err := s.ClaimEvent(ctx)
@@ -359,7 +363,7 @@ func TestBudgetExtensionRequiresExplicitUserContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if continued.BudgetMS != 2*int64(time.Minute/time.Millisecond) || continued.UsedMS != int64(time.Minute/time.Millisecond) ||
-		continued.Goal != task.Goal || continued.Context != task.Context || next.RemainingMS != int64(time.Minute/time.Millisecond) {
+		continued.Goal != task.Goal || continued.Context != task.Context || remainingMS(continued.BudgetMS, continued.UsedMS) != int64(time.Minute/time.Millisecond) {
 		t.Fatalf("explicit extension reset or changed the task: task=%+v run=%+v", continued, next)
 	}
 	finishEvent(t, s, user, TurnOutput{}, nil)
@@ -380,7 +384,7 @@ func TestTaskCallbackAuthorityRevisionCancelAndExplicitContinue(t *testing.T) {
 	if err != nil || runB == nil || runB.TaskID != taskB.ID {
 		t.Fatalf("run B = (%+v,%v)", runB, err)
 	}
-	if err := s.FinishStage(ctx, runA.ID, StageResult{Outcome: "review", Summary: "A result"}, ""); err != nil {
+	if err := s.FinishStage(ctx, runA.ID, StageResult{Summary: "A result"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	callbackA, err := s.ClaimEvent(ctx)
@@ -405,7 +409,7 @@ func TestTaskCallbackAuthorityRevisionCancelAndExplicitContinue(t *testing.T) {
 		t.Fatal("stale callback continued a superseded revision")
 	}
 	finishEvent(t, s, userRevision, TurnOutput{}, nil)
-	if err := s.FinishStage(ctx, runA.ID, StageResult{Outcome: "done", Summary: "late old result"}, ""); err != nil {
+	if err := s.FinishStage(ctx, runA.ID, StageResult{Summary: "late old result"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	gotA, _ := s.Task(ctx, taskA.ID)
@@ -422,7 +426,7 @@ func TestTaskCallbackAuthorityRevisionCancelAndExplicitContinue(t *testing.T) {
 	if err != nil || updatedAgain.Revision != 3 || revisedAgain.Status != RunQueued {
 		t.Fatalf("second revision = (%+v,%+v,%v)", updatedAgain, revisedAgain, err)
 	}
-	if err := s.FinishStage(ctx, activeRevisionRun.ID, StageResult{Outcome: "done", Summary: "late revision 2 result"}, ""); err != nil {
+	if err := s.FinishStage(ctx, activeRevisionRun.ID, StageResult{Summary: "late revision 2 result"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	gotA, _ = s.Task(ctx, taskA.ID)
@@ -430,7 +434,7 @@ func TestTaskCallbackAuthorityRevisionCancelAndExplicitContinue(t *testing.T) {
 		t.Fatalf("running old revision overwrote new one: %+v", gotA)
 	}
 	finishEvent(t, s, activeRevisionEvent, TurnOutput{}, nil)
-	if err := s.FinishStage(ctx, runB.ID, StageResult{Outcome: "review", Summary: "B result"}, ""); err != nil {
+	if err := s.FinishStage(ctx, runB.ID, StageResult{Summary: "B result"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	finishEvent(t, s, *callbackA, TurnOutput{}, nil)
@@ -454,7 +458,7 @@ func TestTaskCallbackAuthorityRevisionCancelAndExplicitContinue(t *testing.T) {
 	if err != nil || cancelled.Status != TaskCancelled {
 		t.Fatalf("CancelTask() = (%+v,%v)", cancelled, err)
 	}
-	if err := s.FinishStage(ctx, active.ID, StageResult{Outcome: "done", Summary: "late"}, ""); err != nil {
+	if err := s.FinishStage(ctx, active.ID, StageResult{Summary: "late"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	gotA, _ = s.Task(ctx, taskA.ID)
@@ -483,7 +487,7 @@ func TestMemoryProvenanceCASForgetReplayAndQuietReview(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_runs WHERE event_id=? AND kind='memory_review'`, first.ID).Scan(&reviews); err != nil || reviews != 1 {
 		t.Fatalf("review dedup count = (%d,%v)", reviews, err)
 	}
-	reviewRun, err := s.ClaimRun(ctx, RunMemory)
+	reviewRun, err := s.ClaimRun(ctx, RunMemoryReview)
 	if err != nil || reviewRun == nil || reviewRun.Kind != RunMemoryReview {
 		t.Fatalf("memory review claim = (%+v,%v)", reviewRun, err)
 	}
@@ -527,42 +531,14 @@ func TestMemoryProvenanceCASForgetReplayAndQuietReview(t *testing.T) {
 	second := openUserEvent(t, s, 3, 304, secondText)
 	putOne := MemoryChange{Operation: "put", Key: "style.summary", Value: "brief reports", ExpectedVersion: 1, Evidence: secondText}
 	putTwo := MemoryChange{Operation: "put", Key: "style.summary", Value: "short reports", ExpectedVersion: 1, Evidence: secondText}
-	if _, err := s.QueueMemory(ctx, second.ID, "put-one", putOne); err != nil {
-		t.Fatal(err)
+	if memory, err := s.WriteMemory(ctx, second.ID, "put-one", putOne); err != nil || memory.Version != 2 || memory.Value != "brief reports" {
+		t.Fatalf("synchronous write = (%+v,%v)", memory, err)
 	}
-	if _, err := s.QueueMemory(ctx, second.ID, "put-two", putTwo); err != nil {
-		t.Fatal(err)
+	if _, err := s.WriteMemory(ctx, second.ID, "put-two", putTwo); err == nil {
+		t.Fatal("stale expected version was accepted")
 	}
 	finishEvent(t, s, second, TurnOutput{Silent: true}, nil)
-	firstExplicit, err := s.ClaimRun(ctx, RunMemory)
-	if err != nil || firstExplicit == nil || firstExplicit.Kind != RunMemory {
-		t.Fatalf("explicit memory claim = (%+v,%v)", firstExplicit, err)
-	}
-	if err := s.ApplyMemory(ctx, firstExplicit.ID); err != nil {
-		t.Fatal(err)
-	}
-	memory, _ = s.Memory(ctx, "style.summary")
-	if memory.Version != 2 || memory.Value != "brief reports" || memory.SourceEventID != second.ID {
-		t.Fatalf("first explicit write = %+v", memory)
-	}
-	secondExplicit, err := s.ClaimRun(ctx, RunMemory)
-	if err != nil || secondExplicit == nil {
-		t.Fatalf("second explicit claim = (%+v,%v)", secondExplicit, err)
-	}
-	if err := s.ApplyMemory(ctx, secondExplicit.ID); err != nil {
-		t.Fatal(err)
-	}
-	failedRun, _ := s.Run(ctx, secondExplicit.ID)
-	if failedRun.Status != RunFailed || failedRun.Error == "" {
-		t.Fatalf("CAS conflict was not recorded: %+v", failedRun)
-	}
-	if callback, err := s.ClaimEvent(ctx); err != nil || callback != nil {
-		t.Fatalf("CAS conflict created callback: (%+v,%v)", callback, err)
-	}
-	if delivery, err := s.ClaimDelivery(ctx); err != nil || delivery != nil {
-		t.Fatalf("CAS conflict created delivery: (%+v,%v)", delivery, err)
-	}
-	secondReview, err := s.ClaimRun(ctx, RunMemory)
+	secondReview, err := s.ClaimRun(ctx, RunMemoryReview)
 	if err != nil || secondReview == nil || secondReview.Kind != RunMemoryReview {
 		t.Fatalf("second automatic review = (%+v,%v)", secondReview, err)
 	}
@@ -572,24 +548,16 @@ func TestMemoryProvenanceCASForgetReplayAndQuietReview(t *testing.T) {
 
 	forgetText := "Forget style.summary; I no longer want that preference stored."
 	forgetEvent := openUserEvent(t, s, 4, 305, forgetText)
-	forget := MemoryChange{Operation: "forget", Key: "style.summary", ExpectedVersion: 2}
-	forgetRun, err := s.QueueMemory(ctx, forgetEvent.ID, "forget", forget)
-	if err != nil {
-		t.Fatal(err)
+	forget := MemoryChange{Operation: "forget", Key: "style.summary", ExpectedVersion: 2, Evidence: forgetText}
+	forgotten, err := s.WriteMemory(ctx, forgetEvent.ID, "forget", forget)
+	if err != nil || !forgotten.Deleted || forgotten.Version != 3 || forgotten.SourceEventID != forgetEvent.ID {
+		t.Fatalf("forgot memory = (%+v,%v)", forgotten, err)
 	}
 	finishEvent(t, s, forgetEvent, TurnOutput{Silent: true}, nil)
-	claimedForget, err := s.ClaimRun(ctx, RunMemory)
-	if err != nil || claimedForget == nil || claimedForget.ID != forgetRun.ID {
-		t.Fatalf("forget claim = (%+v,%v)", claimedForget, err)
+	if replay, err := s.WriteMemory(ctx, forgetEvent.ID, "forget", forget); err != nil || replay != forgotten {
+		t.Fatalf("forget replay = (%+v,%v), want %+v", replay, err, forgotten)
 	}
-	if err := s.ApplyMemory(ctx, claimedForget.ID); err != nil {
-		t.Fatal(err)
-	}
-	memory, _ = s.Memory(ctx, "style.summary")
-	if !memory.Deleted || memory.Version != 3 || memory.SourceEventID != forgetEvent.ID {
-		t.Fatalf("forgot memory = %+v", memory)
-	}
-	forgetReview, err := s.ClaimRun(ctx, RunMemory)
+	forgetReview, err := s.ClaimRun(ctx, RunMemoryReview)
 	if err != nil || forgetReview == nil || forgetReview.Kind != RunMemoryReview {
 		t.Fatalf("forget review = (%+v,%v)", forgetReview, err)
 	}
@@ -624,23 +592,11 @@ func TestMemoryProvenanceCASForgetReplayAndQuietReview(t *testing.T) {
 		t.Fatalf("memory version history = (%+v,%v)", history, err)
 	}
 
-	// A delayed write sourced from the earlier message must fail against the tombstone.
-	oldRaw, _ := json.Marshal(change)
-	res, err := s.db.ExecContext(ctx, `INSERT INTO personal_runs(event_id,kind,input,status,created_at) VALUES(?,? ,?,'queued',?)`, first.ID, RunMemory, string(oldRaw), timestamp(time.Now()))
-	if err != nil {
-		t.Fatal(err)
+	if _, err := s.WriteMemory(ctx, first.ID, "late-write", change); err == nil {
+		t.Fatal("new write from a completed source was accepted")
 	}
-	oldID, _ := res.LastInsertId()
-	oldRun, err := s.ClaimRun(ctx, RunMemory)
-	if err != nil || oldRun == nil || oldRun.ID != oldID {
-		t.Fatalf("old replay claim = (%+v,%v)", oldRun, err)
-	}
-	if err := s.ApplyMemory(ctx, oldRun.ID); err != nil {
-		t.Fatal(err)
-	}
-	oldResult, _ := s.Run(ctx, oldRun.ID)
-	if oldResult.Status != RunFailed {
-		t.Fatalf("old replay not rejected: %+v", oldResult)
+	if replay, err := s.WriteMemory(ctx, second.ID, "put-one", putOne); err != nil || replay.Version != 2 || replay.Value != "brief reports" {
+		t.Fatalf("old successful replay = (%+v,%v)", replay, err)
 	}
 	memory, _ = s.Memory(ctx, "style.summary")
 	if !memory.Deleted || memory.Version != 3 {
@@ -660,8 +616,8 @@ func TestFourConcurrentTaskClaimsAndSingleRunPerTask(t *testing.T) {
 		tasks, runs = append(tasks, task), append(runs, run)
 	}
 	// Add an extra queued run for task 1; its active run must keep it unclaimable.
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO personal_runs(task_id,revision,event_id,kind,input,status,remaining_ms,created_at) VALUES(?,?,?,'task',?,'queued',?,?)`,
-		tasks[0].ID, tasks[0].Revision, runs[0].EventID, runs[0].Input, runs[0].RemainingMS, timestamp(time.Now())); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO personal_runs(task_id,revision,event_id,kind,input,status,created_at) VALUES(?,?,?,'task',?,'queued',?)`,
+		tasks[0].ID, tasks[0].Revision, runs[0].EventID, runs[0].Input, timestamp(time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	claimed := make(chan *Run, 4)
@@ -713,8 +669,12 @@ func TestOutboxOrderReceiptsReplyLinkingAndUnknownRecovery(t *testing.T) {
 	event := openUserEvent(t, s, 1, 501, "Please research this")
 	task, _ := createTask(t, s, event, "create", "research", "Research this", "")
 	finishEvent(t, s, event, TurnOutput{TaskID: task.ID, Text: "first answer second answer third answer"}, []string{"first", "second", "third"})
+	history, err := s.History(ctx, event.ID+1, 10)
+	if err != nil || len(history) != 2 || history[0].TaskID != task.ID || history[1].TaskID != task.ID {
+		t.Fatalf("history task association = (%+v,%v)", history, err)
+	}
 	first, err := s.ClaimDelivery(ctx)
-	if err != nil || first == nil || first.Text != "first" || first.Attempts != 1 {
+	if err != nil || first == nil || first.Text != "first" || first.Attempts != 1 || first.TaskID != task.ID {
 		t.Fatalf("first delivery = (%+v,%v)", first, err)
 	}
 	if err := s.UpdateDelivery(ctx, first.ID, "sent", 9001, "", time.Time{}); err != nil {
@@ -779,10 +739,10 @@ func TestMemoryValidationAndDuplicateCompletion(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Minute)
 	event := openUserEvent(t, s, 1, 601, "I enjoy tea")
-	if _, err := s.QueueMemory(ctx, event.ID, "bad", MemoryChange{Operation: "put", Key: "Tea", Value: "tea", Evidence: "tea"}); err == nil {
+	if _, err := s.WriteMemory(ctx, event.ID, "bad", MemoryChange{Operation: "put", Key: "Tea", Value: "tea", Evidence: "tea"}); err == nil {
 		t.Fatal("noncanonical memory key accepted")
 	}
-	if _, err := s.QueueMemory(ctx, event.ID, "bad-evidence", MemoryChange{Operation: "put", Key: "drink", Value: "tea", Evidence: "coffee"}); err == nil {
+	if _, err := s.WriteMemory(ctx, event.ID, "bad-evidence", MemoryChange{Operation: "put", Key: "drink", Value: "tea", Evidence: "coffee"}); err == nil {
 		t.Fatal("evidence not in source accepted")
 	}
 	finishEvent(t, s, event, TurnOutput{Silent: true}, nil)
@@ -836,15 +796,15 @@ func TestMutationRequestKeysAreIdempotentPerSourceEvent(t *testing.T) {
 	}
 
 	change := MemoryChange{Operation: "put", Key: "drink.favorite", Value: "tea", ExpectedVersion: 0, Evidence: "I prefer tea"}
-	memory1, err := s.QueueMemory(ctx, event.ID, "memory-key", change)
+	memory1, err := s.WriteMemory(ctx, event.ID, "memory-key", change)
 	if err != nil {
 		t.Fatal(err)
 	}
-	memory2, err := s.QueueMemory(ctx, event.ID, "memory-key", change)
-	if err != nil || memory2.ID != memory1.ID {
+	memory2, err := s.WriteMemory(ctx, event.ID, "memory-key", change)
+	if err != nil || memory2 != memory1 {
 		t.Fatalf("duplicate memory request = (%+v,%v)", memory2, err)
 	}
-	if _, err := s.QueueMemory(ctx, event.ID, "memory-key", MemoryChange{Operation: "forget", Key: change.Key, ExpectedVersion: 1}); err == nil {
+	if _, err := s.WriteMemory(ctx, event.ID, "memory-key", MemoryChange{Operation: "forget", Key: change.Key, ExpectedVersion: 1}); err == nil {
 		t.Fatal("memory request key reused for different operation")
 	}
 	finishEvent(t, s, event, TurnOutput{}, nil)
@@ -852,11 +812,11 @@ func TestMutationRequestKeysAreIdempotentPerSourceEvent(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_tasks`).Scan(&taskCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_runs WHERE kind='memory'`).Scan(&memoryCount); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_requests WHERE memory_history_id IS NOT NULL`).Scan(&memoryCount); err != nil {
 		t.Fatal(err)
 	}
 	if taskCount != 1 || memoryCount != 1 {
-		t.Fatalf("deduplicated records: tasks=%d memory-runs=%d", taskCount, memoryCount)
+		t.Fatalf("deduplicated records: tasks=%d memory-requests=%d", taskCount, memoryCount)
 	}
 }
 
@@ -870,7 +830,7 @@ func TestCancelTaskIdempotenceAndLateStageNoop(t *testing.T) {
 	if err != nil || claimed == nil || claimed.ID != run.ID {
 		t.Fatalf("claim = (%+v,%v)", claimed, err)
 	}
-	if err := s.FinishStage(ctx, run.ID, StageResult{Outcome: "review", Summary: "ready for callback"}, ""); err != nil {
+	if err := s.FinishStage(ctx, run.ID, StageResult{Summary: "ready for callback"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	callback, err := s.ClaimEvent(ctx)
@@ -886,7 +846,7 @@ func TestCancelTaskIdempotenceAndLateStageNoop(t *testing.T) {
 	if err != nil || second.Status != TaskCancelled {
 		t.Fatalf("repeat cancel = (%+v,%v)", second, err)
 	}
-	if err := s.FinishStage(ctx, run.ID, StageResult{Outcome: "done", Summary: "late"}, ""); err != nil {
+	if err := s.FinishStage(ctx, run.ID, StageResult{Summary: "late"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.Task(ctx, task.ID)
@@ -907,4 +867,22 @@ func TestCancelTaskIdempotenceAndLateStageNoop(t *testing.T) {
 		t.Fatalf("explicit continue after cancel = (%+v,%v)", continued, err)
 	}
 	finishEvent(t, s, continueEvent, TurnOutput{}, nil)
+}
+
+func TestPersonalSchemaKeepsTenTablesWithoutDerivedColumns(t *testing.T) {
+	s := testStore(t, ":memory:", time.Minute)
+	var tables int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'personal_%'`).Scan(&tables); err != nil || tables != 10 {
+		t.Fatalf("personal tables = (%d,%v), want 10", tables, err)
+	}
+	for _, field := range []struct{ table, column string }{
+		{"personal_runs", "remaining_ms"},
+		{"personal_history", "task_id"},
+		{"personal_outbox", "task_id"},
+	} {
+		var columns int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, field.table, field.column).Scan(&columns); err != nil || columns != 0 {
+			t.Fatalf("removed column %s.%s = (%d,%v)", field.table, field.column, columns, err)
+		}
+	}
 }

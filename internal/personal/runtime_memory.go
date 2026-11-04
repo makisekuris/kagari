@@ -7,12 +7,9 @@ import (
 )
 
 func (r *Runtime) memory(ctx context.Context) (bool, error) {
-	run, err := r.Store.ClaimRun(ctx, RunMemory)
+	run, err := r.Store.ClaimRun(ctx, RunMemoryReview)
 	if err != nil || run == nil {
 		return false, err
-	}
-	if run.Kind == RunMemory {
-		return true, r.Store.ApplyMemory(ctx, run.ID)
 	}
 	input, err := r.Store.MemoryReviewInput(ctx, run.ID)
 	if err != nil {

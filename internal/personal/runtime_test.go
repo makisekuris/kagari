@@ -92,7 +92,7 @@ func TestRuntimeFourTasksLeaveConversationAndMemoryResponsive(t *testing.T) {
 			}
 		}
 		if err := progress("reading"); err != nil {
-			return StageResult{Outcome: "failed"}, err
+			return StageResult{}, err
 		}
 		started <- run.TaskID
 		select {
@@ -100,7 +100,7 @@ func TestRuntimeFourTasksLeaveConversationAndMemoryResponsive(t *testing.T) {
 		case <-ctx.Done():
 		}
 		// Even a late successful return must not revive a cancelled task.
-		return StageResult{Outcome: "review", Summary: "stage complete"}, nil
+		return StageResult{Summary: "stage complete"}, nil
 	}
 	r.ReviewMemory = func(_ context.Context, in MemoryReviewInput) (MemoryReview, error) {
 		if in.Event.Text != "我长期偏好简短回复" {
@@ -200,19 +200,19 @@ func TestRuntimeContinuesSameTaskAndAccountsRecoveredRun(t *testing.T) {
 		stages++
 		var input TaskInput
 		if err := json.Unmarshal([]byte(run.Input), &input); err != nil {
-			return StageResult{Outcome: "failed"}, err
+			return StageResult{}, err
 		}
 		if stages == 2 && (!strings.Contains(input.Previous, "first evidence") || input.Goal != task.Goal || run.TaskID != task.ID) {
-			return StageResult{Outcome: "failed"}, fmt.Errorf("lost prior stage: %+v", input)
+			return StageResult{}, fmt.Errorf("lost prior stage: %+v", input)
 		}
 		if !wait(ctx, 15*time.Millisecond) {
-			return StageResult{Outcome: "failed"}, ctx.Err()
+			return StageResult{}, ctx.Err()
 		}
 		summary := "first evidence"
 		if stages == 2 {
 			summary = "final evidence"
 		}
-		return StageResult{Outcome: "review", Summary: summary}, nil
+		return StageResult{Summary: summary}, nil
 	}
 	r.Think = func(ctx context.Context, in TurnInput) (TurnOutput, error) {
 		if stages == 1 {
@@ -268,7 +268,7 @@ func TestRuntimeBudgetStopsExecutionAndNotifiesWithoutModel(t *testing.T) {
 	r := testRuntime(s)
 	r.Execute = func(ctx context.Context, _ Run, _ func(string) error) (StageResult, error) {
 		<-ctx.Done()
-		return StageResult{Outcome: "failed", Summary: "partial findings"}, ctx.Err()
+		return StageResult{Summary: "partial findings"}, ctx.Err()
 	}
 	r.Think = func(context.Context, TurnInput) (TurnOutput, error) {
 		t.Error("exhausted task called model")

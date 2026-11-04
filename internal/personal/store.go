@@ -43,22 +43,21 @@ CREATE TABLE IF NOT EXISTS personal_runs (
 	task_id INTEGER REFERENCES personal_tasks(id),
 	revision INTEGER NOT NULL DEFAULT 0,
 	event_id INTEGER NOT NULL REFERENCES personal_events(id),
-	kind TEXT NOT NULL CHECK(kind IN ('task','memory','memory_review')),
+	kind TEXT NOT NULL CHECK(kind IN ('task','memory_review')),
 	input TEXT NOT NULL,
 	status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),
 	result TEXT NOT NULL DEFAULT '',
 	error TEXT NOT NULL DEFAULT '',
 	elapsed_ms INTEGER NOT NULL DEFAULT 0 CHECK(elapsed_ms>=0),
-	remaining_ms INTEGER NOT NULL DEFAULT 0 CHECK(remaining_ms>=0),
 	created_at TEXT NOT NULL,
-	CHECK((kind='task' AND task_id IS NOT NULL AND revision>0) OR (kind IN ('memory','memory_review') AND task_id IS NULL AND revision=0))
+	CHECK((kind='task' AND task_id IS NOT NULL AND revision>0) OR (kind='memory_review' AND task_id IS NULL AND revision=0))
 );
 CREATE INDEX IF NOT EXISTS personal_runs_claim ON personal_runs(kind,status,id);
 CREATE INDEX IF NOT EXISTS personal_runs_task ON personal_runs(task_id,revision,status);
 CREATE UNIQUE INDEX IF NOT EXISTS personal_runs_memory_review ON personal_runs(event_id) WHERE kind='memory_review';
 CREATE TABLE IF NOT EXISTS personal_events (
 	id INTEGER PRIMARY KEY,
-	kind TEXT NOT NULL CHECK(kind IN ('user','material','task','memory')),
+	kind TEXT NOT NULL CHECK(kind IN ('user','material','task')),
 	text TEXT NOT NULL,
 	task_id INTEGER REFERENCES personal_tasks(id),
 	run_id INTEGER REFERENCES personal_runs(id),
@@ -76,8 +75,7 @@ CREATE TABLE IF NOT EXISTS personal_history (
 	id INTEGER PRIMARY KEY,
 	event_id INTEGER NOT NULL REFERENCES personal_events(id),
 	role TEXT NOT NULL,
-	text TEXT NOT NULL,
-	task_id INTEGER REFERENCES personal_tasks(id)
+	text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS personal_history_event ON personal_history(event_id,id);
 CREATE TABLE IF NOT EXISTS personal_requests (
@@ -86,7 +84,10 @@ CREATE TABLE IF NOT EXISTS personal_requests (
 	operation TEXT NOT NULL,
 	payload TEXT NOT NULL,
 	task_id INTEGER REFERENCES personal_tasks(id),
-	run_id INTEGER NOT NULL REFERENCES personal_runs(id),
+	run_id INTEGER REFERENCES personal_runs(id),
+	memory_history_id INTEGER REFERENCES personal_memory_history(id),
+	CHECK((task_id IS NOT NULL AND run_id IS NOT NULL AND memory_history_id IS NULL) OR
+		(task_id IS NULL AND run_id IS NULL AND memory_history_id IS NOT NULL)),
 	PRIMARY KEY(event_id,request_key)
 );
 CREATE TABLE IF NOT EXISTS personal_memories (
@@ -104,7 +105,7 @@ CREATE TABLE IF NOT EXISTS personal_memory_history (
 	value TEXT NOT NULL,
 	version INTEGER NOT NULL CHECK(version>0),
 	source_event_id INTEGER NOT NULL REFERENCES personal_events(id),
-	run_id INTEGER NOT NULL REFERENCES personal_runs(id),
+	run_id INTEGER REFERENCES personal_runs(id),
 	deleted INTEGER NOT NULL CHECK(deleted IN (0,1)),
 	updated_at TEXT NOT NULL
 );
@@ -113,7 +114,6 @@ CREATE INDEX IF NOT EXISTS personal_memory_history_recent ON personal_memory_his
 CREATE TABLE IF NOT EXISTS personal_outbox (
 	id INTEGER PRIMARY KEY,
 	event_id INTEGER NOT NULL REFERENCES personal_events(id),
-	task_id INTEGER REFERENCES personal_tasks(id),
 	part INTEGER NOT NULL CHECK(part>0),
 	text TEXT NOT NULL,
 	status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','uncertain')),

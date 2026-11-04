@@ -49,7 +49,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 			return browser.Open(ctx, cfg)
 		}
 	}
-	main := &personal.MainAgent{Store: s, Model: engine.Model, Persona: role.Prompt(), Profile: engine.Profile, MaxIterations: cfg.Agent.MaxIterations, Timeout: cfg.Agent.Timeout}
+	main := &personal.MainAgent{Store: s, Log: log, Model: engine.Model, Persona: role.Prompt(), Profile: engine.Profile, MaxIterations: cfg.Agent.MaxIterations, Timeout: cfg.Agent.Timeout}
 	client, err := telegram.NewPersonal(cfg.Telegram, s, log)
 	if err != nil {
 		return err

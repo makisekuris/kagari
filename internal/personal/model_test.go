@@ -3,6 +3,7 @@ package personal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,9 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type fixtureResponse struct {
@@ -136,8 +140,10 @@ type toolRepo struct {
 	continued     []continueRecord
 	settled       []settleRecord
 	cancelled     []int64
-	queuedChanges []MemoryChange
-	queueKeys     []string
+	memoryChanges []MemoryChange
+	memoryKeys    []string
+	memoryResult  Memory
+	memoryErr     error
 	getTaskIDs    []int64
 	getRunIDs     []int64
 	listRunIDs    []int64
@@ -260,10 +266,10 @@ func (r *toolRepo) Memories(context.Context, string, int) ([]Memory, error) {
 	return memories, nil
 }
 
-func (r *toolRepo) QueueMemory(_ context.Context, _ int64, key string, change MemoryChange) (Run, error) {
-	r.queueKeys = append(r.queueKeys, key)
-	r.queuedChanges = append(r.queuedChanges, change)
-	return Run{ID: 193, Kind: RunMemory, Status: RunQueued}, nil
+func (r *toolRepo) WriteMemory(_ context.Context, _ int64, requestKey string, change MemoryChange) (Memory, error) {
+	r.memoryKeys = append(r.memoryKeys, requestKey)
+	r.memoryChanges = append(r.memoryChanges, change)
+	return r.memoryResult, r.memoryErr
 }
 
 func (r *toolRepo) MemoryHistory(_ context.Context, key string, _ int) ([]Memory, error) {
@@ -290,7 +296,7 @@ func TestThinkContinuesOnlyCallbackTaskAndCanBeSilent(t *testing.T) {
 	}}
 	repo := newToolRepo()
 	repo.tasks[7] = Task{ID: 7, Title: "Compare approaches", Goal: "Compare two documented approaches", Revision: 2, Status: TaskAwaitingReview, BudgetMS: 1_800_000, UsedMS: 500_000}
-	currentRun := Run{ID: 31, TaskID: 7, Revision: 2, Kind: RunTask, Status: RunCompleted, Result: `{"outcome":"review","summary":"One source found."}`, RemainingMS: 1_300_000}
+	currentRun := Run{ID: 31, TaskID: 7, Revision: 2, Kind: RunTask, Status: RunCompleted, Result: `{"summary":"One source found."}`}
 	repo.runs[31] = currentRun
 	input := TurnInput{Event: Event{ID: 20, Kind: EventTask, TaskID: 7, RunID: 31, Text: "Run 31 found one source."},
 		Tasks: []Task{repo.tasks[7]}, CurrentRun: &currentRun}
@@ -319,7 +325,7 @@ func TestThinkSettlesItsOwnTaskAndNotifiesOnCompletion(t *testing.T) {
 	}}
 	repo := newToolRepo()
 	repo.tasks[7] = Task{ID: 7, Goal: "Compare two approaches", Revision: 2, Status: TaskAwaitingReview}
-	currentRun := Run{ID: 33, TaskID: 7, Revision: 2, Status: RunCompleted, Result: `{"outcome":"review","summary":"Both approaches compared."}`}
+	currentRun := Run{ID: 33, TaskID: 7, Revision: 2, Status: RunCompleted, Result: `{"summary":"Both approaches compared."}`}
 	output, err := newMainAgent(t, fixture, repo).Think(context.Background(), TurnInput{
 		Event: Event{ID: 201, Kind: EventTask, TaskID: 7, RunID: currentRun.ID}, Tasks: []Task{repo.tasks[7]}, CurrentRun: &currentRun,
 	})
@@ -346,7 +352,7 @@ func TestThinkCallbackCannotMutateOtherTasksOrMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repo.createdKeys) != 0 || len(repo.queuedChanges) != 0 || len(repo.continued) != 0 || len(repo.settled) != 0 {
+	if len(repo.createdKeys) != 0 || len(repo.memoryChanges) != 0 || len(repo.continued) != 0 || len(repo.settled) != 0 {
 		t.Fatalf("callback performed forbidden mutation: %+v", repo)
 	}
 	for i, want := range []string{"persisted direct user event", "persisted direct user event", "their own task", "cannot extend the budget"} {
@@ -359,15 +365,16 @@ func TestThinkCallbackCannotMutateOtherTasksOrMemory(t *testing.T) {
 	}
 }
 
-func TestThinkDirectUserQueuesTaskAndEvidenceBackedMemory(t *testing.T) {
+func TestThinkDirectUserQueuesTaskAndCommitsEvidenceBackedMemory(t *testing.T) {
 	evidence := "Please remember that I prefer concise answers."
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("create_task", map[string]any{"title": "Find a guide", "goal": "Find a guide to local cycling", "context": "Preference snapshot: concise answers"}, "create-task"),
 		responseTool("memory_put", map[string]any{"key": "answer_style", "value": "concise", "expected_version": 0, "evidence": evidence}, "put-memory"),
-		responseText(`{"text":"任务和记忆变更都已排队，完成后才生效。","notify":true}`),
+		responseText(`{"text":"任务已排队，记忆偏好已保存。","notify":true}`),
 	}}
 	repo := newToolRepo()
 	event := Event{ID: 22, Kind: EventUser, Text: "Find a guide to local cycling. " + evidence}
+	repo.memoryResult = Memory{Key: "answer_style", Value: "concise", Version: 1, SourceEventID: event.ID}
 	input := TurnInput{Event: event}
 	output, err := newMainAgent(t, fixture, repo).Think(context.Background(), input)
 	if err != nil {
@@ -379,11 +386,18 @@ func TestThinkDirectUserQueuesTaskAndEvidenceBackedMemory(t *testing.T) {
 	if len(repo.created) != 1 || repo.created[0].Context != "Preference snapshot: concise answers" || repo.created[0].Goal != "Find a guide to local cycling" {
 		t.Fatalf("created task input=%+v", repo.created)
 	}
-	if len(repo.queuedChanges) != 1 || repo.queuedChanges[0].Evidence != evidence || repo.queuedChanges[0].Operation != "put" || repo.queuedChanges[0].ExpectedVersion != 0 {
-		t.Fatalf("queued changes=%+v", repo.queuedChanges)
+	if len(repo.memoryChanges) != 1 || repo.memoryChanges[0].Evidence != evidence || repo.memoryChanges[0].Operation != "put" || repo.memoryChanges[0].ExpectedVersion != 0 {
+		t.Fatalf("memory changes=%+v", repo.memoryChanges)
 	}
-	if len(repo.createdKeys) != 1 || len(repo.queueKeys) != 1 || repo.createdKeys[0] == repo.queueKeys[0] {
-		t.Fatalf("request keys missing or not operation-specific: created=%v memory=%v", repo.createdKeys, repo.queueKeys)
+	if len(repo.createdKeys) != 1 || len(repo.memoryKeys) != 1 || repo.createdKeys[0] == repo.memoryKeys[0] {
+		t.Fatalf("request keys missing or not operation-specific: created=%v memory=%v", repo.createdKeys, repo.memoryKeys)
+	}
+	if memory := repo.memoryResult; memory.Version != 1 || memory.Value != "concise" || memory.SourceEventID != event.ID {
+		t.Fatalf("memory tool result missing: %+v", memory)
+	}
+	toolResults := requestInput(fixture.requests[2])
+	if !strings.Contains(toolResults, `\"memory\":{\"key\":\"answer_style\"`) {
+		t.Fatalf("memory tool did not return its committed result: %s", toolResults)
 	}
 	for _, request := range fixture.requests {
 		assertPersonalToolMode(t, request)
@@ -397,17 +411,49 @@ func TestThinkMemoryPutRejectsStaleVersionAndUnsupportedEvidence(t *testing.T) {
 		responseText(`{"text":"我无法验证这次记忆变更。","notify":true}`),
 	}}
 	repo := newToolRepo()
-	repo.memories["answer_style"] = Memory{Key: "answer_style", Value: "concise", Version: 3}
+	repo.memoryErr = errors.New("expected_version does not match the current memory")
 	event := Event{ID: 221, Kind: EventUser, Text: "Please remember that I now prefer detailed answers."}
 	output, err := newMainAgent(t, fixture, repo).Think(context.Background(), TurnInput{Event: event})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output.Silent || len(repo.queuedChanges) != 0 {
-		t.Fatalf("stale or unsupported memory write persisted: output=%+v changes=%+v", output, repo.queuedChanges)
+	if output.Silent || len(repo.memoryChanges) != 1 {
+		t.Fatalf("stale or unsupported memory write persisted: output=%+v changes=%+v", output, repo.memoryChanges)
 	}
 	if !strings.Contains(requestInput(fixture.requests[1]), "expected_version does not match") || !strings.Contains(requestInput(fixture.requests[2]), "exact current-message evidence quote") {
 		t.Fatalf("memory write errors were not returned to model: %s", requestInput(fixture.requests[2]))
+	}
+}
+
+func TestThinkMemoryToolFailureIsReturnedAndLoggedWithoutEvidence(t *testing.T) {
+	const value = "PRIVATE_MEMORY_VALUE"
+	const evidence = "PRIVATE_EVIDENCE_QUOTE"
+	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
+		responseTool("memory_put", memoryPutArgs{Key: "answer_style", Value: value, Evidence: evidence}, "failed-put"),
+		responseText(`{"text":"暂时无法保存。","notify":true}`),
+	}}
+	repo := newToolRepo()
+	repo.memoryErr = errors.New("store unavailable")
+	core, logs := observer.New(zapcore.WarnLevel)
+	main := newMainAgent(t, fixture, repo)
+	main.Log = zap.New(core)
+	_, err := main.Think(context.Background(), TurnInput{Event: Event{ID: 232, Kind: EventUser, Text: evidence}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(requestInput(fixture.requests[1]), `store unavailable`) {
+		t.Fatal("tool failure was not returned to the model")
+	}
+	entries := logs.All()
+	if len(entries) != 1 {
+		t.Fatalf("memory write failure log count=%d", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	if len(fields) != 4 || fields["event_id"] != int64(232) || fields["key"] != "answer_style" || fields["operation"] != "put" || fields["error"] != "store unavailable" {
+		t.Fatalf("unexpected memory failure log fields: %v", fields)
+	}
+	if strings.Contains(fmt.Sprint(entries), value) || strings.Contains(fmt.Sprint(entries), evidence) {
+		t.Fatal("memory value or evidence appeared in failure logs")
 	}
 }
 

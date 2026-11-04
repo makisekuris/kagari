@@ -44,8 +44,11 @@ func validateMemoryChange(change MemoryChange, sourceText string) error {
 			return errors.New("personal: memory expected version cannot be negative")
 		}
 	case "forget":
-		if change.Value != "" || change.Evidence != "" || change.ExpectedVersion <= 0 {
-			return errors.New("personal: memory forget requires a positive version and no value or evidence")
+		if strings.TrimSpace(change.Evidence) == "" || !strings.Contains(sourceText, change.Evidence) {
+			return errors.New("personal: memory forget requires an exact quote from its source user event")
+		}
+		if change.Value != "" || change.ExpectedVersion <= 0 {
+			return errors.New("personal: memory forget requires a positive version and no value")
 		}
 	default:
 		return fmt.Errorf("personal: unsupported memory operation %q", change.Operation)
@@ -53,72 +56,56 @@ func validateMemoryChange(change MemoryChange, sourceText string) error {
 	return nil
 }
 
-func (s *Store) QueueMemory(ctx context.Context, eventID int64, key string, change MemoryChange) (Run, error) {
+// WriteMemory commits an explicit user change and its replay receipt together.
+func (s *Store) WriteMemory(ctx context.Context, eventID int64, key string, change MemoryChange) (Memory, error) {
 	if !requestKeyValid(key) {
-		return Run{}, errors.New("personal: request key is required")
-	}
-	if !validMemoryKey(change.Key) || change.Operation != "put" && change.Operation != "forget" || change.ExpectedVersion < 0 {
-		return Run{}, errors.New("personal: invalid memory change")
-	}
-	raw, err := json.Marshal(change)
-	if err != nil {
-		return Run{}, err
+		return Memory{}, errors.New("personal: request key is required")
 	}
 	payload, err := encodeRequest(requestPayload{Change: &change})
 	if err != nil {
-		return Run{}, err
+		return Memory{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Run{}, err
+		return Memory{}, err
 	}
 	defer tx.Rollback()
 	if err := requireUserEvent(ctx, tx, eventID, true); err != nil {
-		return Run{}, err
+		return Memory{}, err
+	}
+	_, _, historyID, found, err := previousRequest(ctx, tx, eventID, key, "write_memory", payload)
+	if err != nil {
+		return Memory{}, err
+	}
+	if found {
+		// Read the original result before checking a version that this request already advanced.
+		memory, err := scanMemory(tx.QueryRowContext(ctx, `SELECT key,value,version,source_event_id,deleted,updated_at FROM personal_memory_history WHERE id=?`, historyID))
+		if err != nil {
+			return Memory{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Memory{}, err
+		}
+		return *memory, nil
+	}
+	if err := requireUserEvent(ctx, tx, eventID, false); err != nil {
+		return Memory{}, err
 	}
 	var sourceText string
 	if err := tx.QueryRowContext(ctx, `SELECT text FROM personal_events WHERE id=?`, eventID).Scan(&sourceText); err != nil {
-		return Run{}, err
+		return Memory{}, err
 	}
-	if err := validateMemoryChange(change, sourceText); err != nil {
-		return Run{}, err
-	}
-	gotTaskID, runID, found, err := previousRequest(ctx, tx, eventID, key, "queue_memory", payload)
+	memory, historyID, err := applyMemoryChange(ctx, tx, eventID, 0, change, sourceText, false)
 	if err != nil {
-		return Run{}, err
+		return Memory{}, err
 	}
-	if found {
-		run, err := scanRun(tx.QueryRowContext(ctx, `SELECT `+runColumns+` FROM personal_runs WHERE id=?`, runID))
-		if err != nil {
-			return Run{}, err
-		}
-		if gotTaskID != 0 {
-			return Run{}, errors.New("personal: malformed memory idempotency record")
-		}
-		if err := tx.Commit(); err != nil {
-			return Run{}, err
-		}
-		return *run, nil
-	}
-	if err := requireUserEvent(ctx, tx, eventID, false); err != nil {
-		return Run{}, err
-	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO personal_runs(event_id,kind,input,status,created_at) VALUES(?,? ,?,'queued',?)`,
-		eventID, RunMemory, string(raw), timestamp(time.Now()))
-	if err != nil {
-		return Run{}, err
-	}
-	runID, err = res.LastInsertId()
-	if err != nil {
-		return Run{}, err
-	}
-	if err := insertRequest(ctx, tx, eventID, key, "queue_memory", payload, 0, runID); err != nil {
-		return Run{}, err
+	if err := insertRequest(ctx, tx, eventID, key, "write_memory", payload, 0, 0, historyID); err != nil {
+		return Memory{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return Run{}, err
+		return Memory{}, err
 	}
-	return Run{ID: runID, EventID: eventID, Kind: RunMemory, Input: string(raw), Status: RunQueued}, nil
+	return *memory, nil
 }
 
 func memorySource(ctx context.Context, tx *sql.Tx, eventID int64) (string, error) {
@@ -134,9 +121,9 @@ func memorySource(ctx context.Context, tx *sql.Tx, eventID int64) (string, error
 	return text, nil
 }
 
-func applyMemoryChange(ctx context.Context, tx *sql.Tx, sourceEventID, runID int64, change MemoryChange, sourceText string, automatic bool) (*Memory, bool, error) {
+func applyMemoryChange(ctx context.Context, tx *sql.Tx, sourceEventID, runID int64, change MemoryChange, sourceText string, automatic bool) (*Memory, int64, error) {
 	if err := validateMemoryChange(change, sourceText); err != nil {
-		return nil, false, err
+		return nil, 0, err
 	}
 	var previous Memory
 	var exists bool
@@ -150,24 +137,24 @@ func applyMemoryChange(ctx context.Context, tx *sql.Tx, sourceEventID, runID int
 		previous.UpdatedAt, err = parseTimestamp(updated)
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, false, err
+		return nil, 0, err
 	}
 	if automatic && exists && previous.SourceEventID >= sourceEventID {
-		return nil, false, nil
+		return nil, 0, nil
 	}
 	if exists && sourceEventID < previous.SourceEventID {
-		return nil, false, fmt.Errorf("%w: source event is older than %q", errMemoryVersionConflict, change.Key)
+		return nil, 0, fmt.Errorf("%w: source event is older than %q", errMemoryVersionConflict, change.Key)
 	}
 	if (exists && change.ExpectedVersion != previous.Version) || (!exists && change.ExpectedVersion != 0) {
-		return nil, false, fmt.Errorf("%w for %q", errMemoryVersionConflict, change.Key)
+		return nil, 0, fmt.Errorf("%w for %q", errMemoryVersionConflict, change.Key)
 	}
 	if change.Operation == "forget" && exists && previous.Deleted {
-		return &previous, false, nil
+		return nil, 0, errors.New("personal: memory is already forgotten")
 	}
 	version := int64(1)
 	if exists {
 		if previous.Version == int64(^uint64(0)>>1) {
-			return nil, false, errors.New("personal: memory version exhausted")
+			return nil, 0, errors.New("personal: memory version exhausted")
 		}
 		version = previous.Version + 1
 	}
@@ -176,79 +163,24 @@ func applyMemoryChange(ctx context.Context, tx *sql.Tx, sourceEventID, runID int
 	if change.Operation == "forget" {
 		value, deletedFlag = "", 1
 	}
-	now := timestamp(time.Now())
+	updatedAt := time.Now().UTC()
+	now := timestamp(updatedAt)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO personal_memories(key,value,version,source_event_id,deleted,updated_at)
 		VALUES(?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,version=excluded.version,
 		source_event_id=excluded.source_event_id,deleted=excluded.deleted,updated_at=excluded.updated_at`,
 		change.Key, value, version, sourceEventID, deletedFlag, now); err != nil {
-		return nil, false, err
+		return nil, 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO personal_memory_history(key,value,version,source_event_id,run_id,deleted,updated_at) VALUES(?,?,?,?,?,?,?)`,
-		change.Key, value, version, sourceEventID, runID, deletedFlag, now); err != nil {
-		return nil, false, err
-	}
-	return &Memory{Key: change.Key, Value: value, Version: version, SourceEventID: sourceEventID, Deleted: deletedFlag != 0, UpdatedAt: time.Now().UTC()}, true, nil
-}
-
-func (s *Store) ApplyMemory(ctx context.Context, runID int64) error {
-	if runID <= 0 {
-		return errors.New("personal: run ID must be positive")
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	res, err := tx.ExecContext(ctx, `INSERT INTO personal_memory_history(key,value,version,source_event_id,run_id,deleted,updated_at) VALUES(?,?,?,?,?,?,?)`,
+		change.Key, value, version, sourceEventID, nullableID(runID), deletedFlag, now)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
-	defer tx.Rollback()
-	var eventID int64
-	var kind RunKind
-	var status RunStatus
-	var raw string
-	if err := tx.QueryRowContext(ctx, `SELECT event_id,kind,status,input FROM personal_runs WHERE id=?`, runID).
-		Scan(&eventID, &kind, &status, &raw); err != nil {
-		return err
-	}
-	if kind != RunMemory {
-		return errors.New("personal: ApplyMemory requires an explicit memory run")
-	}
-	if status == RunCompleted || status == RunFailed || status == RunCancelled {
-		return tx.Commit()
-	}
-	if status != RunRunning {
-		return fmt.Errorf("personal: cannot apply memory run %d in state %q", runID, status)
-	}
-	sourceText, err := memorySource(ctx, tx, eventID)
+	historyID, err := res.LastInsertId()
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
-	var change MemoryChange
-	if err := json.Unmarshal([]byte(raw), &change); err != nil {
-		return err
-	}
-	if err := validateMemoryChange(change, sourceText); err != nil {
-		if _, updateErr := tx.ExecContext(ctx, `UPDATE personal_runs SET status='failed',error=? WHERE id=? AND status='running'`, err.Error(), runID); updateErr != nil {
-			return updateErr
-		}
-		return tx.Commit()
-	}
-	memory, applied, err := applyMemoryChange(ctx, tx, eventID, runID, change, sourceText, false)
-	if err != nil {
-		if _, updateErr := tx.ExecContext(ctx, `UPDATE personal_runs SET status='failed',error=? WHERE id=? AND status='running'`, err.Error(), runID); updateErr != nil {
-			return updateErr
-		}
-		return tx.Commit()
-	}
-	if memory == nil {
-		return errors.New("personal: memory operation returned no state")
-	}
-	result, err := json.Marshal(memory)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='completed',result=?,error='' WHERE id=? AND status='running'`, string(result), runID); err != nil {
-		return err
-	}
-	_ = applied // A repeated forget is a valid no-op and remains queryable through its Run.
-	return tx.Commit()
+	return &Memory{Key: change.Key, Value: value, Version: version, SourceEventID: sourceEventID, Deleted: deletedFlag != 0, UpdatedAt: updatedAt}, historyID, nil
 }
 
 func (s *Store) MemoryReviewInput(ctx context.Context, runID int64) (MemoryReviewInput, error) {

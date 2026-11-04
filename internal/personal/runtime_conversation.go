@@ -17,10 +17,6 @@ func (r *Runtime) turn(ctx context.Context) (bool, error) {
 	if err != nil || event == nil {
 		return false, err
 	}
-	if event.Kind == EventMemory {
-		// Older versions may have queued memory callbacks before maintenance became silent.
-		return true, r.Store.CompleteEvent(ctx, event.ID, TurnOutput{Silent: true}, nil)
-	}
 	input, err := r.context(ctx, *event)
 	if err != nil {
 		return true, err
