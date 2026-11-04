@@ -8,7 +8,7 @@ help:
 	@printf '%s\n' \
 	  'make init    Copy example configuration without overwriting local files' \
 	  'make build   Build bin/kagari' \
-	  'make run     Build and start the Telegram service' \
+	  'make run     Build and start the configured personal service' \
 	  'make cli ARGS="..."  Build and execute a CLI command' \
 	  'make test    Run all Go tests' \
 	  'make vet     Run go vet' \

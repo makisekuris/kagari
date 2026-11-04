@@ -1,12 +1,12 @@
 # Kagari
 
-Kagari 是一个 Go 个人 Agent。`kagari run` 启动面向单一使用者的 Telegram 私聊服务，持续推进后台任务并维护长期记忆。`read`、`analyze`、`digest`、`status`、`export`、`retry`、`retry-delivery` 和 `db` CLI 仍操作 V1 阅读归档；V2 服务不处理 V1 队列或调度 V1 周报。
+Kagari 是一个 Go 个人 Agent。`kagari run` 启动面向单一使用者的 Telegram 或微信私聊服务，持续推进后台任务并维护长期记忆。`read`、`analyze`、`digest`、`status`、`export`、`retry`、`retry-delivery` 和 `db` CLI 仍操作 V1 阅读归档；V2 服务不处理 V1 队列或调度 V1 周报。
 
-Kagari is a personal agent written in Go. `kagari run` starts a Telegram private-chat service for one owner, continuing background tasks and maintaining long-term memory. The `read`, `analyze`, `digest`, `status`, `export`, `retry`, `retry-delivery`, and `db` CLI commands still operate on V1 reading archives; the V2 service does not process the V1 queue or schedule V1 digests.
+Kagari is a personal agent written in Go. `kagari run` starts a Telegram or Weixin private-chat service for one owner, continuing background tasks and maintaining long-term memory. The `read`, `analyze`, `digest`, `status`, `export`, `retry`, `retry-delivery`, and `db` CLI commands still operate on V1 reading archives; the V2 service does not process the V1 queue or schedule V1 digests.
 
-运行需要 Go 1.27；进程锁使用 `flock`，支持 macOS 和 Linux。部署者提供模型 endpoint 和 Telegram bot；V2 只向配置的 owner 私聊回复。
+运行需要 Go 1.27；进程锁使用 `flock`，支持 macOS 和 Linux。部署者提供模型 endpoint，并配置 Telegram bot 或扫码绑定微信；服务只向绑定的使用者私聊回复。
 
-Requires Go 1.27. The process lock uses `flock` and supports macOS and Linux. You provide the model endpoint and Telegram bot; V2 replies only to the configured owner's private chat.
+Requires Go 1.27. The process lock uses `flock` and supports macOS and Linux. You provide the model endpoint and configure Telegram or sign in to Weixin; the service replies only to the bound owner in private chat.
 
 ## 日常操作 / Everyday commands
 
@@ -20,7 +20,7 @@ Run `make` or `make help` from the project root to list commands. Requires Go an
 | `make build` | 为当前平台构建 `bin/kagari` / Build `bin/kagari` for the current platform |
 | `make build-mac` | 构建 macOS arm64 产物 / Build for macOS arm64 |
 | `make build-linux` | 构建 Linux amd64 产物 / Build for Linux amd64 |
-| `make run` | 构建并启动 V2 Telegram personal 服务 / Build and start the V2 Telegram personal service |
+| `make run` | 构建并启动所选 personal 渠道 / Build and start the selected personal channel |
 | `make cli ARGS='...'` | 构建并执行任意 CLI 子命令 / Build and execute any CLI subcommand |
 | `make check` | 运行全部测试和 `go vet` / Run all tests and `go vet` |
 | `make test` / `make vet` | 单独运行测试或静态检查 / Run tests or static checks separately |
@@ -90,6 +90,36 @@ personal:
   task_budget: 30m
 ```
 
+### 微信与附件 / Weixin and attachments
+
+将 `personal.channel` 设为 `weixin`，使用新的 `storage.path`，然后构建、扫码并运行。微信模式不要求 Telegram token 或用户 ID。`login` 不调用模型；`run` 仍需要模型配置。
+
+Set `personal.channel: weixin` and choose a new `storage.path`. Weixin does not require Telegram credentials. Login does not call the model; the service still needs model configuration.
+
+```sh
+make build
+./bin/kagari -config config.yaml weixin login -qr /tmp/kagari-login.png
+./bin/kagari -config config.yaml channel status
+./bin/kagari -config config.yaml run
+```
+
+二维码在终端显示；`-qr` 可选，图片路径须不存在。二维码过期后该图片会更新。同一微信用户重新 `login` 后，运行中的服务自动重载凭证；更换用户须先停止服务，再执行 `weixin rebind`。登录 token 更新后，请向 Bot 发一条新消息以恢复待发送结果。凭证保存在 `<storage.path>.channels/weixin.json`。状态命令展示本地配置与已保存账号，不代表平台当前可用。
+
+The terminal displays the QR code. Optional `-qr` saves and refreshes a PNG at a previously unused path. Repeating `login` for the same user reloads credentials in the running service; changing users requires stopping the service and running `weixin rebind`. After a login token changes, send a new message to the bot to resume pending deliveries. Credentials are stored at `<storage.path>.channels/weixin.json`. Status reports saved configuration, not live platform availability.
+
+两渠道支持文字和普通文件，单文件双向上限 20,000,000 字节；请将图片作为文件发送。Agent 收到正文与附件 ID，可读取最多 1 MiB 的 UTF-8 文本、生成文本成果并选择发送；本次未增加 PDF、Office、音视频解析器。附件保留至显式删除：
+
+Both channels support text and ordinary files up to 20,000,000 bytes each; send images as files. The Agent receives text and attachment IDs, reads UTF-8 text up to 1 MiB, and selects generated text files for delivery. PDF, Office, audio and video parsing are not included. Files remain until explicitly deleted:
+
+```sh
+./bin/kagari attachments list
+./bin/kagari attachments delete ATTACHMENT_ID
+```
+
+切换渠道需停止服务、修改 `personal.channel` 并使用同一新结构数据库重启。对话、任务、记忆和 persona 共享，待发送结果走当前渠道；成功或结果不确定的投递不会自动重发。旧 personal 数据库不迁移也不自动删除。删除附件保留既有分析与记忆，也不撤回已发送文件。更多细节见[渠道设计](docs/CHANNEL-DESIGN.md)。
+
+Stop the service, change `personal.channel`, and restart with the same new-schema database to switch channels. Conversations, tasks, memory and persona are shared. Pending results use the active channel; sent or uncertain deliveries are not replayed automatically. Older personal databases are neither migrated nor deleted. Deleting a file preserves analysis and memory and does not recall remote copies. See the [channel design](docs/CHANNEL-DESIGN.md).
+
 ### 2. 构建并试读 / Build and read
 
 ```sh
@@ -104,9 +134,9 @@ make cli ARGS='read https://example.com/article'
 make cli ARGS='analyze -user 123456 https://example.com/article'
 ```
 
-启动 V2 Telegram 服务后，在 owner 私聊中直接发送任务或偏好：
+启动所选渠道后，在已绑定账号的私聊中直接发送任务或偏好：
 
-Start the V2 Telegram service, then send a task or preference in the owner's private chat:
+Start the selected channel, then send a task or preference in the bound owner's private chat:
 
 ```sh
 make run
