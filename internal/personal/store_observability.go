@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"go.uber.org/zap"
+	"kagari/internal/channel"
 	"kagari/internal/logging"
 )
 
@@ -48,10 +49,10 @@ type recoveryOutcomePayload struct {
 }
 
 type deliveryOutcomePayload struct {
-	Status        string `json:"status"`
-	Receipt       int64  `json:"receipt,omitempty"`
-	Detail        string `json:"detail,omitempty"`
-	NextAttemptAt string `json:"next_attempt_at"`
+	Status        string          `json:"status"`
+	Receipt       channel.Receipt `json:"receipt,omitempty"`
+	Detail        string          `json:"detail,omitempty"`
+	NextAttemptAt string          `json:"next_attempt_at"`
 }
 
 func changedRows(result sql.Result) (int64, error) {

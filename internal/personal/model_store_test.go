@@ -19,7 +19,7 @@ func TestMainAgentForgetToolCommitsToRealStore(t *testing.T) {
 	event := openUserEvent(t, s, 2, 2, "忘记我住在哪个城市")
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("memory_forget", memoryForgetArgs{Key: "home_city", ExpectedVersion: 1, Evidence: event.Text}, "forget"),
-		responseText(`{"text":"已忘记。","notify":true}`),
+		responseText(`{"text":"已忘记。","notify":true,"attachments":[]}`),
 	}}
 	main := MainAgent{Store: s, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 4}
 	output, err := main.Think(ctx, TurnInput{Event: event})
@@ -53,7 +53,7 @@ func TestMainAgentMemoryToolReplayAndConsecutiveWrites(t *testing.T) {
 		fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 			responseTool("memory_put", args, "put-once"),
 			responseTool("memory_put", args, "put-replay"),
-			responseText(`{"text":"已保存。","notify":true}`),
+			responseText(`{"text":"已保存。","notify":true,"attachments":[]}`),
 		}}
 		main := MainAgent{Store: s, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 4}
 		if _, err := main.Think(ctx, TurnInput{Event: event}); err != nil {
@@ -81,7 +81,7 @@ func TestMainAgentMemoryToolReplayAndConsecutiveWrites(t *testing.T) {
 		fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 			responseTool("memory_forget", args, "forget-once"),
 			responseTool("memory_forget", args, "forget-replay"),
-			responseText(`{"text":"已忘记。","notify":true}`),
+			responseText(`{"text":"已忘记。","notify":true,"attachments":[]}`),
 		}}
 		main := MainAgent{Store: s, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 4}
 		if _, err := main.Think(ctx, TurnInput{Event: event}); err != nil {
@@ -104,7 +104,7 @@ func TestMainAgentMemoryToolReplayAndConsecutiveWrites(t *testing.T) {
 		fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 			responseTool("memory_put", memoryPutArgs{Key: "answer_style", Value: "concise", Evidence: evidence1}, "put-v1"),
 			responseTool("memory_put", memoryPutArgs{Key: "answer_style", Value: "detailed", ExpectedVersion: 1, Evidence: evidence2}, "put-v2"),
-			responseText(`{"text":"已更正并保存。","notify":true}`),
+			responseText(`{"text":"已更正并保存。","notify":true,"attachments":[]}`),
 		}}
 		main := MainAgent{Store: s, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 4}
 		if _, err := main.Think(ctx, TurnInput{Event: event}); err != nil {
@@ -151,7 +151,7 @@ func TestMainAgentReportsSilentMemoryFailureWhenUserQueriesRun(t *testing.T) {
 	event := openUserEvent(t, s, 2, 2, "Show the memory run result.")
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("get_run", runArgs{RunID: run.ID}, "get-memory-run"),
-		responseText(`{"text":"记忆整理失败，尚未更新。","notify":false}`),
+		responseText(`{"text":"记忆整理失败，尚未更新。","notify":false,"attachments":[]}`),
 	}}
 	main := MainAgent{Store: s, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 3}
 	output, err := main.Think(ctx, TurnInput{Event: event})

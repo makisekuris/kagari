@@ -15,20 +15,38 @@ import (
 )
 
 const personalSchema = `
-CREATE TABLE IF NOT EXISTS personal_state (
-	id INTEGER PRIMARY KEY CHECK(id=1),
-	next_offset INTEGER NOT NULL CHECK(next_offset>=0)
-);
-INSERT OR IGNORE INTO personal_state(id,next_offset) VALUES(1,0);
+CREATE TABLE IF NOT EXISTS personal_schema (version INTEGER PRIMARY KEY CHECK(version=2));
+INSERT OR IGNORE INTO personal_schema(version) VALUES(2);
 CREATE TABLE IF NOT EXISTS personal_meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS personal_bindings (
+	channel TEXT PRIMARY KEY,
+	account TEXT NOT NULL,
+	sender TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS personal_inbox (
+	channel TEXT NOT NULL,
+	account TEXT NOT NULL,
+	cursor TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY(channel,account)
+);
+CREATE TABLE IF NOT EXISTS personal_attachments (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	mime TEXT NOT NULL DEFAULT '',
+	size INTEGER NOT NULL CHECK(size>=0 AND size<=20000000),
+	path TEXT NOT NULL,
+	status TEXT NOT NULL CHECK(status IN ('available','deleting','deleted')),
+	created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS personal_tasks (
 	id INTEGER PRIMARY KEY,
 	title TEXT NOT NULL,
 	goal TEXT NOT NULL,
 	context TEXT NOT NULL,
+	attachments TEXT NOT NULL DEFAULT '[]',
 	revision INTEGER NOT NULL CHECK(revision>0),
 	status TEXT NOT NULL CHECK(status IN ('queued','running','awaiting_review','waiting_input','waiting_budget','completed','failed','cancelled')),
 	summary TEXT NOT NULL DEFAULT '',
@@ -61,21 +79,26 @@ CREATE TABLE IF NOT EXISTS personal_events (
 	text TEXT NOT NULL,
 	task_id INTEGER REFERENCES personal_tasks(id),
 	run_id INTEGER REFERENCES personal_runs(id),
-	message_id INTEGER,
-	reply_to_id INTEGER,
+	channel TEXT NOT NULL DEFAULT '',
+	account TEXT NOT NULL DEFAULT '',
+	sender TEXT NOT NULL DEFAULT '',
+	message_id TEXT NOT NULL DEFAULT '',
+	reply_to_id TEXT NOT NULL DEFAULT '',
+	attachments TEXT NOT NULL DEFAULT '[]',
 	status TEXT NOT NULL CHECK(status IN ('queued','running','completed')),
 	interrupted INTEGER NOT NULL DEFAULT 0 CHECK(interrupted IN (0,1)),
 	elapsed_ms INTEGER NOT NULL DEFAULT 0 CHECK(elapsed_ms>=0),
 	created_at TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS personal_events_message ON personal_events(message_id) WHERE message_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS personal_events_message ON personal_events(channel,account,sender,message_id) WHERE message_id<>'';
 CREATE UNIQUE INDEX IF NOT EXISTS personal_events_run ON personal_events(run_id) WHERE run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS personal_events_claim ON personal_events(status,id);
 CREATE TABLE IF NOT EXISTS personal_history (
 	id INTEGER PRIMARY KEY,
 	event_id INTEGER NOT NULL REFERENCES personal_events(id),
 	role TEXT NOT NULL,
-	text TEXT NOT NULL
+	text TEXT NOT NULL,
+	attachments TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS personal_history_event ON personal_history(event_id,id);
 CREATE TABLE IF NOT EXISTS personal_requests (
@@ -116,21 +139,26 @@ CREATE TABLE IF NOT EXISTS personal_outbox (
 	event_id INTEGER NOT NULL REFERENCES personal_events(id),
 	part INTEGER NOT NULL CHECK(part>0),
 	text TEXT NOT NULL,
+	attachment_id TEXT REFERENCES personal_attachments(id),
 	status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','uncertain')),
 	attempts INTEGER NOT NULL DEFAULT 0,
 	next_attempt_at TEXT NOT NULL,
-	receipt INTEGER,
+	receipt_channel TEXT NOT NULL DEFAULT '',
+	receipt_account TEXT NOT NULL DEFAULT '',
+	receipt_conversation TEXT NOT NULL DEFAULT '',
+	receipt_message_id TEXT NOT NULL DEFAULT '',
 	detail TEXT NOT NULL DEFAULT '',
 	UNIQUE(event_id,part)
 );
 CREATE INDEX IF NOT EXISTS personal_outbox_claim ON personal_outbox(status,next_attempt_at,id);
-CREATE UNIQUE INDEX IF NOT EXISTS personal_outbox_receipt ON personal_outbox(receipt) WHERE receipt IS NOT NULL;
 `
 
 // Store serializes operations through one SQLite connection, including claims and transactions.
 type Store struct {
 	db           *sql.DB
 	taskBudgetMS int64
+	baseDir      string
+	tempDir      bool
 }
 
 func NewStore(path string, taskBudget time.Duration) (*Store, error) {
@@ -142,8 +170,16 @@ func NewStore(path string, taskBudget time.Duration) (*Store, error) {
 		return nil, errors.New("personal: task budget must be at least one millisecond")
 	}
 	dsn := path
+	baseDir := ""
+	tempDir := false
+	var err error
 	if path == ":memory:" {
 		dsn += "?_foreign_keys=on&_busy_timeout=5000"
+		baseDir, err = os.MkdirTemp("", "kagari-personal-")
+		if err != nil {
+			return nil, fmt.Errorf("personal: create temporary attachment directory: %w", err)
+		}
+		tempDir = true
 	} else if strings.HasPrefix(path, "file:") {
 		u, err := url.Parse(path)
 		if err != nil {
@@ -154,6 +190,9 @@ func NewStore(path string, taskBudget time.Duration) (*Store, error) {
 		query.Set("_busy_timeout", "5000")
 		u.RawQuery = query.Encode()
 		dsn = u.String()
+		if u.Path != "" && u.Path != ":memory:" {
+			baseDir = filepath.Dir(u.Path)
+		}
 	} else {
 		absPath, err := filepath.Abs(path)
 		if err != nil {
@@ -173,6 +212,7 @@ func NewStore(path string, taskBudget time.Duration) (*Store, error) {
 			return nil, fmt.Errorf("personal: secure database file: %w", err)
 		}
 		dsn = (&url.URL{Scheme: "file", Path: absPath, RawQuery: "_foreign_keys=on&_busy_timeout=5000"}).String()
+		baseDir = filepath.Dir(absPath)
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -182,26 +222,81 @@ func NewStore(path string, taskBudget time.Duration) (*Store, error) {
 	db.SetMaxIdleConns(1)
 	if err := db.PingContext(context.Background()); err != nil {
 		_ = db.Close()
+		if tempDir {
+			_ = os.RemoveAll(baseDir)
+		}
 		return nil, fmt.Errorf("personal: connect database: %w", err)
+	}
+	if err := checkPersonalSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		if tempDir {
+			_ = os.RemoveAll(baseDir)
+		}
+		return nil, err
 	}
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
 		_ = db.Close()
+		if tempDir {
+			_ = os.RemoveAll(baseDir)
+		}
 		return nil, fmt.Errorf("personal: begin schema transaction: %w", err)
 	}
 	if _, err := tx.Exec(personalSchema); err != nil {
 		_ = tx.Rollback()
 		_ = db.Close()
+		if tempDir {
+			_ = os.RemoveAll(baseDir)
+		}
 		return nil, fmt.Errorf("personal: initialize schema: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		_ = db.Close()
+		if tempDir {
+			_ = os.RemoveAll(baseDir)
+		}
 		return nil, fmt.Errorf("personal: commit schema: %w", err)
 	}
-	return &Store{db: db, taskBudgetMS: budgetMS}, nil
+	return &Store{db: db, taskBudgetMS: budgetMS, baseDir: baseDir, tempDir: tempDir}, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	err := s.db.Close()
+	if s.tempDir {
+		if cleanupErr := os.RemoveAll(s.baseDir); err == nil {
+			err = cleanupErr
+		}
+	}
+	return err
+}
+
+func nullableID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
+}
+
+func checkPersonalSchema(ctx context.Context, db *sql.DB) error {
+	var marker int
+	err := db.QueryRowContext(ctx, `SELECT version FROM personal_schema LIMIT 1`).Scan(&marker)
+	if err == nil {
+		if marker != 2 {
+			return fmt.Errorf("personal: unsupported database schema version %d", marker)
+		}
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		var hasTable int
+		if tableErr := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'personal_%'`).Scan(&hasTable); tableErr != nil {
+			return tableErr
+		}
+		if hasTable > 0 {
+			return errors.New("personal: unsupported database schema; existing personal data was left untouched")
+		}
+	}
+	return nil
+}
 
 func timestamp(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000000Z") }
 

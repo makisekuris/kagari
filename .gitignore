@@ -7,6 +7,8 @@
 
 # Runtime data and build output
 /data/
+*.channels/
+attachments-*/
 /bin/
 /kagari
 *.db

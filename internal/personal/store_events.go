@@ -3,131 +3,205 @@ package personal
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
 	"go.uber.org/zap"
+	"kagari/internal/channel"
 	"kagari/internal/logging"
 )
 
-func (s *Store) BindOwner(ctx context.Context, ownerID int64) error {
-	if ownerID == 0 {
-		return errors.New("personal: owner ID is required")
-	}
+func (s *Store) BindChannel(ctx context.Context, channelName, account, sender string, rebind bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO personal_meta(key,value) VALUES('owner_id',?) ON CONFLICT(key) DO NOTHING`, fmt.Sprint(ownerID)); err != nil {
+	oldAccount, oldSender, exists, err := checkChannelBinding(ctx, tx, channelName, account, sender, rebind)
+	if err != nil {
 		return err
 	}
-	var bound string
-	if err := tx.QueryRowContext(ctx, `SELECT value FROM personal_meta WHERE key='owner_id'`).Scan(&bound); err != nil {
-		return err
-	}
-	if bound != fmt.Sprint(ownerID) {
-		return fmt.Errorf("personal: owner is already bound to ID %s", bound)
+	if !exists {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_bindings(channel,account,sender) VALUES(?,?,?)`, channelName, account, sender); err != nil {
+			return err
+		}
+	} else if oldAccount != account || oldSender != sender {
+		if _, err := tx.ExecContext(ctx, `UPDATE personal_bindings SET account=?,sender=? WHERE channel=?`, account, sender, channelName); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
 
-func (s *Store) Offset(ctx context.Context) (int64, error) {
-	var offset int64
-	err := s.db.QueryRowContext(ctx, `SELECT next_offset FROM personal_state WHERE id=1`).Scan(&offset)
-	return offset, err
+type channelBindingQuery interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func (s *Store) AcceptInput(ctx context.Context, updateID int64, input *Input) (int64, error) {
-	if updateID < 0 || updateID == math.MaxInt64 {
-		return 0, errors.New("personal: update ID is out of range")
+func checkChannelBinding(ctx context.Context, query channelBindingQuery, channelName, account, sender string, rebind bool) (string, string, bool, error) {
+	if strings.TrimSpace(channelName) == "" || strings.TrimSpace(account) == "" || strings.TrimSpace(sender) == "" {
+		return "", "", false, errors.New("personal: channel, account and sender are required for binding")
 	}
-	if input != nil && (input.MessageID <= 0 || strings.TrimSpace(input.Text) == "") {
-		return 0, errors.New("personal: inbound message ID and text are required")
+	var oldAccount, oldSender string
+	err := query.QueryRowContext(ctx, `SELECT account,sender FROM personal_bindings WHERE channel=?`, channelName).Scan(&oldAccount, &oldSender)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	if (oldAccount != account || oldSender != sender) && !rebind {
+		return oldAccount, oldSender, true, fmt.Errorf("personal: %s is already bound to account %q and sender %q; explicit rebind required", channelName, oldAccount, oldSender)
+	}
+	return oldAccount, oldSender, true, nil
+}
+
+// CheckChannelBinding validates a prospective binding without changing it.
+func (s *Store) CheckChannelBinding(ctx context.Context, channelName, account, sender string, rebind bool) error {
+	_, _, _, err := checkChannelBinding(ctx, s.db, channelName, account, sender, rebind)
+	return err
+}
+
+func (s *Store) Cursor(ctx context.Context, channelName, account string) (string, error) {
+	if strings.TrimSpace(channelName) == "" || strings.TrimSpace(account) == "" {
+		return "", errors.New("personal: channel and account are required")
+	}
+	var cursor string
+	err := s.db.QueryRowContext(ctx, `SELECT cursor FROM personal_inbox WHERE channel=? AND account=?`, channelName, account).Scan(&cursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return cursor, err
+}
+
+func (s *Store) AcceptBatch(ctx context.Context, channelName, account, cursor string, inputs []channel.Input) ([]int64, error) {
+	if strings.TrimSpace(channelName) == "" || strings.TrimSpace(account) == "" {
+		return nil, errors.New("personal: channel and account are required")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer tx.Rollback()
-	var offset int64
-	if err := tx.QueryRowContext(ctx, `SELECT next_offset FROM personal_state WHERE id=1`).Scan(&offset); err != nil {
-		return 0, err
-	}
-	if updateID < offset {
-		if err := tx.Commit(); err != nil {
-			return 0, err
+	var boundAccount, boundSender string
+	if err := tx.QueryRowContext(ctx, `SELECT account,sender FROM personal_bindings WHERE channel=?`, channelName).Scan(&boundAccount, &boundSender); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("personal: %s is not bound", channelName)
 		}
-		return 0, nil
+		return nil, err
 	}
-	var eventID int64
-	if input != nil {
+	if boundAccount != account {
+		return nil, fmt.Errorf("personal: account %q is not bound to %s", account, channelName)
+	}
+	ids := make([]int64, len(inputs))
+	for i, input := range inputs {
+		if input.Channel != channelName || input.Account != account || strings.TrimSpace(input.Sender) == "" || strings.TrimSpace(input.MessageID) == "" {
+			return nil, fmt.Errorf("personal: input %d has incomplete or mismatched source identifiers", i)
+		}
+		if input.Sender != boundSender {
+			return nil, fmt.Errorf("personal: sender %q is not bound to %s account %q", input.Sender, channelName, account)
+		}
+		var existing int64
+		err = tx.QueryRowContext(ctx, `SELECT id FROM personal_events WHERE channel=? AND account=? AND sender=? AND message_id=?`,
+			channelName, account, input.Sender, input.MessageID).Scan(&existing)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		attachments, err := s.canonicalInputAttachments(ctx, tx, input.Attachments)
+		if err != nil {
+			return nil, fmt.Errorf("personal: input %d attachments: %w", i, err)
+		}
+		if strings.TrimSpace(input.Text) == "" && len(attachments) == 0 {
+			continue
+		}
 		kind := EventUser
-		if input.Material {
-			kind = EventMaterial
-		}
-		taskID, err := replyTaskID(ctx, tx, input.ReplyToID)
-		if err != nil {
-			return 0, err
-		}
-		res, err := tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,message_id,reply_to_id,status,created_at)
-			VALUES(?,?,?,?,?,'queued',?)`, kind, input.Text, nullableID(taskID), input.MessageID, nullablePositive(input.ReplyToID), timestamp(time.Now()))
-		if err != nil {
-			return 0, err
-		}
-		eventID, err = res.LastInsertId()
-		if err != nil {
-			return 0, err
-		}
 		role := "user"
 		if input.Material {
-			role = "material"
+			kind, role = EventMaterial, "material"
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text) VALUES(?,?,?)`, eventID, role, input.Text); err != nil {
-			return 0, err
+		taskID, err := replyTaskID(ctx, tx, input)
+		if err != nil {
+			return nil, err
+		}
+		attachmentJSON, err := json.Marshal(attachments)
+		if err != nil {
+			return nil, err
+		}
+		res, err := tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,channel,account,sender,message_id,reply_to_id,attachments,status,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,'queued',?)`, kind, input.Text, nullableID(taskID), channelName, account, input.Sender,
+			input.MessageID, input.ReplyToID, string(attachmentJSON), timestamp(time.Now()))
+		if err != nil {
+			return nil, err
+		}
+		ids[i], err = res.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text,attachments) VALUES(?,?,?,?)`, ids[i], role, input.Text, string(attachmentJSON)); err != nil {
+			return nil, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_state SET next_offset=? WHERE id=1 AND next_offset<=?`, updateID+1, updateID); err != nil {
-		return 0, err
+	if _, err := tx.ExecContext(ctx, `INSERT INTO personal_inbox(channel,account,cursor) VALUES(?,?,?)
+		ON CONFLICT(channel,account) DO UPDATE SET cursor=excluded.cursor`, channelName, account, cursor); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return nil, err
 	}
-	return eventID, nil
+	return ids, nil
 }
 
-func nullableID(id int64) any {
-	if id == 0 {
-		return nil
+func (s *Store) canonicalInputAttachments(ctx context.Context, tx *sql.Tx, input []channel.Attachment) ([]channel.Attachment, error) {
+	if len(input) == 0 {
+		return nil, nil
 	}
-	return id
+	attachments := make([]channel.Attachment, 0, len(input))
+	for _, attachment := range input {
+		if attachment.Size < 0 {
+			return nil, fmt.Errorf("attachment %q has an invalid size", attachment.Name)
+		}
+		if attachment.ID == "" {
+			if attachment.Error == "" {
+				return nil, errors.New("attachment without a local ID must have a failure reason")
+			}
+			attachments = append(attachments, attachment)
+			continue
+		}
+		canonical, err := s.validateStoredAttachment(ctx, tx, attachment.ID)
+		if err != nil {
+			return nil, err
+		}
+		if canonical.MIME == "" {
+			canonical.MIME = attachment.MIME
+		}
+		attachments = append(attachments, canonical)
+	}
+	return attachments, nil
 }
 
-func nullablePositive(id int64) any {
-	if id <= 0 {
-		return nil
-	}
-	return id
-}
-
-func replyTaskID(ctx context.Context, tx *sql.Tx, replyToID int64) (int64, error) {
-	if replyToID <= 0 {
+func replyTaskID(ctx context.Context, tx *sql.Tx, input channel.Input) (int64, error) {
+	if input.ReplyToID == "" {
 		return 0, nil
 	}
 	var id sql.NullInt64
 	err := tx.QueryRowContext(ctx, `SELECT e.task_id FROM personal_outbox d JOIN personal_events e ON e.id=d.event_id
-		WHERE d.receipt=? AND d.status='sent' AND e.task_id IS NOT NULL ORDER BY d.id DESC LIMIT 1`, replyToID).Scan(&id)
+		WHERE d.receipt_channel=? AND d.receipt_account=? AND d.receipt_conversation=? AND d.receipt_message_id=?
+		AND d.status='sent' AND e.task_id IS NOT NULL ORDER BY d.id DESC LIMIT 1`,
+		input.Channel, input.Account, input.Sender, input.ReplyToID).Scan(&id)
 	if err == nil && id.Valid {
 		return id.Int64, nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
-	err = tx.QueryRowContext(ctx, `SELECT task_id FROM personal_events WHERE message_id=?
-		AND kind IN ('user','material') AND task_id IS NOT NULL ORDER BY id DESC LIMIT 1`, replyToID).Scan(&id)
+	err = tx.QueryRowContext(ctx, `SELECT task_id FROM personal_events WHERE channel=? AND account=? AND sender=? AND message_id=?
+		AND kind IN ('user','material') AND task_id IS NOT NULL ORDER BY id DESC LIMIT 1`,
+		input.Channel, input.Account, input.Sender, input.ReplyToID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -165,6 +239,9 @@ func (s *Store) ClaimEvent(ctx context.Context) (*Event, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := s.refreshAttachments(ctx, tx, event.Attachments); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -175,21 +252,25 @@ type scanner interface{ Scan(...any) error }
 
 func scanEvent(row scanner) (*Event, error) {
 	var event Event
-	var taskID, runID, messageID, replyToID sql.NullInt64
-	var created string
-	if err := row.Scan(&event.ID, &event.Kind, &event.Text, &taskID, &runID, &messageID, &replyToID, &event.Interrupted, &created); err != nil {
+	var taskID, runID sql.NullInt64
+	var attachments, created string
+	if err := row.Scan(&event.ID, &event.Kind, &event.Text, &taskID, &runID, &event.Channel, &event.Account, &event.Sender,
+		&event.MessageID, &event.ReplyToID, &attachments, &event.Interrupted, &created); err != nil {
 		return nil, err
 	}
-	event.TaskID = taskID.Int64
-	event.RunID = runID.Int64
-	event.MessageID = messageID.Int64
-	event.ReplyToID = replyToID.Int64
-	createdAt, err := parseTimestamp(created)
-	event.CreatedAt = createdAt
+	event.TaskID, event.RunID = taskID.Int64, runID.Int64
+	if err := json.Unmarshal([]byte(attachments), &event.Attachments); err != nil {
+		return nil, fmt.Errorf("personal: decode event attachments: %w", err)
+	}
+	if event.Attachments == nil {
+		event.Attachments = []channel.Attachment{}
+	}
+	var err error
+	event.CreatedAt, err = parseTimestamp(created)
 	return &event, err
 }
 
-const eventColumns = `id,kind,text,task_id,run_id,message_id,reply_to_id,interrupted,created_at`
+const eventColumns = `id,kind,text,task_id,run_id,channel,account,sender,message_id,reply_to_id,attachments,interrupted,created_at`
 
 func (s *Store) History(ctx context.Context, eventID int64, limit int) ([]Message, error) {
 	if eventID <= 0 || limit <= 0 {
@@ -198,7 +279,8 @@ func (s *Store) History(ctx context.Context, eventID int64, limit int) ([]Messag
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT h.event_id,h.role,h.text,e.task_id FROM personal_history h JOIN personal_events e ON e.id=h.event_id
+	rows, err := s.db.QueryContext(ctx, `SELECT h.event_id,h.role,h.text,e.task_id,e.channel,e.account,e.sender,e.message_id,e.reply_to_id,h.attachments
+		FROM personal_history h JOIN personal_events e ON e.id=h.event_id
 		WHERE h.event_id<? ORDER BY h.event_id DESC,h.id DESC LIMIT ?`, eventID, limit)
 	if err != nil {
 		return nil, err
@@ -208,14 +290,29 @@ func (s *Store) History(ctx context.Context, eventID int64, limit int) ([]Messag
 	for rows.Next() {
 		var m Message
 		var taskID sql.NullInt64
-		if err := rows.Scan(&m.EventID, &m.Role, &m.Text, &taskID); err != nil {
+		var attachments string
+		if err := rows.Scan(&m.EventID, &m.Role, &m.Text, &taskID, &m.Channel, &m.Account, &m.Sender, &m.MessageID, &m.ReplyToID, &attachments); err != nil {
 			return nil, err
 		}
 		m.TaskID = taskID.Int64
+		if err := json.Unmarshal([]byte(attachments), &m.Attachments); err != nil {
+			return nil, fmt.Errorf("personal: decode history attachments: %w", err)
+		}
+		if m.Attachments == nil {
+			m.Attachments = []channel.Attachment{}
+		}
 		messages = append(messages, m)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range messages {
+		if err := s.refreshAttachments(ctx, s.db, messages[i].Attachments); err != nil {
+			return nil, err
+		}
 	}
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
 		messages[i], messages[j] = messages[j], messages[i]
@@ -246,12 +343,23 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 			return err
 		}
 		if !current {
-			// A user revision or cancellation may arrive while the callback is thinking.
 			output, chunks = TurnOutput{Silent: true}, nil
 			discardedStaleCallback = true
 		} else if output.TaskID != 0 && output.TaskID != callbackTaskID.Int64 {
 			return errors.New("personal: task callback cannot link its reply to another task")
 		}
+	}
+	attachments := make([]channel.Attachment, 0, len(output.Attachments))
+	if !output.Silent {
+		for _, id := range output.Attachments {
+			attachment, err := s.validateStoredAttachment(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			attachments = append(attachments, attachment)
+		}
+	} else {
+		output.Attachments = nil
 	}
 	taskID := output.TaskID
 	if taskID != 0 {
@@ -262,13 +370,17 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_events SET status='completed',task_id=? WHERE id=? AND status='running'`, nullableID(taskID), eventID); err != nil {
 		return err
 	}
-	if output.Text != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text) VALUES(?,'assistant',?)`, eventID, output.Text); err != nil {
+	if output.Text != "" || len(attachments) > 0 {
+		attachmentJSON, err := json.Marshal(attachments)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text,attachments) VALUES(?,'assistant',?,?)`, eventID, output.Text, string(attachmentJSON)); err != nil {
 			return err
 		}
 	}
 	replyParts := 0
-	if !output.Silent && output.Text != "" {
+	if !output.Silent {
 		now := timestamp(time.Now())
 		part := 0
 		for _, chunk := range chunks {
@@ -277,6 +389,13 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 			}
 			part++
 			if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,status,next_attempt_at) VALUES(?,?,?,'pending',?)`, eventID, part, chunk, now); err != nil {
+				return err
+			}
+			replyParts = part
+		}
+		for _, attachment := range attachments {
+			part++
+			if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,attachment_id,status,next_attempt_at) VALUES(?,?,? ,?,'pending',?)`, eventID, part, "", attachment.ID, now); err != nil {
 				return err
 			}
 			replyParts = part
@@ -300,10 +419,8 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 		return err
 	}
 	if replyParts > 0 {
-		// Stale callbacks commit as completed too, but only inserted chunks represent a queued reply.
-		logging.FromContext(ctx).Info("conversation.reply_queued",
-			zap.Int64("event_id", eventID), zap.Int64("task_id", taskID), zap.Int64("run_id", callbackRunID.Int64),
-			zap.Int("parts", replyParts), zap.Any("payload", output.Text))
+		logging.FromContext(ctx).Info("conversation.reply_queued", zap.Int64("event_id", eventID), zap.Int64("task_id", taskID),
+			zap.Int64("run_id", callbackRunID.Int64), zap.Int("parts", replyParts), zap.Any("payload", output.Text), zap.Any("attachments", output.Attachments))
 	}
 	return nil
 }
@@ -313,22 +430,19 @@ func currentTaskCallback(ctx context.Context, tx *sql.Tx, eventID, taskID, runID
 		return false, nil
 	}
 	var runTaskID, runRevision int64
-	if err := tx.QueryRowContext(ctx, `SELECT task_id,revision FROM personal_runs WHERE id=? AND kind='task'`, runID).
-		Scan(&runTaskID, &runRevision); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT task_id,revision FROM personal_runs WHERE id=? AND kind='task'`, runID).Scan(&runTaskID, &runRevision); err != nil {
 		return false, err
 	}
 	var taskRevision int64
 	var taskStatus TaskStatus
-	if err := tx.QueryRowContext(ctx, `SELECT revision,status FROM personal_tasks WHERE id=?`, taskID).
-		Scan(&taskRevision, &taskStatus); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT revision,status FROM personal_tasks WHERE id=?`, taskID).Scan(&taskRevision, &taskStatus); err != nil {
 		return false, err
 	}
 	if runTaskID != taskID || runRevision != taskRevision || taskStatus == TaskCancelled {
 		return false, nil
 	}
 	var latestID, latestRevision, latestEventID int64
-	if err := tx.QueryRowContext(ctx, `SELECT id,revision,event_id FROM personal_runs WHERE task_id=? ORDER BY id DESC LIMIT 1`, taskID).
-		Scan(&latestID, &latestRevision, &latestEventID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id,revision,event_id FROM personal_runs WHERE task_id=? ORDER BY id DESC LIMIT 1`, taskID).Scan(&latestID, &latestRevision, &latestEventID); err != nil {
 		return false, err
 	}
 	return latestRevision == taskRevision && (latestID == runID || latestEventID == eventID), nil
@@ -341,7 +455,6 @@ func (s *Store) Recover(ctx context.Context) error {
 	}
 	defer tx.Rollback()
 	var summary recoveryOutcomePayload
-	// Callback time is absolute within one claim; task spend itself stays cumulative.
 	res, err := tx.ExecContext(ctx, `UPDATE personal_events SET status='queued',elapsed_ms=0,interrupted=1 WHERE status='running'`)
 	if err != nil {
 		return err
@@ -399,6 +512,5 @@ func (s *Store) Recover(ctx context.Context) error {
 		return err
 	}
 	return commitStoreOutcome(ctx, tx, "store.recover", "recovered", summary,
-		zap.Int64("requeued_events", summary.RequeuedEvents), zap.Int64("requeued_runs", summary.RequeuedRuns),
-		zap.Int64("uncertain_sends", summary.UncertainSends))
+		zap.Int64("requeued_events", summary.RequeuedEvents), zap.Int64("requeued_runs", summary.RequeuedRuns), zap.Int64("uncertain_sends", summary.UncertainSends))
 }

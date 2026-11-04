@@ -43,8 +43,9 @@ type MainAgent struct {
 }
 
 type personalTurnResponse struct {
-	Text   string `json:"text"`
-	Notify bool   `json:"notify"`
+	Text        string   `json:"text"`
+	Notify      bool     `json:"notify"`
+	Attachments []string `json:"attachments"`
 }
 
 func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, error) {
@@ -65,6 +66,11 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 	if err != nil {
 		return TurnOutput{}, fmt.Errorf("build personal tools: %w", err)
 	}
+	fileTools, err := attachmentTools(a.Store, nil, nil)
+	if err != nil {
+		return TurnOutput{}, err
+	}
+	registeredTools = append(registeredTools, fileTools...)
 	agent, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name: "personal_assistant", Description: "Answer the owner's message and manage personal tasks and memory.",
 		Instruction: personalInstruction(a.Persona, a.Profile), Model: a.Model, MaxIterations: a.MaxIterations,
@@ -99,11 +105,19 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 	if err != nil {
 		return TurnOutput{}, err
 	}
+	files, err := resolveAttachments(ctx, a.Store, response.Attachments)
+	if err != nil {
+		return TurnOutput{}, fmt.Errorf("reply attachment is unavailable: %w", err)
+	}
+	response.Attachments = response.Attachments[:0]
+	for _, file := range files {
+		response.Attachments = append(response.Attachments, file.ID)
+	}
 	notify := response.Notify
 	if input.Event.Kind == EventUser || tools.mustNotify || taskOutcomeRequiresNotification(input) {
 		notify = true
 	}
-	return TurnOutput{Text: response.Text, TaskID: tools.taskID(), Silent: !notify}, nil
+	return TurnOutput{Text: response.Text, TaskID: tools.taskID(), Silent: !notify, Attachments: response.Attachments}, nil
 }
 
 func personalJSONOutputOption(name string, schema map[string]any) model.Option {
@@ -115,7 +129,7 @@ func personalJSONOutputOption(name string, schema map[string]any) model.Option {
 }
 
 func decodePersonalTurnResponse(raw string) (personalTurnResponse, error) {
-	fields, err := strictJSONObject(raw, "text", "notify")
+	fields, err := strictJSONObject(raw, "text", "notify", "attachments")
 	if err != nil {
 		return personalTurnResponse{}, fmt.Errorf("invalid personal response: %w", err)
 	}
@@ -127,10 +141,19 @@ func decodePersonalTurnResponse(raw string) (personalTurnResponse, error) {
 	if err := json.Unmarshal(fields["notify"], &notify); err != nil || notify == nil {
 		return personalTurnResponse{}, errors.New("invalid personal response notify flag")
 	}
-	if strings.TrimSpace(*text) == "" {
+	var attachments []string
+	if err := json.Unmarshal(fields["attachments"], &attachments); err != nil || attachments == nil {
+		return personalTurnResponse{}, errors.New("invalid personal response attachments")
+	}
+	for _, id := range attachments {
+		if strings.TrimSpace(id) == "" {
+			return personalTurnResponse{}, errors.New("blank attachment ID")
+		}
+	}
+	if strings.TrimSpace(*text) == "" && len(attachments) == 0 {
 		return personalTurnResponse{}, errors.New("personal response text is blank")
 	}
-	return personalTurnResponse{Text: *text, Notify: *notify}, nil
+	return personalTurnResponse{Text: *text, Notify: *notify, Attachments: attachments}, nil
 }
 
 func taskOutcomeRequiresNotification(input TurnInput) bool {
@@ -145,7 +168,7 @@ func taskOutcomeRequiresNotification(input TurnInput) bool {
 	if input.CurrentRun != nil && input.CurrentRun.TaskID == input.Event.TaskID {
 		var result StageResult
 		if json.Unmarshal([]byte(input.CurrentRun.Result), &result) == nil {
-			if len(result.Sources) > 0 {
+			if len(result.Sources) > 0 || len(result.Attachments) > 0 {
 				return true
 			}
 		}
@@ -162,7 +185,17 @@ func boundedTurnInput(input TurnInput) TurnInput {
 		current := *input.CurrentRun
 		input.CurrentRun = &current
 		input.CurrentRun.Input = limitRunes(input.CurrentRun.Input, maxTaskRunes)
-		input.CurrentRun.Result = limitRunes(input.CurrentRun.Result, maxTaskRunes)
+		var result StageResult
+		if json.Unmarshal([]byte(input.CurrentRun.Result), &result) == nil {
+			result.Summary = limitRunes(result.Summary, maxTaskRunes)
+			if runeCount(input.CurrentRun.Result) > maxTaskRunes {
+				result.Sources = nil // Full source evidence remains available through get_run.
+			}
+			encoded, _ := json.Marshal(result)
+			input.CurrentRun.Result = string(encoded)
+		} else {
+			input.CurrentRun.Result = limitRunes(input.CurrentRun.Result, maxTaskRunes)
+		}
 		input.CurrentRun.Error = limitRunes(input.CurrentRun.Error, 800)
 	}
 	if len(input.History) > maxHistoryMessages {

@@ -3,8 +3,10 @@ package personal
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"kagari/internal/channel"
 	"kagari/internal/domain"
 )
 
@@ -54,51 +56,60 @@ const (
 	RunCancelled RunStatus = "cancelled"
 )
 
-type Input struct {
-	MessageID int64  `json:"message_id"`
-	ReplyToID int64  `json:"reply_to_id,omitempty"`
-	Text      string `json:"text"`
-	Material  bool   `json:"material,omitempty"`
-}
+type Input = channel.Input
+
+var ErrAttachmentUnavailable = errors.New("personal: attachment is unavailable")
 
 type Event struct {
-	ID          int64     `json:"id"`
-	Kind        EventKind `json:"kind"`
-	Text        string    `json:"text"`
-	TaskID      int64     `json:"task_id,omitempty"`
-	RunID       int64     `json:"run_id,omitempty"`
-	MessageID   int64     `json:"message_id,omitempty"`
-	ReplyToID   int64     `json:"reply_to_id,omitempty"`
-	Interrupted bool      `json:"interrupted,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          int64                `json:"id"`
+	Kind        EventKind            `json:"kind"`
+	Text        string               `json:"text"`
+	TaskID      int64                `json:"task_id,omitempty"`
+	RunID       int64                `json:"run_id,omitempty"`
+	Channel     string               `json:"channel,omitempty"`
+	Account     string               `json:"account,omitempty"`
+	Sender      string               `json:"sender,omitempty"`
+	MessageID   string               `json:"message_id,omitempty"`
+	ReplyToID   string               `json:"reply_to_id,omitempty"`
+	Attachments []channel.Attachment `json:"attachments,omitempty"`
+	Interrupted bool                 `json:"interrupted,omitempty"`
+	CreatedAt   time.Time            `json:"created_at"`
 }
 
 type Message struct {
-	EventID int64  `json:"event_id"`
-	Role    string `json:"role"`
-	Text    string `json:"text"`
-	TaskID  int64  `json:"task_id,omitempty"`
+	EventID     int64                `json:"event_id"`
+	Role        string               `json:"role"`
+	Text        string               `json:"text"`
+	TaskID      int64                `json:"task_id,omitempty"`
+	Channel     string               `json:"channel,omitempty"`
+	Account     string               `json:"account,omitempty"`
+	Sender      string               `json:"sender,omitempty"`
+	MessageID   string               `json:"message_id,omitempty"`
+	ReplyToID   string               `json:"reply_to_id,omitempty"`
+	Attachments []channel.Attachment `json:"attachments,omitempty"`
 }
 
 type Task struct {
-	ID        int64      `json:"id"`
-	Title     string     `json:"title"`
-	Goal      string     `json:"goal"`
-	Revision  int64      `json:"revision"`
-	Status    TaskStatus `json:"status"`
-	Summary   string     `json:"summary"`
-	Context   string     `json:"context"`
-	BudgetMS  int64      `json:"budget_ms"`
-	UsedMS    int64      `json:"used_ms"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	ID          int64                `json:"id"`
+	Title       string               `json:"title"`
+	Goal        string               `json:"goal"`
+	Attachments []channel.Attachment `json:"attachments,omitempty"`
+	Revision    int64                `json:"revision"`
+	Status      TaskStatus           `json:"status"`
+	Summary     string               `json:"summary"`
+	Context     string               `json:"context"`
+	BudgetMS    int64                `json:"budget_ms"`
+	UsedMS      int64                `json:"used_ms"`
+	UpdatedAt   time.Time            `json:"updated_at"`
 }
 
 // TaskInput freezes the goal and relevant context for one execution.
 type TaskInput struct {
-	Goal     string `json:"goal"`
-	Context  string `json:"context"`
-	Step     string `json:"step,omitempty"`
-	Previous string `json:"previous,omitempty"`
+	Goal        string               `json:"goal"`
+	Context     string               `json:"context"`
+	Step        string               `json:"step,omitempty"`
+	Previous    string               `json:"previous,omitempty"`
+	Attachments []channel.Attachment `json:"attachments,omitempty"`
 }
 
 type Run struct {
@@ -116,8 +127,9 @@ type Run struct {
 }
 
 type StageResult struct {
-	Summary string          `json:"summary"`
-	Sources []domain.Source `json:"sources,omitempty"`
+	Summary     string               `json:"summary"`
+	Sources     []domain.Source      `json:"sources,omitempty"`
+	Attachments []channel.Attachment `json:"attachments,omitempty"`
 }
 
 // Deleted entries retain a tombstone so an older memory review cannot resurrect them.
@@ -149,11 +161,12 @@ type MemoryReview struct {
 }
 
 type Outgoing struct {
-	ID       int64
-	EventID  int64
-	TaskID   int64
-	Text     string
-	Attempts int
+	ID           int64
+	EventID      int64
+	TaskID       int64
+	Text         string
+	AttachmentID string
+	Attempts     int
 }
 
 type TurnInput struct {
@@ -165,9 +178,10 @@ type TurnInput struct {
 }
 
 type TurnOutput struct {
-	Text   string
-	TaskID int64
-	Silent bool
+	Text        string
+	Attachments []string
+	TaskID      int64
+	Silent      bool
 }
 
 type ThinkFunc func(context.Context, TurnInput) (TurnOutput, error)
@@ -177,10 +191,12 @@ type ReviewMemoryFunc func(context.Context, MemoryReviewInput) (MemoryReview, er
 // Repository is the shared contract between the conversation, workers and transport.
 // Task callbacks may continue or settle their own current task, never change its goal.
 type Repository interface {
-	BindOwner(context.Context, int64) error
+	channel.Inbox
+	channel.Files
+	BindChannel(context.Context, string, string, string, bool) error
+	Attachments(context.Context) ([]channel.Attachment, error)
+	DeleteAttachment(context.Context, string) error
 	Recover(context.Context) error
-	Offset(context.Context) (int64, error)
-	AcceptInput(context.Context, int64, *Input) (int64, error)
 	ClaimEvent(context.Context) (*Event, error)
 	History(context.Context, int64, int) ([]Message, error)
 	CompleteEvent(context.Context, int64, TurnOutput, []string) error
@@ -205,5 +221,5 @@ type Repository interface {
 	Memories(context.Context, string, int) ([]Memory, error)
 	MemoryHistory(ctx context.Context, key string, limit int) ([]Memory, error)
 	ClaimDelivery(context.Context) (*Outgoing, error)
-	UpdateDelivery(context.Context, int64, string, int64, string, time.Time) error
+	UpdateDelivery(context.Context, int64, string, channel.Receipt, string, time.Time) error
 }

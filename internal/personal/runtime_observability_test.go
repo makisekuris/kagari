@@ -9,11 +9,12 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+	"kagari/internal/channel"
 )
 
 type receiptFailureStore struct{ Repository }
 
-func (s receiptFailureStore) UpdateDelivery(context.Context, int64, string, int64, string, time.Time) error {
+func (s receiptFailureStore) UpdateDelivery(context.Context, int64, string, channel.Receipt, string, time.Time) error {
 	return errors.New("receipt storage unavailable")
 }
 
@@ -28,12 +29,15 @@ func TestDeliveryTraceSeparatesRemoteAcceptanceAndPersistence(t *testing.T) {
 	r := testRuntime(receiptFailureStore{s})
 	r.Log = zap.New(core)
 	sends := 0
-	r.Send = func(context.Context, string) (int64, error) { sends++; return 123, nil }
+	r.Send = func(context.Context, channel.Content) (channel.Receipt, error) {
+		sends++
+		return channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner"}, nil
+	}
 	if worked, err := r.deliver(ctx); !worked || err == nil {
 		t.Fatalf("lost receipt = %v, %v", worked, err)
 	}
 	accepted := logs.FilterMessage("delivery.remote_accepted").All()
-	if len(accepted) != 1 || accepted[0].ContextMap()["receipt"] != int64(123) || accepted[0].ContextMap()["event_id"] != event.ID {
+	if len(accepted) != 1 || accepted[0].ContextMap()["receipt"] == nil || accepted[0].ContextMap()["event_id"] != event.ID {
 		t.Fatalf("remote evidence: %+v", accepted)
 	}
 	if logs.FilterMessage("delivery.persistence_failed").Len() != 1 {
@@ -52,10 +56,7 @@ func TestDeliveryTraceSeparatesRemoteAcceptanceAndPersistence(t *testing.T) {
 func TestConversationTraceConnectsAnOrdinaryChat(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, filepath.Join(t.TempDir(), "chat.db"), time.Minute)
-	id, err := s.AcceptInput(ctx, 1, &Input{MessageID: 10, Text: "hello"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := acceptInput(t, s, "1", sourceInput("10", "hello"))
 	core, logs := observer.New(zap.InfoLevel)
 	r := testRuntime(s)
 	r.Log = zap.New(core)

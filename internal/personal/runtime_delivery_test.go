@@ -7,20 +7,20 @@ import (
 	"testing"
 	"time"
 
-	"kagari/internal/distribution"
+	"kagari/internal/channel"
 )
 
 func TestRuntimeDeliveryClassifiesUnknownAndRetriesOnlyKnownFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name, status string
 		err          error
-		receipt      int64
+		receipt      channel.Receipt
 	}{
-		{"success", "sent", nil, 321},
-		{"permanent", "failed", &distribution.SendError{Reason: "bad recipient", Permanent: true}, 0},
-		{"unknown", "uncertain", errors.New("connection lost"), 0},
-		{"missing receipt", "uncertain", nil, 0},
-		{"transient", "pending", &distribution.SendError{Reason: "rate limited", RetryAfter: time.Minute}, 0},
+		{"success without remote ID", "sent", nil, channel.Receipt{Channel: "telegram", Account: "bot", Conversation: "owner"}},
+		{"permanent", "failed", &channel.SendError{Reason: "bad recipient", Permanent: true}, channel.Receipt{Channel: "telegram", Account: "bot", Conversation: "owner"}},
+		{"unknown", "uncertain", errors.New("connection lost"), channel.Receipt{Channel: "telegram", Account: "bot", Conversation: "owner"}},
+		{"zero receipt success", "sent", nil, channel.Receipt{}},
+		{"transient", "pending", &channel.SendError{Reason: "rate limited", RetryAfter: time.Minute}, channel.Receipt{Channel: "telegram", Account: "bot", Conversation: "owner"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -29,7 +29,7 @@ func TestRuntimeDeliveryClassifiesUnknownAndRetriesOnlyKnownFailures(t *testing.
 			finishEvent(t, s, event, TurnOutput{Text: "reply"}, []string{"reply"})
 			r := testRuntime(s)
 			attempts := 0
-			r.Send = func(context.Context, string) (int64, error) { attempts++; return tc.receipt, tc.err }
+			r.Send = func(context.Context, channel.Content) (channel.Receipt, error) { attempts++; return tc.receipt, tc.err }
 			if worked, err := r.deliver(ctx); err != nil || !worked {
 				t.Fatalf("send: %v, %v", worked, err)
 			}
@@ -61,5 +61,27 @@ func TestRuntimeDeliveryClassifiesUnknownAndRetriesOnlyKnownFailures(t *testing.
 				t.Fatalf("terminal delivery retried: %v, %v", worked, err)
 			}
 		})
+	}
+}
+
+func TestRuntimeReadyWaitingKeepsDeliveryPendingWithoutClaiming(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t, filepath.Join(t.TempDir(), "waiting.db"), time.Minute)
+	event := openUserEvent(t, s, 1, 1, "hello")
+	finishEvent(t, s, event, TurnOutput{Text: "reply"}, []string{"reply"})
+	r := testRuntime(s)
+	sends := 0
+	r.Ready = func(context.Context) error { return &channel.SendError{Reason: "waiting for login", Waiting: true} }
+	r.Send = func(context.Context, channel.Content) (channel.Receipt, error) {
+		sends++
+		return channel.Receipt{}, nil
+	}
+	if worked, err := r.deliver(ctx); err != nil || worked {
+		t.Fatalf("waiting Ready() = (%v,%v)", worked, err)
+	}
+	var status string
+	var attempts int
+	if err := s.db.QueryRow(`SELECT status,attempts FROM personal_outbox`).Scan(&status, &attempts); err != nil || status != "pending" || attempts != 0 || sends != 0 {
+		t.Fatalf("waiting changed delivery: status=%s attempts=%d sends=%d err=%v", status, attempts, sends, err)
 	}
 }

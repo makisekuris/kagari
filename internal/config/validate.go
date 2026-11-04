@@ -16,10 +16,13 @@ const (
 
 // ValidatePersonal checks the single owner's service, independently of archive CLI commands.
 func (c Config) ValidatePersonal() error {
-	if err := c.Validate(true, true); err != nil {
+	if c.Personal.Channel != "" && c.Personal.Channel != "telegram" && c.Personal.Channel != "weixin" {
+		return errors.New("personal.channel must be telegram or weixin")
+	}
+	if err := c.Validate(true, c.Personal.Channel != "weixin"); err != nil {
 		return err
 	}
-	if len(c.Telegram.AllowedUserIDs) != 1 || len(c.Telegram.TargetChatIDs) != 0 {
+	if c.Personal.Channel != "weixin" && (len(c.Telegram.AllowedUserIDs) != 1 || len(c.Telegram.TargetChatIDs) != 0) {
 		return errors.New("personal mode requires exactly one telegram.allowed_user_ids entry and no target_chat_ids")
 	}
 	if c.Personal.TaskConcurrency < 1 || c.Personal.TaskBudget < time.Millisecond {

@@ -36,6 +36,7 @@ type Persona interface {
 
 // Engine 共享模型与读取能力；每次 Analyze 创建独立阅读会话，读取计数和来源不会跨任务共用。
 type Engine struct {
+	ExtraTools    []tool.BaseTool
 	Model         model.AgenticModel
 	Config        config.Config
 	Profile       string
@@ -186,7 +187,7 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 	if err != nil {
 		return result, err
 	}
-	tools := []tool.BaseTool{readTool}
+	tools := append([]tool.BaseTool{readTool}, e.ExtraTools...)
 
 	if e.OpenBrowser != nil {
 		browserTool, toolErr := utils.InferTool("browse_url", "用 Playwright MCP 浏览器读取相关 URL 的渲染内容和链接。可直接选择此工具，也可在 HTTP 内容不足或读取失败时使用。", func(ctx context.Context, r readRequest) (readReply, error) {

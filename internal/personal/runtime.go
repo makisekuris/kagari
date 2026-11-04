@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"kagari/internal/channel"
 	"kagari/internal/logging"
 
 	"go.uber.org/zap"
@@ -19,8 +20,9 @@ type Runtime struct {
 	ReviewMemory    ReviewMemoryFunc
 	TaskConcurrency int
 	Poll            func(context.Context) error
+	Ready           func(context.Context) error
 	Prepare         func(string) ([]string, error)
-	Send            func(context.Context, string) (int64, error)
+	Send            func(context.Context, channel.Content) (channel.Receipt, error)
 	Log             *zap.Logger
 	idleDelay       time.Duration
 }
@@ -73,7 +75,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 	start("memory", func(ctx context.Context) error { return r.loop(ctx, r.memory) })
 	start("delivery", func(ctx context.Context) error { return r.loop(ctx, r.deliver) })
 	if r.Poll != nil {
-		start("telegram", r.Poll)
+		start("channel", r.Poll)
 	}
 	<-ctx.Done()
 	group.Wait()
