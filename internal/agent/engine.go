@@ -36,15 +36,17 @@ type Persona interface {
 
 // Engine 共享模型与读取能力；每次 Analyze 创建独立阅读会话，读取计数和来源不会跨任务共用。
 type Engine struct {
-	Model         model.AgenticModel
-	Config        config.Config
-	Profile       string
-	Read          func(context.Context, string) (domain.Source, error)
-	CachedSource  func(context.Context, string) (*domain.Source, error)
-	OpenBrowser   func(context.Context) (func(context.Context, string) (domain.Source, error), func(), error)
-	Log           *zap.Logger
-	ObserveV2     bool
-	personaPrompt string
+	Model                 model.AgenticModel
+	Config                config.Config
+	Profile               string
+	Read                  func(context.Context, string) (domain.Source, error)
+	CachedSource          func(context.Context, string) (*domain.Source, error)
+	OpenBrowser           func(context.Context) (func(context.Context, string) (domain.Source, error), func(), error)
+	AdditionalTools       []tool.BaseTool
+	AdditionalInstruction string
+	Log                   *zap.Logger
+	ObserveV2             bool
+	personaPrompt         string
 }
 
 // New 在构造时冻结人格文案；nil 表示不附加人格，默认角色由调用入口选择。
@@ -134,13 +136,24 @@ func hash(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeT
 // Analyze gives the typed agent the user's question and candidate URLs, then lets it
 // read submitted or discovered material as needed. Partial sources remain on error.
 func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domain.Result, err error) {
+	return e.analyze(ctx, s, false)
+}
+
+// RunTaskStage executes one task stage and returns its direct text summary.
+func (e *Engine) RunTaskStage(ctx context.Context, s domain.Submission) (result domain.Result, err error) {
+	return e.analyze(ctx, s, true)
+}
+
+func (e *Engine) analyze(ctx context.Context, s domain.Submission, taskStage bool) (result domain.Result, err error) {
 	started := time.Now()
 	stage := "agent_setup"
 	modelCalled, usageReported := false, false
 	if e.Log != nil {
 		e.Log.Info("agent analyze started", zap.Int64("user_id", s.UserID), zap.Int("sources", len(s.URLs)), zap.Bool("streaming", e.Config.Agent.Streaming))
 	}
-	result.AnalysisVersion = AnalysisVersion
+	if !taskStage {
+		result.AnalysisVersion = AnalysisVersion
+	}
 	ctx, cancel := context.WithTimeout(ctx, e.Config.Agent.Timeout)
 	defer cancel()
 	session := newSession(e)
@@ -214,9 +227,16 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 		}
 		tools = append(tools, browserTool)
 	}
+	tools = append(tools, e.AdditionalTools...)
+	instruction := e.analysisPrompt()
+	name, description := "reader", "回答用户问题并按需读取资料"
+	if taskStage {
+		instruction = e.taskPrompt()
+		name, description = "task_executor", "推进冻结目标的一个后台阶段并简要报告结果"
+	}
 
 	a, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
-		Name: "reader", Description: "回答用户问题并按需读取资料", Instruction: e.analysisPrompt(), Model: e.Model, MaxIterations: e.Config.Agent.MaxIterations,
+		Name: name, Description: description, Instruction: instruction, Model: e.Model, MaxIterations: e.Config.Agent.MaxIterations,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools, ExecuteSequentially: true}},
 	})
 	if err != nil {
@@ -248,6 +268,13 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 		return result, err
 	}
 	stage = "output_validation"
+	if taskStage {
+		if strings.TrimSpace(rawOutput) == "" {
+			return result, errors.New("task stage returned an empty response")
+		}
+		result.Kind, result.Body = domain.ResultKindAnalysis, rawOutput
+		return result, nil
+	}
 	result.Kind, result.Body, err = decodeAnalysisOutput(rawOutput)
 	if err != nil {
 		return result, err
@@ -257,7 +284,19 @@ func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domai
 
 // analysisPrompt participates in the cache key so prompt changes invalidate prior results.
 func (e *Engine) analysisPrompt() string {
-	return prompt.GetPromptTemplate(e.personaPrompt)
+	base := prompt.GetPromptTemplate(e.personaPrompt)
+	if strings.TrimSpace(e.AdditionalInstruction) == "" {
+		return base
+	}
+	return base + "\n\n" + strings.TrimSpace(e.AdditionalInstruction)
+}
+
+func (e *Engine) taskPrompt() string {
+	base := prompt.GetTaskPromptTemplate(e.personaPrompt)
+	if strings.TrimSpace(e.AdditionalInstruction) == "" {
+		return base
+	}
+	return base + "\n\n" + strings.TrimSpace(e.AdditionalInstruction)
 }
 
 func (e *Engine) analysisInput(s domain.Submission, sources []domain.Source) string {

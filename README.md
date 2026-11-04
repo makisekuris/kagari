@@ -130,7 +130,7 @@ Commands load `.env` from the current working directory; no `source` command is 
 | `max_attempts` | `6` | 包含首次尝试 / Includes the first attempt |
 | `agent.streaming` | `false` | 启用 Responses SSE / Enables Responses SSE |
 | `personal.task_concurrency` | `4` | 并行 Task worker 数，必须为正数 / Concurrent task workers; must be positive |
-| `personal.task_budget` | `30m` | 每个 Task 的累计执行预算 / Cumulative execution budget per Task |
+| `personal.task_budget` | `30m` | 每个 Task 的累计执行时长上限 / Total execution time limit per Task |
 | `weekly.enabled` | `false` | V1 weekly 调度设置；V2 `run` 不调度周报 / V1 weekly scheduler setting; V2 `run` does not schedule digests |
 | `weekly.max_input_chars` | `120000` | 周报完整模型输入字符上限 / Maximum serialized digest input size |
 
@@ -202,19 +202,31 @@ V2 accepts tasks and requests to cancel or continue them in the owner's Telegram
 调查 https://example.com 的方案和主要风险。
 这个任务进展如何？
 取消任务 #1。
-继续任务 #1，补查兼容性；我授权再用一个预算周期。
+继续任务 #1，补查兼容性；我授权按当前配置延长一次执行时间。
 以后回答请简洁一些，但保留关键依据。
 更正：我现在主要使用 Rust。
 忘记我偏好简洁回答这件事。
 ```
 
-每条直接用户消息处理后都会异步检查稳定事实和偏好。自动记忆检查始终静默，包括失败和需要澄清的情况；结果与错误保留在 Run 中，查询个人记忆可确认已生效的内容。用户明确要求保存、更正或遗忘时，主对话会同步提交记忆、变更历史和请求记录；成功后才可报告已生效，校验或版本冲突会作为工具错误返回。Task 和记忆工具只改写本地 personal 数据，不开放任意文件写入、命令执行或外部写操作；Task 可以只读网页。Telegram 回复全部使用普通文本，每条 outbox 分段最多 3500 个 UTF-16 单元；每段最多尝试三次，包含首次尝试。发送结果未知时不会自动重发，避免重复消息。
+每条直接用户消息处理后都会异步检查稳定事实和偏好。自动记忆检查始终静默，包括失败和需要澄清的情况；结果与错误保留在 Run 中，查询个人记忆可确认已生效的内容。用户明确要求保存、更正或遗忘时，主对话会同步提交记忆、变更历史和请求记录；成功后才可报告已生效，校验或版本冲突会作为工具错误返回。
 
-After each direct user message, a background reviewer checks for durable facts and preferences. Automatic memory review stays silent, including failures and clarification; results and errors remain in Runs. When the user explicitly asks to save, correct, or forget a memory, the conversation synchronously commits the memory, its change history, and the request record. It can report success only after the commit; validation and version conflicts return as tool errors. Task and memory tools change local personal data but do not allow arbitrary file writes, command execution, or external writes; Tasks can read web pages. Telegram replies use plain text, split into outbox parts of at most 3500 UTF-16 units. Each part gets at most three total attempts, including the first. An unknown send outcome is not retried automatically, to avoid duplicate messages.
+After each direct user message, a background reviewer checks for durable facts and preferences. Automatic memory review stays silent, including failures and clarification; results and errors remain in Runs. When the user explicitly asks to save, correct, or forget a memory, the conversation synchronously commits the memory, its change history, and the request record. It can report success only after the commit; validation and version conflicts return as tool errors.
 
-V2 的 Task 状态、阶段成果、预算、记忆和回执保存在 `storage.path` 指向的 SQLite 文件中。Task Run 的剩余预算在领取时按 Task 的累计预算计算，不单独持久化；启动后中断的后台阶段沿用 Task 剩余预算重新排队。中断的主对话保留已经提交的操作并说明中断，未提交的要求需要重新提出，以免重复建任务。发送中断的消息标记为结果不确定；旧 V1 表不会迁移为 personal Task。当前 V2 schema 不兼容旧 V2 personal 数据库；使用新的 `storage.path` 启动，程序不会自动迁移或删除旧数据库。
+Telegram 回复全部使用普通文本，每条 outbox 分段最多 3500 个 UTF-16 单元；每段总共最多尝试三次，包含首次尝试。发送结果未知时不会自动重发，避免重复消息。
 
-V2 Tasks, stage results, budgets, memories, and receipts are saved in the SQLite file at `storage.path`. A Task Run's remaining budget is computed from the Task's cumulative budget when the Run is claimed; it is not stored separately. Interrupted background stages resume with the Task's remaining budget. An interrupted conversation keeps committed actions and reports the interruption; the owner must repeat uncommitted requests, avoiding duplicate task creation. Interrupted sends are marked uncertain. V1 tables are not migrated into personal Tasks. The current V2 schema is incompatible with older V2 personal databases; start with a new `storage.path`. Kagari does not migrate or delete the old database automatically.
+Telegram replies use plain text, split into outbox parts of at most 3500 UTF-16 units. Each part gets at most three total attempts, including the first. An unknown send outcome is not retried automatically, to avoid duplicate messages.
+
+V2 的 Task 状态、阶段成果、已用执行时间与时长上限、记忆和回执保存在 `storage.path` 指向的 SQLite 文件中。Worker 领取 Task Run 时，用时长上限减去该 Task 已用的执行时间，得到本次可用的时间；这个计算结果不单独保存。服务重启后，中断的后台阶段重新排队，已用时间不会清零。中断的主对话保留已经提交的操作并说明中断，未提交的要求需要重新提出，以免重复建任务。发送中断的消息标记为结果不确定；旧 V1 表不会迁移为 personal Task。当前 V2 schema 不兼容旧 V2 personal 数据库；使用新的 `storage.path` 启动，程序不会自动迁移或删除旧数据库。
+
+V2 Task states, stage results, elapsed execution times and time limits, memories, and receipts are saved in the SQLite file at `storage.path`. When a worker claims a Task Run, it subtracts the Task's elapsed execution time from its time limit to find the time available for that Run. This calculated value is not stored separately. Restarting the service requeues interrupted background stages without resetting elapsed time. An interrupted conversation keeps committed actions and reports the interruption; the owner must repeat uncommitted requests, avoiding duplicate task creation. Interrupted sends are marked uncertain. V1 tables are not migrated into personal Tasks. The current V2 schema is incompatible with older V2 personal databases; start with a new `storage.path`. Kagari does not migrate or delete the old database automatically.
+
+Task 执行器可以读取网页，也可以用 `ls`、`read_file`、`write_file`、`edit_file` 读写当前 Task 工作区内的 UTF-8 文本文件，每个文件最多 1 MiB。执行器不能写入工作区外的文件、执行命令或修改外部服务。
+
+The Task executor can read web pages and use `ls`, `read_file`, `write_file`, and `edit_file` to read and write UTF-8 text files in the current Task's workspace, up to 1 MiB per file. It cannot write outside the workspace, execute commands, or modify external services.
+
+每个 Task 的文件保存在 `<storage.path>.workspaces/<store_id>/tasks/<task_id>/`。继续任务或重启服务后，执行器仍使用这个目录。`edit_file` 要求待替换文本在文件中恰好出现一次。文件写入成功后就会保留，即使阶段随后失败或取消，也不会撤销修改。Run 的 `files` 列出本次成功写入或修改的文件相对路径；这些路径指向当前文件，不保存历史版本，也不表示文件已作为附件发送。备份时需同时保留数据库和工作区。
+
+Each Task stores its files at `<storage.path>.workspaces/<store_id>/tasks/<task_id>/`. The executor uses the same directory when the Task continues or the service restarts. `edit_file` requires the text to replace to appear exactly once. A successful write is kept even if the stage later fails or is cancelled. A Run's `files` field lists the relative paths of files it successfully wrote or modified. These paths refer to the current files; they do not preserve older versions or indicate that the files were sent as attachments. Back up the database and workspace together.
 
 `analyze`、`digest` 与 `run` 共用数据库处理器锁，不能同时运行。旧版 `status`、`export` 和重试命令只检查 V1 记录；V2 检查命令只检查 personal 记录。
 

@@ -118,6 +118,7 @@ type Run struct {
 type StageResult struct {
 	Summary string          `json:"summary"`
 	Sources []domain.Source `json:"sources,omitempty"`
+	Files   []string        `json:"files,omitempty"`
 }
 
 // Deleted entries retain a tombstone so an older memory review cannot resurrect them.

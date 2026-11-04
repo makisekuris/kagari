@@ -818,7 +818,9 @@ func stageCheckpoint(runID int64, result StageResult) string {
 		if runeLen(string(raw)) <= maxTaskChars {
 			return string(raw)
 		}
-		if len(checkpoint.Sources) > 0 {
+		if len(checkpoint.Files) > 0 {
+			checkpoint.Files = checkpoint.Files[:len(checkpoint.Files)-1]
+		} else if len(checkpoint.Sources) > 0 {
 			checkpoint.Sources = checkpoint.Sources[:len(checkpoint.Sources)-1]
 		} else {
 			checkpoint.Summary = clip(checkpoint.Summary, runeLen(checkpoint.Summary)/2)

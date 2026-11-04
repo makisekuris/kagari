@@ -13,6 +13,11 @@ func (r *Runtime) task(ctx context.Context) (worked bool, runErr error) {
 	if err != nil || run == nil {
 		return false, err
 	}
+	release, err := r.acquireTask(ctx, *run)
+	if err != nil || release == nil {
+		return true, err
+	}
+	defer release()
 	log := r.runLog(*run)
 	ctx = logging.WithLogger(ctx, log)
 	log.Info("run.started", zap.Int64("remaining_ms", run.RemainingMS), zap.Any("payload", run.Input))

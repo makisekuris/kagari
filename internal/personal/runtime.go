@@ -23,6 +23,8 @@ type Runtime struct {
 	Send            func(context.Context, string) (int64, error)
 	Log             *zap.Logger
 	idleDelay       time.Duration
+	taskMu          sync.Mutex
+	activeTasks     map[int64]chan struct{}
 }
 
 // Run requires the caller to hold the instance lock before startup recovery.

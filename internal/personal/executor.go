@@ -26,6 +26,10 @@ const (
 // ReadingExecutor runs one bounded, read-only analysis stage. It returns the
 // stage for review; it never decides that the task's goal is complete.
 func ReadingExecutor(engine *agent.Engine, store Repository) ExecuteFunc {
+	return readingExecutor(engine, store, false)
+}
+
+func readingExecutor(engine *agent.Engine, store Repository, taskStage bool) ExecuteFunc {
 	return func(ctx context.Context, run Run, progress func(string) error) (StageResult, error) {
 		if engine == nil {
 			return StageResult{Summary: "Task stage could not start: reading engine is unavailable."}, errors.New("personal: reading engine is unavailable")
@@ -108,7 +112,13 @@ func ReadingExecutor(engine *agent.Engine, store Repository) ExecuteFunc {
 		if err != nil {
 			return StageResult{Summary: "Task stage could not prepare its reading request."}, err
 		}
-		result, analyzeErr := stageEngine.Analyze(ctx, prepared)
+		var result domain.Result
+		var analyzeErr error
+		if taskStage {
+			result, analyzeErr = stageEngine.RunTaskStage(ctx, prepared)
+		} else {
+			result, analyzeErr = stageEngine.Analyze(ctx, prepared)
+		}
 		progressMu.Lock()
 		readProgressErr := progressErr
 		progressMu.Unlock()
@@ -121,7 +131,7 @@ func ReadingExecutor(engine *agent.Engine, store Repository) ExecuteFunc {
 				Sources: result.Sources,
 			}, analyzeErr
 		}
-		return StageResult{Summary: result.Body, Sources: result.Sources}, nil
+		return StageResult{Summary: boundSummary(result.Body), Sources: result.Sources}, nil
 	}
 }
 

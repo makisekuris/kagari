@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -91,8 +92,9 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 		return err
 	}
 	adapter := telegram.Adapter(client.Send)
+	workspaceDirectory := filepath.Join(cfg.Storage.Path+".workspaces", storeID)
 	runtime := &personal.Runtime{
-		Store: s, Think: main.Think, Execute: personal.ReadingExecutor(engine, s), ReviewMemory: main.ReviewMemory,
+		Store: s, Think: main.Think, Execute: personal.TaskExecutor(engine, s, workspaceDirectory), ReviewMemory: main.ReviewMemory,
 		TaskConcurrency: cfg.Personal.TaskConcurrency, Poll: client.Poll, Log: log,
 		Prepare: func(text string) ([]string, error) { return adapter.Prepare(domain.Content{Text: text}) },
 		Send: func(ctx context.Context, text string) (int64, error) {

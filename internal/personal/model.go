@@ -145,7 +145,7 @@ func taskOutcomeRequiresNotification(input TurnInput) bool {
 	if input.CurrentRun != nil && input.CurrentRun.TaskID == input.Event.TaskID {
 		var result StageResult
 		if json.Unmarshal([]byte(input.CurrentRun.Result), &result) == nil {
-			if len(result.Sources) > 0 {
+			if len(result.Sources) > 0 || len(result.Files) > 0 {
 				return true
 			}
 		}
@@ -162,7 +162,11 @@ func boundedTurnInput(input TurnInput) TurnInput {
 		current := *input.CurrentRun
 		input.CurrentRun = &current
 		input.CurrentRun.Input = limitRunes(input.CurrentRun.Input, maxTaskRunes)
-		input.CurrentRun.Result = limitRunes(input.CurrentRun.Result, maxTaskRunes)
+		if input.CurrentRun.Kind == RunTask {
+			input.CurrentRun.Result = boundedTaskResult(input.CurrentRun.Result)
+		} else {
+			input.CurrentRun.Result = limitRunes(input.CurrentRun.Result, maxTaskRunes)
+		}
 		input.CurrentRun.Error = limitRunes(input.CurrentRun.Error, 800)
 	}
 	if len(input.History) > maxHistoryMessages {

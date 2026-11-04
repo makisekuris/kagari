@@ -13,6 +13,7 @@
 *.db-shm
 *.db-wal
 *.db-journal
+*.workspaces/
 *.log
 kagari-*.jsonl
 
