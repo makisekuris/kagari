@@ -20,28 +20,27 @@ import (
 
 // Exercise the actual provider adapter: Eino emits both graph and component
 // callbacks, so handler-only tests cannot detect duplicate request lifecycles.
-func TestAnalyzeV2CallbacksReplaceLegacyContentLogging(t *testing.T) {
+func TestTaskStageCallbacksHaveOneCorrelatedLifecycle(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests++
-		writeResponse(w, requests, responseAnalysis(domain.ResultKindAnalysis, "complete analysis body"))
+		writeResponse(w, requests, responseText("complete analysis body"))
 	}))
 	defer server.Close()
 
 	cfg := engineConfig(t, server.URL)
-	engine, err := New(context.Background(), cfg, nil, nil, nil)
+	engine, err := New(context.Background(), cfg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	engine.Log = zap.New(core)
-	engine.ObserveV2 = true
-	submission, err := engine.Prepare(domain.Submission{UserID: 1, Text: "full question"})
+	submission, err := engine.Prepare(domain.Submission{Text: "full question"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := logging.WithLogger(context.Background(), engine.Log.With(zap.Int64("event_id", 31), zap.Int64("task_id", 41), zap.Int64("run_id", 51), zap.Int64("revision", 2)))
-	result, err := engine.Analyze(ctx, submission)
+	result, err := engine.RunTaskStage(ctx, submission)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +49,7 @@ func TestAnalyzeV2CallbacksReplaceLegacyContentLogging(t *testing.T) {
 	}
 	entries := logs.All()
 	started, finished := findAgentEvent(t, entries, "model.started"), findAgentEvent(t, entries, "model.finished")
-	if started.ContextMap()["model_call_id"] != finished.ContextMap()["model_call_id"] || started.ContextMap()["phase"] != "analyze" {
+	if started.ContextMap()["model_call_id"] != finished.ContextMap()["model_call_id"] || started.ContextMap()["phase"] != "task_stage" {
 		t.Fatalf("model lifecycle correlation missing: start=%v finish=%v", started.ContextMap(), finished.ContextMap())
 	}
 	for key, expected := range map[string]int64{"event_id": 31, "task_id": 41, "run_id": 51, "revision": 2} {
@@ -59,45 +58,11 @@ func TestAnalyzeV2CallbacksReplaceLegacyContentLogging(t *testing.T) {
 		}
 	}
 	if findAgentEventOptional(entries, "agent message") != nil {
-		t.Fatal("V2 Analyze logged duplicate legacy model content")
+		t.Fatal("task stage logged duplicate model content")
 	}
 }
 
-func TestAnalyzeKeepsV1LegacyContentLoggingByDefault(t *testing.T) {
-	core, logs := observer.New(zapcore.DebugLevel)
-	var requests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		writeResponse(w, requests, responseAnalysis(domain.ResultKindAnalysis, "legacy analysis body"))
-	}))
-	defer server.Close()
-
-	cfg := engineConfig(t, server.URL)
-	engine, err := New(context.Background(), cfg, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine.Log = zap.New(core)
-	submission, err := engine.Prepare(domain.Submission{UserID: 1, Text: "legacy question"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := engine.Analyze(context.Background(), submission)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Body != "legacy analysis body" || requests != 1 {
-		t.Fatalf("result=%+v model_requests=%d", result, requests)
-	}
-	if findAgentEventOptional(logs.All(), "agent message") == nil {
-		t.Fatal("V1 Analyze lost its legacy model content log")
-	}
-	if findAgentEventOptional(logs.All(), "model.started") != nil {
-		t.Fatal("V1 Analyze unexpectedly enabled V2 callbacks")
-	}
-}
-
-func TestAnalyzeV2ProviderFailureHasOneCorrelatedLifecycle(t *testing.T) {
+func TestTaskStageProviderFailureHasOneCorrelatedLifecycle(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -109,18 +74,18 @@ func TestAnalyzeV2ProviderFailureHasOneCorrelatedLifecycle(t *testing.T) {
 	defer server.Close()
 
 	cfg := engineConfig(t, server.URL)
-	engine, err := New(context.Background(), cfg, nil, nil, nil)
+	engine, err := New(context.Background(), cfg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.Log, engine.ObserveV2 = zap.New(core), true
-	submission, err := engine.Prepare(domain.Submission{UserID: 1, Text: "fail once"})
+	engine.Log = zap.New(core)
+	submission, err := engine.Prepare(domain.Submission{Text: "fail once"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := logging.WithLogger(context.Background(), engine.Log.With(zap.Int64("event_id", 61)))
-	if _, err := engine.Analyze(ctx, submission); err == nil {
-		t.Fatal("Analyze unexpectedly succeeded")
+	if _, err := engine.RunTaskStage(ctx, submission); err == nil {
+		t.Fatal("RunTaskStage unexpectedly succeeded")
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("model requests=%d, want one", requests.Load())
@@ -139,13 +104,13 @@ func TestAnalyzeV2ProviderFailureHasOneCorrelatedLifecycle(t *testing.T) {
 	}
 }
 
-func TestAnalyzeV2StreamingUsesOneModelLifecycle(t *testing.T) {
+func TestTaskStageStreamingUsesOneModelLifecycle(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	var requests atomic.Int32
 	const body = "complete streamed response"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		output := responseAnalysis(domain.ResultKindAnalysis, body)
+		output := responseText(body)
 		response := map[string]any{"id": "resp_stream", "object": "response", "status": "completed", "model": "fixture", "output": output, "usage": map[string]any{"input_tokens": 4, "output_tokens": 3, "total_tokens": 7}}
 		text := output[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 		streamTextResponse(w, response, text)
@@ -154,17 +119,17 @@ func TestAnalyzeV2StreamingUsesOneModelLifecycle(t *testing.T) {
 
 	cfg := engineConfig(t, server.URL)
 	cfg.Agent.Streaming = true
-	engine, err := New(context.Background(), cfg, nil, nil, nil)
+	engine, err := New(context.Background(), cfg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.Log, engine.ObserveV2 = zap.New(core), true
-	submission, err := engine.Prepare(domain.Submission{UserID: 1, Text: "stream once"})
+	engine.Log = zap.New(core)
+	submission, err := engine.Prepare(domain.Submission{Text: "stream once"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := logging.WithLogger(context.Background(), engine.Log.With(zap.Int64("event_id", 62)))
-	result, err := engine.Analyze(ctx, submission)
+	result, err := engine.RunTaskStage(ctx, submission)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +146,7 @@ func TestAnalyzeV2StreamingUsesOneModelLifecycle(t *testing.T) {
 		t.Fatalf("full stream output or usage missing: fields=%v payload=%s", finishes[0].ContextMap(), payload)
 	}
 	if findAgentEventOptional(entries, "agent sse output") != nil || findAgentEventOptional(entries, "agent message") != nil {
-		t.Fatal("V2 streaming Analyze emitted duplicate legacy content logs")
+		t.Fatal("streaming task stage emitted duplicate content logs")
 	}
 }
 
@@ -215,10 +180,10 @@ func TestReadToolOutcomesUseSourceUsabilityAndKeepCachedToolOutput(t *testing.T)
 			writeResponse(w, call, responseTool("read_url", partialURL, "truncated-content"))
 		case 5:
 			assertReadToolOutput(t, request, "truncated-content", "incomplete", "usable excerpt", "", true)
-			writeResponse(w, call, responseAnalysis(domain.ResultKindAnalysis, "The source was unavailable; a partial excerpt was available."))
+			writeResponse(w, call, responseText("The source was unavailable; a partial excerpt was available."))
 		default:
 			t.Errorf("unexpected model request %d", call)
-			writeResponse(w, call, responseAnalysis(domain.ResultKindAnalysis, "unexpected"))
+			writeResponse(w, call, responseText("unexpected"))
 		}
 	}))
 	defer server.Close()
@@ -237,16 +202,16 @@ func TestReadToolOutcomesUseSourceUsabilityAndKeepCachedToolOutput(t *testing.T)
 		default:
 			return domain.Source{}, errors.New("unexpected URL")
 		}
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.Log, engine.ObserveV2 = zap.New(core), true
+	engine.Log = zap.New(core)
 	submission, err := engine.Prepare(domain.Submission{Text: "Read these pages"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := engine.Analyze(logging.WithLogger(context.Background(), engine.Log), submission)
+	result, err := engine.RunTaskStage(logging.WithLogger(context.Background(), engine.Log), submission)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +274,7 @@ func assertReadToolOutput(t *testing.T, request map[string]any, callID, status, 
 }
 
 // A provider SSE error must preserve prior output chunks in the real adapter callback.
-func TestAnalyzeV2StreamingErrorRetainsPartialOutput(t *testing.T) {
+func TestTaskStageStreamingErrorRetainsPartialOutput(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -321,16 +286,16 @@ func TestAnalyzeV2StreamingErrorRetainsPartialOutput(t *testing.T) {
 	defer server.Close()
 	cfg := engineConfig(t, server.URL)
 	cfg.Agent.Streaming = true
-	engine, err := New(context.Background(), cfg, nil, nil, nil)
+	engine, err := New(context.Background(), cfg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.Log, engine.ObserveV2 = zap.New(core), true
+	engine.Log = zap.New(core)
 	submission, err := engine.Prepare(domain.Submission{Text: "Stream this"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.Analyze(logging.WithLogger(context.Background(), engine.Log), submission); err == nil {
+	if _, err := engine.RunTaskStage(logging.WithLogger(context.Background(), engine.Log), submission); err == nil {
 		t.Fatal("streaming provider error was swallowed")
 	}
 	starts, failures := logs.FilterMessage("model.started").All(), logs.FilterMessage("model.failed").All()

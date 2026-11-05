@@ -11,7 +11,6 @@ storage:
 telegram:
   # Use KAGARI_TELEGRAM_TOKEN for the credential.
   allowed_user_ids: [] # Set exactly one positive Telegram user ID for personal mode.
-  target_chat_ids: [] # Must stay empty for `kagari run`; replies go to the owner's private chat.
 
 personal:
   channel: telegram # telegram or weixin; switching requires a restart.
@@ -19,8 +18,7 @@ personal:
   task_budget: 30m # Cumulative execution time per Task, including automatic planning; waiting is excluded.
 
 profile_path: profile.md
-log_level: info # V2 terminal level; file logs retain info+ and legacy CLI behavior is unchanged.
-max_attempts: 6 # Includes the first attempt; at most five retries.
+log_level: info # Terminal level; file logs retain info+.
 
 logging:
   directory: "" # Empty uses kagari.logs beside storage.path; full payloads are logged after known credentials are redacted.
@@ -33,7 +31,6 @@ reader:
   max_bytes: 4194304
   max_content_chars: 20000
   max_links: 40
-  cache_ttl: 24h
   allowed_non_public_cidrs: [] # e.g. [198.18.0.0/16] for a TUN fake-IP range.
 
 browser:
@@ -45,11 +42,4 @@ agent:
   max_sources: 6
   max_iterations: 10
   timeout: 3m
-  streaming: false # Enables Responses SSE for analysis and weekly digests; per-chunk SSE logs are disabled.
-
-weekly:
-  enabled: false # Legacy reading service setting; personal mode does not schedule digests.
-  timezone: Asia/Shanghai
-  weekday: 1 # 0=Sunday, 1=Monday, ..., 6=Saturday.
-  time: "09:00"
-  max_input_chars: 120000 # Serialized weekly input cap; oversized input fails without dropping entries.
+  streaming: false # Enables Responses SSE for task stages; per-chunk SSE logs are disabled.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -27,30 +26,26 @@ import (
 	"kagari/internal/reader"
 )
 
-const AnalysisVersion = "structured-output-v1"
-
 // Persona 只提供角色与语言风格；任务、证据要求和输出格式由 Agent 提示词规定。
 type Persona interface {
 	Prompt() string
 }
 
-// Engine 共享模型与读取能力；每次 Analyze 创建独立阅读会话，读取计数和来源不会跨任务共用。
+// Engine 共享模型与读取能力；每个任务阶段创建独立阅读会话，读取计数和来源不会跨阶段共用。
 type Engine struct {
 	Model                 model.AgenticModel
 	Config                config.Config
 	Profile               string
 	Read                  func(context.Context, string) (domain.Source, error)
-	CachedSource          func(context.Context, string) (*domain.Source, error)
 	OpenBrowser           func(context.Context) (func(context.Context, string) (domain.Source, error), func(), error)
 	AdditionalTools       []tool.BaseTool
 	AdditionalInstruction string
 	Log                   *zap.Logger
-	ObserveV2             bool
 	personaPrompt         string
 }
 
 // New 在构造时冻结人格文案；nil 表示不附加人格，默认角色由调用入口选择。
-func New(ctx context.Context, cfg config.Config, read func(context.Context, string) (domain.Source, error), cache func(context.Context, string) (*domain.Source, error), persona Persona) (*Engine, error) {
+func New(ctx context.Context, cfg config.Config, read func(context.Context, string) (domain.Source, error), persona Persona) (*Engine, error) {
 	if err := cfg.Validate(true, false); err != nil {
 		return nil, err
 	}
@@ -71,11 +66,10 @@ func New(ctx context.Context, cfg config.Config, read func(context.Context, stri
 	if persona != nil {
 		personaText = persona.Prompt()
 	}
-	return &Engine{Model: &normalizedResponsesModel{ResponsesModel: m}, Config: cfg, Profile: string(profile), Read: read, CachedSource: cache, personaPrompt: personaText}, nil
+	return &Engine{Model: &normalizedResponsesModel{ResponsesModel: m}, Config: cfg, Profile: string(profile), Read: read, personaPrompt: personaText}, nil
 }
 
-// Prepare 在入队前统一 URL 并生成分析缓存键。收录时间不进入键：
-// 重复提交可复用分析，但仍保留新收录的时间与任务，供各周期的周报筛选。
+// Prepare 在执行前验证任务输入并统一 URL。
 func (e *Engine) Prepare(s domain.Submission) (domain.Submission, error) {
 	if len([]rune(s.Text))+len([]rune(s.ForwardedText))+len([]rune(s.Note)) > 10<<20 {
 		return s, errors.New("submission exceeds the maximum character limit")
@@ -100,59 +94,18 @@ func (e *Engine) Prepare(s domain.Submission) (domain.Submission, error) {
 	if len(s.URLs) > e.Config.Agent.MaxSources {
 		return s, fmt.Errorf("submit no more than %d URLs", e.Config.Agent.MaxSources)
 	}
-	if s.ReceivedAt.IsZero() {
-		s.ReceivedAt = time.Now().UTC()
-	}
-	// 用户和偏好进入键，避免不同用户或不同评价背景共用同一份判断；密钥不进入归档键。
-	agentConfig := e.Config.Agent
-	agentConfig.Streaming = false // 流式传输方式不参与分析缓存键计算。
-	key, err := json.Marshal(struct {
-		User                int64
-		Text, ForwardedText string
-		Note                string
-		URLs                []string
-		Profile             string
-		Prompt              string
-		Model               config.Model
-		Agent               config.Agent
-		Reader              config.Reader
-		Browser             config.Browser
-		AnalysisVersion     string
-	}{
-		User: s.UserID, Text: s.Text, ForwardedText: s.ForwardedText, Note: s.Note, URLs: s.URLs, Profile: e.Profile,
-		Prompt: e.analysisPrompt(),
-		Model:  config.Model{BaseURL: e.Config.Model.BaseURL, Name: e.Config.Model.Name, MaxOutputTokens: e.Config.Model.MaxOutputTokens}, Agent: agentConfig, Reader: e.Config.Reader, Browser: e.Config.Browser,
-		AnalysisVersion: AnalysisVersion,
-	})
-	if err != nil {
-		return s, err
-	}
-	s.CacheKey = hash(string(key))
 	return s, nil
 }
 
 func hash(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
 
-// Analyze gives the typed agent the user's question and candidate URLs, then lets it
-// read submitted or discovered material as needed. Partial sources remain on error.
-func (e *Engine) Analyze(ctx context.Context, s domain.Submission) (result domain.Result, err error) {
-	return e.analyze(ctx, s, false)
-}
-
 // RunTaskStage executes one task stage and returns its direct text summary.
 func (e *Engine) RunTaskStage(ctx context.Context, s domain.Submission) (result domain.Result, err error) {
-	return e.analyze(ctx, s, true)
-}
-
-func (e *Engine) analyze(ctx context.Context, s domain.Submission, taskStage bool) (result domain.Result, err error) {
 	started := time.Now()
 	stage := "agent_setup"
 	modelCalled, usageReported := false, false
 	if e.Log != nil {
-		e.Log.Info("agent analyze started", zap.Int64("user_id", s.UserID), zap.Int("sources", len(s.URLs)), zap.Bool("streaming", e.Config.Agent.Streaming))
-	}
-	if !taskStage {
-		result.AnalysisVersion = AnalysisVersion
+		e.Log.Info("agent task stage started", zap.Int("sources", len(s.URLs)), zap.Bool("streaming", e.Config.Agent.Streaming))
 	}
 	ctx, cancel := context.WithTimeout(ctx, e.Config.Agent.Timeout)
 	defer cancel()
@@ -170,9 +123,9 @@ func (e *Engine) analyze(ctx context.Context, s domain.Submission, taskStage boo
 				zap.Int("pages_used", session.attempts), zap.Int("pages_limit", e.Config.Agent.MaxSources),
 				zap.Int("input_tokens", result.Usage.InputTokens), zap.Int("output_tokens", result.Usage.OutputTokens), zap.Int("total_tokens", result.Usage.TotalTokens)}
 			if err != nil {
-				e.Log.Warn("agent analyze failed", append(fields, logging.ErrorFields(err)...)...)
+				e.Log.Warn("agent task stage failed", append(fields, logging.ErrorFields(err)...)...)
 			} else {
-				e.Log.Info("agent analyze finished", fields...)
+				e.Log.Info("agent task stage finished", fields...)
 			}
 		}
 	}()
@@ -228,12 +181,8 @@ func (e *Engine) analyze(ctx context.Context, s domain.Submission, taskStage boo
 		tools = append(tools, browserTool)
 	}
 	tools = append(tools, e.AdditionalTools...)
-	instruction := e.analysisPrompt()
-	name, description := "reader", "回答用户问题并按需读取资料"
-	if taskStage {
-		instruction = e.taskPrompt()
-		name, description = "task_executor", "推进冻结目标的一个后台阶段并简要报告结果"
-	}
+	instruction := e.taskPrompt()
+	name, description := "task_executor", "推进冻结目标的一个后台阶段并简要报告结果"
 
 	a, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name: name, Description: description, Instruction: instruction, Model: e.Model, MaxIterations: e.Config.Agent.MaxIterations,
@@ -245,50 +194,28 @@ func (e *Engine) analyze(ctx context.Context, s domain.Submission, taskStage boo
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[*schema.AgenticMessage]{Agent: a, EnableStreaming: e.Config.Agent.Streaming})
 	stage = "model"
 	modelCalled = true
-	// Keep function calls available on endpoints that suppress tools under a text JSON Schema.
-	modelCtx := ctx
-	var modelCancel context.CancelFunc
-	var callbackOpts []adk.AgentRunOption
-	if e.ObserveV2 {
-		observer := logging.NewCallbackObserver("analyze")
-		modelCtx, modelCancel = context.WithCancel(ctx)
-		callbackOpts = append(callbackOpts, adk.WithCallbacks(observer))
-		defer func() {
-			if err != nil {
-				modelCancel()
-			}
-			observer.Wait()
+	observer := logging.NewCallbackObserver("task_stage")
+	modelCtx, modelCancel := context.WithCancel(ctx)
+	callbackOpts := []adk.AgentRunOption{adk.WithCallbacks(observer)}
+	defer func() {
+		if err != nil {
 			modelCancel()
-		}()
-	}
-	it := runner.Query(modelCtx, e.analysisInput(s, session.sources), callbackOpts...)
+		}
+		observer.Wait()
+		modelCancel()
+	}()
+	it := runner.Query(modelCtx, e.taskInput(s, session.sources), callbackOpts...)
 	var rawOutput string
 	rawOutput, result.Usage, usageReported, err = e.consumeEvents(it, e.Config.Agent.MaxIterations)
 	if err != nil {
 		return result, err
 	}
 	stage = "output_validation"
-	if taskStage {
-		if strings.TrimSpace(rawOutput) == "" {
-			return result, errors.New("task stage returned an empty response")
-		}
-		result.Kind, result.Body = domain.ResultKindAnalysis, rawOutput
-		return result, nil
+	if strings.TrimSpace(rawOutput) == "" {
+		return result, errors.New("task stage returned an empty response")
 	}
-	result.Kind, result.Body, err = decodeAnalysisOutput(rawOutput)
-	if err != nil {
-		return result, err
-	}
+	result.Body = rawOutput
 	return result, nil
-}
-
-// analysisPrompt participates in the cache key so prompt changes invalidate prior results.
-func (e *Engine) analysisPrompt() string {
-	base := prompt.GetPromptTemplate(e.personaPrompt)
-	if strings.TrimSpace(e.AdditionalInstruction) == "" {
-		return base
-	}
-	return base + "\n\n" + strings.TrimSpace(e.AdditionalInstruction)
 }
 
 func (e *Engine) taskPrompt() string {
@@ -299,7 +226,7 @@ func (e *Engine) taskPrompt() string {
 	return base + "\n\n" + strings.TrimSpace(e.AdditionalInstruction)
 }
 
-func (e *Engine) analysisInput(s domain.Submission, sources []domain.Source) string {
+func (e *Engine) taskInput(s domain.Submission, sources []domain.Source) string {
 	var b strings.Builder
 	writeSection := func(name, value string) {
 		fmt.Fprintf(&b, "## %s\n%s\n\n", name, empty(value))
@@ -340,9 +267,4 @@ func empty(value string) string {
 		return "（无）"
 	}
 	return value
-}
-
-// DigestPrompt 供周报冻结当前人格与任务要求；恢复时仍使用归档中的完整提示词。
-func (e *Engine) DigestPrompt() string {
-	return prompt.GetDigestPrompt(e.personaPrompt)
 }

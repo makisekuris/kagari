@@ -24,13 +24,8 @@ const (
 	readingEvidencePerSource = 1800
 )
 
-// ReadingExecutor runs one bounded analysis stage with attachment tools. It returns the
-// stage for review; it never decides that the task's goal is complete.
-func ReadingExecutor(engine *agent.Engine, store Repository) ExecuteFunc {
-	return readingExecutor(engine, store, false)
-}
-
-func readingExecutor(engine *agent.Engine, store Repository, taskStage bool) ExecuteFunc {
+// readingExecutor runs one bounded task stage with attachment tools.
+func readingExecutor(engine *agent.Engine, store Repository) ExecuteFunc {
 	return func(ctx context.Context, run Run, progress func(string) error) (StageResult, error) {
 		if engine == nil {
 			return StageResult{Summary: "Task stage could not start: reading engine is unavailable."}, errors.New("personal: reading engine is unavailable")
@@ -41,7 +36,6 @@ func readingExecutor(engine *agent.Engine, store Repository, taskStage bool) Exe
 		if run.Kind != RunTask {
 			return StageResult{Summary: "Task stage could not start: run is not a task run."}, fmt.Errorf("personal: reading executor cannot execute run kind %q", run.Kind)
 		}
-
 		input, err := decodeTaskInput(run.Input)
 		if err != nil {
 			return StageResult{Summary: "Task stage input could not be read."}, err
@@ -61,17 +55,13 @@ func readingExecutor(engine *agent.Engine, store Repository, taskStage bool) Exe
 			allowed[file.ID] = true
 		}
 		var created []channel.Attachment
-		var guard func(context.Context) error
-		if taskStage {
-			guard = func(toolCtx context.Context) error { return checkTaskRun(toolCtx, store, run) }
-		}
+		guard := func(toolCtx context.Context) error { return checkTaskRun(toolCtx, store, run) }
 		fileTools, err := attachmentTools(store, allowed, func(file channel.Attachment) { created = append(created, file) }, guard)
 		if err != nil {
 			return StageResult{}, err
 		}
 		stageEngine.AdditionalTools = append(append(stageEngine.AdditionalTools[:0:0], stageEngine.AdditionalTools...), fileTools...)
 		stageEngine.Log = logging.FromContext(ctx)
-		stageEngine.ObserveV2 = true
 		var progressMu sync.Mutex
 		var progressErr error
 		setProgressError := func(err error) {
@@ -127,13 +117,7 @@ func readingExecutor(engine *agent.Engine, store Repository, taskStage bool) Exe
 		if err != nil {
 			return StageResult{Summary: "Task stage could not prepare its reading request."}, err
 		}
-		var result domain.Result
-		var analyzeErr error
-		if taskStage {
-			result, analyzeErr = stageEngine.RunTaskStage(ctx, prepared)
-		} else {
-			result, analyzeErr = stageEngine.Analyze(ctx, prepared)
-		}
+		result, analyzeErr := stageEngine.RunTaskStage(ctx, prepared)
 		progressMu.Lock()
 		readProgressErr := progressErr
 		progressMu.Unlock()

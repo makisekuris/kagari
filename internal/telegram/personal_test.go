@@ -13,12 +13,26 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/go-telegram/bot/models"
 	"go.uber.org/zap"
 	"kagari/internal/channel"
 	"kagari/internal/config"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func apiResponse(req *http.Request, status int, payload string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(payload)),
+		Request:    req,
+	}
+}
 
 type channelInboxFixture struct {
 	mu        sync.Mutex
@@ -144,7 +158,7 @@ func TestNewPersonalRequiresSingleOwnerAndValidDependencies(t *testing.T) {
 		{name: "no owner", cfg: config.Telegram{Token: "123:fixture_secret"}},
 		{name: "multiple owners", cfg: config.Telegram{Token: "123:fixture_secret", AllowedUserIDs: []int64{7, 8}}},
 		{name: "nonpositive owner", cfg: config.Telegram{Token: "123:fixture_secret", AllowedUserIDs: []int64{0}}},
-		{name: "target chats", cfg: config.Telegram{Token: "123:fixture_secret", AllowedUserIDs: []int64{7}, TargetChatIDs: []int64{7}}},
+		{name: "invalid token", cfg: config.Telegram{Token: "123:fixture.secret", AllowedUserIDs: []int64{7}}},
 		{name: "no bot account", cfg: config.Telegram{Token: "not-a-bot:fixture_secret", AllowedUserIDs: []int64{7}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,6 +241,50 @@ func TestPersonalPollFiltersOwnerAndAdvancesCursorForEveryUpdate(t *testing.T) {
 	}
 	if len(inbox.accepts) != 5 || len(inbox.accepts[1]) != 0 || len(inbox.accepts[4]) != 0 {
 		t.Fatalf("accepted batches = %#v, want five cursor commits including filtered updates", inbox.accepts)
+	}
+}
+
+func TestPersonalPollRejectsUpdateWithoutPositiveIDBeforeCursorChange(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "missing id", payload: `{"ok":true,"result":[{"message":{"message_id":1}}]}`},
+		{name: "zero id", payload: `{"ok":true,"result":[{"update_id":0,"message":{"message_id":1}}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inbox := &channelInboxFixture{}
+			client := personalClient(t, inbox, newChannelFilesFixture(), roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return apiResponse(req, http.StatusOK, tc.payload), nil
+			}))
+			if err := client.Poll(context.Background()); err == nil {
+				t.Fatal("Poll() succeeded with an invalid update ID")
+			}
+			if cursor, err := inbox.Cursor(context.Background(), Channel, "123"); err != nil || cursor != "" {
+				t.Fatalf("cursor after invalid update = (%q, %v), want empty", cursor, err)
+			}
+		})
+	}
+}
+
+func TestUTF16SubstringUsesTelegramEntityOffsets(t *testing.T) {
+	text := "😀 https://example.com/a"
+	link := "https://example.com/a"
+	got, ok := utf16Substring(text, len(utf16.Encode([]rune("😀 "))), len(utf16.Encode([]rune(link))))
+	if !ok || got != link {
+		t.Fatalf("UTF-16 entity text = (%q, %v), want %q", got, ok, link)
+	}
+	if _, ok := utf16Substring("😀", 1, 1); ok {
+		t.Fatal("UTF-16 entity offset split a surrogate pair")
+	}
+}
+
+func TestRetryAfterPreservesLongDelays(t *testing.T) {
+	if got := retryAfter(3601); got != 3601*time.Second {
+		t.Fatalf("retryAfter(3601) = %s, want %s", got, 3601*time.Second)
+	}
+	if got := retryAfter(-1); got != 0 {
+		t.Fatalf("retryAfter(-1) = %s, want zero", got)
 	}
 }
 
@@ -488,7 +546,7 @@ func TestPersonalSendKeepsAuthWaitingAndUncertainSeparate(t *testing.T) {
 		waiting   bool
 		uncertain bool
 	}{
-		{name: "auth", status: http.StatusUnauthorized, response: `{"ok":false,"error_code":401}`, waiting: true},
+		{name: "auth", status: http.StatusUnauthorized, response: `{"ok":false,"error_code":401,"description":"bad token fixture_secret"}`, waiting: true},
 		{name: "known rejection", status: http.StatusBadRequest, response: `{"ok":false,"error_code":400}`},
 		{name: "uncertain transport", transport: errors.New("connection lost"), uncertain: true},
 	} {
@@ -505,6 +563,9 @@ func TestPersonalSendKeepsAuthWaitingAndUncertainSeparate(t *testing.T) {
 			var sendErr *channel.SendError
 			if !errors.As(err, &sendErr) || sendErr.Waiting != tc.waiting || sendErr.Uncertain != tc.uncertain || receipt != (channel.Receipt{Channel: Channel, Account: "123", Conversation: "7"}) {
 				t.Fatalf("Send() = (%+v, %#v), want target receipt, waiting=%v uncertain=%v", receipt, err, tc.waiting, tc.uncertain)
+			}
+			if strings.Contains(err.Error(), "fixture_secret") || strings.Contains(err.Error(), "bad token") {
+				t.Fatalf("unsafe error text leaked: %q", err)
 			}
 			if tc.waiting {
 				if err := client.Ready(context.Background()); err == nil {

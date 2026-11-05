@@ -19,6 +19,8 @@ import (
 	"kagari/internal/logging"
 )
 
+const Channel = "telegram"
+
 type PersonalClient struct {
 	token   string
 	account string
@@ -42,8 +44,8 @@ func NewPersonal(cfg config.Telegram, inbox channel.Inbox, files channel.Files, 
 // newPersonalClient is the package-private API fixture seam; NewPersonal uses api.telegram.org.
 func newPersonalClient(cfg config.Telegram, inbox channel.Inbox, files channel.Files, log *zap.Logger, baseURL string, transport http.RoundTripper) (*PersonalClient, error) {
 	account, err := botAccount(cfg.Token)
-	if !validToken(cfg.Token) || err != nil || len(cfg.AllowedUserIDs) != 1 || cfg.AllowedUserIDs[0] <= 0 || len(cfg.TargetChatIDs) != 0 || inbox == nil || files == nil {
-		return nil, errors.New("telegram personal mode requires a token, one positive owner ID, no target chats, an inbox, and file storage")
+	if !validToken(cfg.Token) || err != nil || len(cfg.AllowedUserIDs) != 1 || cfg.AllowedUserIDs[0] <= 0 || inbox == nil || files == nil {
+		return nil, errors.New("telegram personal mode requires a token, one positive owner ID, an inbox, and file storage")
 	}
 	if log == nil {
 		log = zap.NewNop()

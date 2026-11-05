@@ -13,11 +13,7 @@ import (
 
 func TestTaskReadsSelectedFileAndProducesCandidate(t *testing.T) {
 	ctx := context.Background()
-	s, err := NewStore(filepath.Join(t.TempDir(), "agent.db"), time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+	s := testStore(t, filepath.Join(t.TempDir(), "agent.db"), time.Minute)
 	file, err := s.SaveAttachment(ctx, "input.txt", "text/plain", strings.NewReader("source evidence"))
 	if err != nil {
 		t.Fatal(err)
@@ -25,9 +21,11 @@ func TestTaskReadsSelectedFileAndProducesCandidate(t *testing.T) {
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("read_attachment", map[string]string{"id": file.ID}, "read-file"),
 		responseTool("write_attachment", map[string]string{"name": "result.txt", "text": "processed evidence"}, "write-file"),
-		analysisResponse("Result is ready for review."),
+		responseText("Result is ready for review."),
 	}}
-	result, err := ReadingExecutor(readingEngine(fixture, nil), s)(ctx, executorRun(TaskInput{Goal: "Process the file", Attachments: []channel.Attachment{file}}), nil)
+	input := TaskInput{Goal: "Process the file", Attachments: []channel.Attachment{file}}
+	run := createRunningTask(t, s, "read-file", input)
+	result, err := TaskExecutor(readingEngine(fixture, nil), s, t.TempDir())(ctx, run, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,11 +58,7 @@ func TestTaskReadsSelectedFileAndProducesCandidate(t *testing.T) {
 
 func TestAttachmentToolsRejectUnselectedAndBinaryFiles(t *testing.T) {
 	ctx := context.Background()
-	s, err := NewStore(filepath.Join(t.TempDir(), "agent.db"), time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+	s := testStore(t, filepath.Join(t.TempDir(), "agent.db"), time.Minute)
 	file, err := s.SaveAttachment(ctx, "binary.bin", "application/octet-stream", strings.NewReader("a\x00b"))
 	if err != nil {
 		t.Fatal(err)
@@ -73,9 +67,10 @@ func TestAttachmentToolsRejectUnselectedAndBinaryFiles(t *testing.T) {
 		t.Fatal("binary accepted as text")
 	}
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
-		responseTool("read_attachment", map[string]string{"id": file.ID}, "read-file"), analysisResponse("Unavailable."),
+		responseTool("read_attachment", map[string]string{"id": file.ID}, "read-file"), responseText("Unavailable."),
 	}}
-	_, err = ReadingExecutor(readingEngine(fixture, nil), s)(ctx, executorRun(TaskInput{Goal: "Read selected material"}), nil)
+	run := createRunningTask(t, s, "unselected-file", TaskInput{Goal: "Read selected material"})
+	_, err = TaskExecutor(readingEngine(fixture, nil), s, t.TempDir())(ctx, run, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

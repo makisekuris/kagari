@@ -1,4 +1,4 @@
-package app
+package main
 
 import (
 	"fmt"
@@ -7,9 +7,8 @@ import (
 	"syscall"
 )
 
-// The service and CLI analysis share one durable queue. Only one processor may
-// recover or claim it at a time; inspection and explicit retries remain available.
-func Lock(path string) (func(), error) {
+// lockFile prevents concurrent service processes or credential updates for the same path.
+func lockFile(path string) (func(), error) {
 	if path == ":memory:" {
 		return func() {}, nil
 	}

@@ -25,7 +25,6 @@ func TestPersonalDefaultsAndOwnerBoundary(t *testing.T) {
 	}
 	for _, change := range []func(*Config){
 		func(c *Config) { c.Telegram.AllowedUserIDs = []int64{123, 456} },
-		func(c *Config) { c.Telegram.TargetChatIDs = []int64{123} },
 		func(c *Config) { c.Personal.TaskConcurrency = 0 },
 		func(c *Config) { c.Personal.TaskBudget = 0 },
 	} {

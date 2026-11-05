@@ -32,7 +32,7 @@ type readKey struct {
 	Backend string
 }
 
-// readingSession keeps per-task caching and read budgets local to one analysis.
+// readingSession keeps per-task caching and read budgets local to one task stage.
 type readingSession struct {
 	e        *Engine
 	sources  []domain.Source
@@ -91,19 +91,10 @@ func (s *readingSession) read(ctx context.Context, rawURL, backend string, read 
 	}
 	s.attempts++
 
-	if backend == httpBackend && s.e.CachedSource != nil && s.e.Config.Reader.CacheTTL > 0 {
-		cached, cacheErr := s.e.CachedSource(ctx, u)
-		if cacheErr == nil && cached != nil && cached.Status == "ok" && time.Since(cached.FetchedAt) < s.e.Config.Reader.CacheTTL {
-			src = *cached
-			cacheHit = true
-		}
-	}
-	if src.ID == "" {
-		if read == nil {
-			err = errors.New("reader is unavailable")
-		} else {
-			src, err = read(ctx, u)
-		}
+	if read == nil {
+		err = errors.New("reader is unavailable")
+	} else {
+		src, err = read(ctx, u)
 	}
 	if src.ID == "" {
 		src.ID = "s_" + hash(u + backend)[:16]

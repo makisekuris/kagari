@@ -37,18 +37,15 @@ func TestErrorFieldsAreUsefulAndDoNotExposeRawErrors(t *testing.T) {
 		{"json", &json.SyntaxError{Offset: 12}, "invalid JSON response"},
 		{"url", &url.Error{Op: "Get", URL: "https://user:pass@example.org/path?token=secret", Err: errors.New("fixture_secret_body")}, "URL request failed"},
 		{"unknown", errors.New("SSE error contains fixture_secret_body"), "operation failed"},
-		{"unreadable", errors.New(noReadableContent), "no readable content"},
 		{"incomplete", errors.New("model response incomplete"), "model response incomplete"},
 		{"empty", io.EOF, "empty model response"},
-		{"empty_analysis", errors.New("empty analysis output"), "empty analysis output"},
+		{"empty_stage", errors.New("task stage returned an empty response"), "task stage returned an empty response"},
 		{"page_budget", errors.New("page budget exhausted"), "page budget exhausted"},
 		{"unexpected_eof", fmt.Errorf("wrapped: %w", io.ErrUnexpectedEOF), "model stream ended unexpectedly"},
 		{"network_unexpected_eof", &net.OpError{Op: "read", Net: "tcp", Err: io.ErrUnexpectedEOF}, "model stream ended unexpectedly"},
 		{"response_failed", errors.New("model response failed"), "model response failed"},
 		{"response_refused", fmt.Errorf("wrapped: %w", errors.New("model response refused")), "model response refused"},
-		{"invalid_analysis", fmt.Errorf("wrapped: %w", errors.New("invalid analysis output")), "invalid analysis output"},
 		{"sse", fmt.Errorf("wrapped: %w", errors.New("received error event: code=fixture_secret_body message=secret")), "model stream reported an error"},
-		{"digest_limit", errors.New("digest input exceeds weekly.max_input_chars (120000)"), "digest input exceeds weekly.max_input_chars"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fields := ErrorFields(tc.err)

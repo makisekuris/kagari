@@ -44,21 +44,13 @@ func responseText(text string) []any {
 	return []any{map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text}}}}
 }
 
-func responseAnalysis(kind domain.ResultKind, body string) []any {
-	encoded, _ := json.Marshal(struct {
-		Kind domain.ResultKind `json:"kind"`
-		Body string            `json:"body"`
-	}{Kind: kind, Body: body})
-	return responseText(string(encoded))
-}
-
-func requireAnalysisToolMode(t *testing.T, request map[string]any) {
+func requireTaskToolMode(t *testing.T, request map[string]any) {
 	t.Helper()
 	textConfig, _ := request["text"].(map[string]any)
 	format, _ := textConfig["format"].(map[string]any)
 	tools, _ := request["tools"].([]any)
 	if format["type"] == "json_schema" || len(tools) == 0 {
-		t.Errorf("analysis must expose tools without forcing final JSON format: tools=%d format=%v", len(tools), format["type"])
+		t.Errorf("task agent must expose tools without forcing JSON output: tools=%d format=%v", len(tools), format["type"])
 	}
 }
 
@@ -90,7 +82,7 @@ func streamTextResponse(w http.ResponseWriter, response map[string]any, text str
 	sendResponseEvent(w, "response.completed", map[string]any{"response": response})
 }
 
-func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T) {
+func TestTaskAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T) {
 	const aURL = "https://example.org/a"
 	const bURL = "https://example.org/b"
 	const cURL = "https://example.org/c"
@@ -104,7 +96,7 @@ func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T
 		}
 		serialized, _ := json.Marshal(body)
 		requests = append(requests, string(serialized))
-		requireAnalysisToolMode(t, body)
+		requireTaskToolMode(t, body)
 		call := int(calls.Add(1))
 		if call > 1 {
 			input, _ := json.Marshal(body["input"])
@@ -128,10 +120,10 @@ func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T
 			}
 			writeResponse(w, call, responseTool("read_url", cURL, "read-c"))
 		case 4:
-			writeResponse(w, call, responseAnalysis(domain.ResultKindAnalysis, "## Answer\nB and C confirm the result."))
+			writeResponse(w, call, responseText("## Answer\nB and C confirm the result."))
 		default:
 			t.Errorf("unexpected model call %d", call)
-			writeResponse(w, call, responseAnalysis(domain.ResultKindAnalysis, "unexpected"))
+			writeResponse(w, call, responseText("unexpected"))
 		}
 	}))
 	defer server.Close()
@@ -154,7 +146,7 @@ func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T
 		default:
 			return domain.Source{}, errors.New("unexpected URL")
 		}
-	}, nil, testPersona("persona fixture"))
+	}, testPersona("persona fixture"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,17 +155,17 @@ func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := engine.Analyze(context.Background(), submission)
+	result, err := engine.RunTaskStage(context.Background(), submission)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if calls.Load() != 4 || readCalls != 3 {
 		t.Fatalf("calls=%d reads=%d", calls.Load(), readCalls)
 	}
-	if result.Kind != domain.ResultKindAnalysis || result.Body != "## Answer\nB and C confirm the result." {
-		t.Fatalf("kind=%q body=%q", result.Kind, result.Body)
+	if result.Body != "## Answer\nB and C confirm the result." {
+		t.Fatalf("body=%q", result.Body)
 	}
-	if !result.UsageReported || result.Usage.TotalTokens != 72 || result.AnalysisVersion != AnalysisVersion {
+	if !result.UsageReported || result.Usage.TotalTokens != 72 {
 		t.Fatalf("metadata=%+v", result)
 	}
 	if len(result.Sources) != 4 || result.Sources[1].Status != "restricted" || len(result.Readings) != 3 {
@@ -193,56 +185,53 @@ func TestResponsesAgentFollowsFailedReadWithOtherSourcesAndMarkdown(t *testing.T
 	}
 }
 
-func TestAnalyzeStructuredOutputStreamingAndNonStreaming(t *testing.T) {
+func TestTaskStageStreamingAndNonStreaming(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
-		for _, kind := range []domain.ResultKind{domain.ResultKindAnalysis, domain.ResultKindChat} {
-			t.Run(fmt.Sprintf("streaming=%t/%s", streaming, kind), func(t *testing.T) {
-				const bodyText = "  exact body\n"
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var request map[string]any
-					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-						t.Error(err)
-						return
-					}
-					if (request["stream"] == true) != streaming {
-						t.Errorf("stream=%v, want %t", request["stream"], streaming)
-					}
-					requireAnalysisToolMode(t, request)
-					output := responseAnalysis(kind, bodyText)
-					response := map[string]any{"id": "resp", "object": "response", "status": "completed", "model": "fixture", "output": output, "usage": map[string]any{"input_tokens": 4, "output_tokens": 3, "total_tokens": 7}}
-					if !streaming {
-						w.Header().Set("Content-Type", "application/json")
-						_ = json.NewEncoder(w).Encode(response)
-						return
-					}
-					text := output[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-					streamTextResponse(w, response, text)
-				}))
-				defer server.Close()
+		t.Run(fmt.Sprintf("streaming=%t", streaming), func(t *testing.T) {
+			const bodyText = "  exact body\n"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					return
+				}
+				if (request["stream"] == true) != streaming {
+					t.Errorf("stream=%v, want %t", request["stream"], streaming)
+				}
+				requireTaskToolMode(t, request)
+				output := responseText(bodyText)
+				response := map[string]any{"id": "resp", "object": "response", "status": "completed", "model": "fixture", "output": output, "usage": map[string]any{"input_tokens": 4, "output_tokens": 3, "total_tokens": 7}}
+				if !streaming {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(response)
+					return
+				}
+				streamTextResponse(w, response, bodyText)
+			}))
+			defer server.Close()
 
-				cfg := engineConfig(t, server.URL)
-				cfg.Agent.Streaming = streaming
-				engine, err := New(context.Background(), cfg, nil, nil, nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				submission, err := engine.Prepare(domain.Submission{Text: "Question"})
-				if err != nil {
-					t.Fatal(err)
-				}
-				result, err := engine.Analyze(context.Background(), submission)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if result.Kind != kind || result.Body != bodyText || result.Usage.TotalTokens != 7 {
-					t.Fatalf("kind=%q body=%q usage=%+v", result.Kind, result.Body, result.Usage)
-				}
-			})
-		}
+			cfg := engineConfig(t, server.URL)
+			cfg.Agent.Streaming = streaming
+			engine, err := New(context.Background(), cfg, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			submission, err := engine.Prepare(domain.Submission{Text: "Question"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := engine.RunTaskStage(context.Background(), submission)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Body != bodyText || result.Usage.TotalTokens != 7 {
+				t.Fatalf("body=%q usage=%+v", result.Body, result.Usage)
+			}
+		})
 	}
 }
 
-func TestAnalyzeStreamingToolRoundTripUsesStructuredOutput(t *testing.T) {
+func TestTaskStageStreamingToolRoundTrip(t *testing.T) {
 	const target = "https://example.org/source"
 	const bodyText = "## Evidence\nThe source supports the claim."
 	args, _ := json.Marshal(readRequest{URL: target})
@@ -253,7 +242,7 @@ func TestAnalyzeStreamingToolRoundTripUsesStructuredOutput(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		requireAnalysisToolMode(t, request)
+		requireTaskToolMode(t, request)
 		if request["stream"] != true {
 			t.Errorf("stream=%v, want true", request["stream"])
 		}
@@ -273,7 +262,7 @@ func TestAnalyzeStreamingToolRoundTripUsesStructuredOutput(t *testing.T) {
 		if !strings.Contains(string(input), `"call_id":"read_1"`) || !strings.Contains(string(input), "function_call_output") {
 			t.Errorf("tool result lost call ID or output: %s", input)
 		}
-		output := responseAnalysis(domain.ResultKindAnalysis, bodyText)
+		output := responseText(bodyText)
 		text := output[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 		response := map[string]any{"id": "resp_2", "object": "response", "status": "completed", "model": "fixture", "output": output, "usage": map[string]any{"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}}
 		streamTextResponse(w, response, text)
@@ -283,7 +272,7 @@ func TestAnalyzeStreamingToolRoundTripUsesStructuredOutput(t *testing.T) {
 	cfg.Agent.Streaming = true
 	engine, err := New(context.Background(), cfg, func(_ context.Context, url string) (domain.Source, error) {
 		return domain.Source{ID: "source", URL: url, RequestedURL: url, Status: "ok", Content: "source content"}, nil
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,16 +280,16 @@ func TestAnalyzeStreamingToolRoundTripUsesStructuredOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := engine.Analyze(context.Background(), submission)
+	result, err := engine.RunTaskStage(context.Background(), submission)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls.Load() != 2 || result.Kind != domain.ResultKindAnalysis || result.Body != bodyText || len(result.Readings) != 1 || result.Usage.TotalTokens != 36 {
+	if calls.Load() != 2 || result.Body != bodyText || len(result.Readings) != 1 || result.Usage.TotalTokens != 36 {
 		t.Fatalf("calls=%d result=%+v", calls.Load(), result)
 	}
 }
 
-func TestAnalyzeRefusalKeepsReadingsAndUsageWithoutPublishingRawOutput(t *testing.T) {
+func TestTaskStageRefusalKeepsReadingsAndUsageWithoutPublishingRawOutput(t *testing.T) {
 	const target = "https://example.org/source"
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -309,7 +298,7 @@ func TestAnalyzeRefusalKeepsReadingsAndUsageWithoutPublishingRawOutput(t *testin
 			t.Error(err)
 			return
 		}
-		requireAnalysisToolMode(t, request)
+		requireTaskToolMode(t, request)
 		if calls.Add(1) == 1 {
 			writeResponse(w, 1, responseTool("read_url", target, "read-source"))
 			return
@@ -319,7 +308,7 @@ func TestAnalyzeRefusalKeepsReadingsAndUsageWithoutPublishingRawOutput(t *testin
 	defer server.Close()
 	engine, err := New(context.Background(), engineConfig(t, server.URL), func(_ context.Context, url string) (domain.Source, error) {
 		return domain.Source{ID: "source", URL: url, RequestedURL: url, Status: "ok", Content: "source content"}, nil
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,11 +316,11 @@ func TestAnalyzeRefusalKeepsReadingsAndUsageWithoutPublishingRawOutput(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := engine.Analyze(context.Background(), submission)
+	result, err := engine.RunTaskStage(context.Background(), submission)
 	if err != errModelResponseRefused {
 		t.Fatalf("error=%v", err)
 	}
-	if result.Kind != "" || result.Body != "" || len(result.Readings) != 1 || result.Usage.TotalTokens != 36 || !result.UsageReported {
+	if result.Body != "" || len(result.Readings) != 1 || result.Usage.TotalTokens != 36 || !result.UsageReported {
 		t.Fatalf("refusal result lost metadata or exposed output: %+v", result)
 	}
 	if strings.Contains(err.Error(), "upstream private refusal reason") {
@@ -339,7 +328,7 @@ func TestAnalyzeRefusalKeepsReadingsAndUsageWithoutPublishingRawOutput(t *testin
 	}
 }
 
-func TestAnalyzeRejectsIncompleteResponseWithParseableJSON(t *testing.T) {
+func TestTaskStageRejectsIncompleteResponseWithOutput(t *testing.T) {
 	for _, tc := range []struct{ status, wantError string }{
 		{status: "failed", wantError: "model response failed"},
 		{status: "incomplete", wantError: "model response incomplete"},
@@ -353,11 +342,11 @@ func TestAnalyzeRejectsIncompleteResponseWithParseableJSON(t *testing.T) {
 					t.Error(err)
 					return
 				}
-				requireAnalysisToolMode(t, request)
-				writeResponseWithStatus(w, tc.status, responseAnalysis(domain.ResultKindAnalysis, "parseable final JSON"))
+				requireTaskToolMode(t, request)
+				writeResponseWithStatus(w, tc.status, responseText("parseable final JSON"))
 			}))
 			defer server.Close()
-			engine, err := New(context.Background(), engineConfig(t, server.URL), nil, nil, nil)
+			engine, err := New(context.Background(), engineConfig(t, server.URL), nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -365,11 +354,11 @@ func TestAnalyzeRejectsIncompleteResponseWithParseableJSON(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := engine.Analyze(context.Background(), submission)
+			result, err := engine.RunTaskStage(context.Background(), submission)
 			if err == nil || err.Error() != tc.wantError {
 				t.Fatalf("error=%v", err)
 			}
-			if result.Kind != "" || result.Body != "" || result.Usage.TotalTokens != 18 || !result.UsageReported {
+			if result.Body != "" || result.Usage.TotalTokens != 18 || !result.UsageReported {
 				t.Fatalf("incomplete result lost metadata or exposed output: %+v", result)
 			}
 		})
@@ -400,10 +389,10 @@ func TestBrowserIsOpenedLazilyAndCanRetrySameURLWithHTTP(t *testing.T) {
 		case 2:
 			writeResponse(w, 2, responseTool("read_url", target, "http"))
 		case 3:
-			writeResponse(w, 3, responseAnalysis(domain.ResultKindChat, "The browser was unavailable; HTTP supplied the page."))
+			writeResponse(w, 3, responseText("The browser was unavailable; HTTP supplied the page."))
 		default:
 			t.Errorf("unexpected request")
-			writeResponse(w, 4, responseAnalysis(domain.ResultKindAnalysis, "unexpected"))
+			writeResponse(w, 4, responseText("unexpected"))
 		}
 	}))
 	defer server.Close()
@@ -411,7 +400,7 @@ func TestBrowserIsOpenedLazilyAndCanRetrySameURLWithHTTP(t *testing.T) {
 	cfg.Agent.MaxSources = 2
 	engine, err := New(context.Background(), cfg, func(_ context.Context, u string) (domain.Source, error) {
 		return domain.Source{ID: "http-page", URL: u, RequestedURL: u, Status: "ok", Content: "read with HTTP"}, nil
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,14 +413,14 @@ func TestBrowserIsOpenedLazilyAndCanRetrySameURLWithHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := engine.Analyze(context.Background(), submission)
+	result, err := engine.RunTaskStage(context.Background(), submission)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if opened != 1 || calls.Load() != 3 {
 		t.Fatalf("browser opens=%d model calls=%d", opened, calls.Load())
 	}
-	if result.Kind != domain.ResultKindChat || result.Body == "" || len(result.Readings) != 2 || result.Readings[0].Backend != browserBackend || result.Readings[1].Backend != httpBackend {
+	if result.Body == "" || len(result.Readings) != 2 || result.Readings[0].Backend != browserBackend || result.Readings[1].Backend != httpBackend {
 		t.Fatalf("same-URL retry was not recorded: %+v", result)
 	}
 	if len(result.Sources) != 2 || result.Sources[0].Status != "failed" || !result.Sources[1].Usable() {
@@ -439,37 +428,26 @@ func TestBrowserIsOpenedLazilyAndCanRetrySameURLWithHTTP(t *testing.T) {
 	}
 }
 
-func TestPrepareAllowsTextOnlyAndKeepsCacheIdentityScoped(t *testing.T) {
-	engine := &Engine{Config: config.Config{Agent: config.Agent{MaxSources: 4}}}
+func TestPrepareValidatesAndNormalizesURLs(t *testing.T) {
+	engine := &Engine{Config: config.Config{Agent: config.Agent{MaxSources: 2}}}
 	if _, err := engine.Prepare(domain.Submission{}); err == nil {
 		t.Fatal("empty submission was accepted")
 	}
-	sub := domain.Submission{UserID: 1, Text: "Question", ReceivedAt: time.Now()}
-	first, err := engine.Prepare(sub)
+	prepared, err := engine.Prepare(domain.Submission{Text: "Question", URLs: []string{
+		"HTTPS://EXAMPLE.COM/path#fragment", "https://example.com/path", "https://example.net/guide",
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub.ReceivedAt = sub.ReceivedAt.Add(time.Hour)
-	same, err := engine.Prepare(sub)
-	if err != nil || first.CacheKey != same.CacheKey {
-		t.Fatalf("receipt time changed cache key: %v", err)
+	if len(prepared.URLs) != 2 || prepared.URLs[0] != "https://example.com/path" || prepared.URLs[1] != "https://example.net/guide" {
+		t.Fatalf("URLs were not normalized and deduplicated: %v", prepared.URLs)
 	}
-	sub.UserID = 2
-	other, _ := engine.Prepare(sub)
-	if first.CacheKey == other.CacheKey {
-		t.Fatal("cross-user cache identity reused")
+	if _, err := engine.Prepare(domain.Submission{Text: "Question", URLs: []string{"javascript:alert(1)"}}); err == nil {
+		t.Fatal("non-HTTP URL was accepted")
 	}
-	sub.UserID = 1
-	sub.Note = "different preference"
-	other, _ = engine.Prepare(sub)
-	if first.CacheKey == other.CacheKey {
-		t.Fatal("different user guidance reused cache identity")
-	}
-	sub.Note = ""
-	engine.Config.Browser.Enabled = true
-	other, _ = engine.Prepare(sub)
-	if first.CacheKey == other.CacheKey {
-		t.Fatal("browser configuration did not change cache identity")
+	engine.Config.Agent.MaxSources = 1
+	if _, err := engine.Prepare(domain.Submission{Text: "Question", URLs: []string{"https://example.com/a", "https://example.com/b"}}); err == nil {
+		t.Fatal("URL limit was not enforced")
 	}
 }
 
@@ -477,7 +455,7 @@ type mutablePersona struct{ text string }
 
 func (p *mutablePersona) Prompt() string { return p.text }
 
-func TestPersonaIsFrozenAndChangesCacheIdentity(t *testing.T) {
+func TestPersonaIsFrozenAtEngineConstruction(t *testing.T) {
 	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatal(err)
@@ -485,42 +463,29 @@ func TestPersonaIsFrozenAndChangesCacheIdentity(t *testing.T) {
 	cfg.Model.BaseURL, cfg.Model.APIKey, cfg.Model.Name = "https://model.test/v1", "test", "test"
 	cfg.ProfilePath = t.TempDir() + "/missing"
 	role := &mutablePersona{text: "first-persona"}
-	first, err := New(context.Background(), cfg, nil, nil, role)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sub := domain.Submission{UserID: 7, Text: "question"}
-	before, err := first.Prepare(sub)
+	first, err := New(context.Background(), cfg, nil, role)
 	if err != nil {
 		t.Fatal(err)
 	}
 	role.text = "second-persona"
-	after, err := first.Prepare(sub)
+	if !strings.Contains(first.taskPrompt(), "first-persona") || strings.Contains(first.taskPrompt(), "second-persona") {
+		t.Fatal("a mutable persona changed the running engine's frozen prompt")
+	}
+	second, err := New(context.Background(), cfg, nil, role)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.CacheKey != after.CacheKey || !strings.Contains(first.DigestPrompt(), "first-persona") {
-		t.Fatal("a mutable persona changed the running engine's frozen prompts")
-	}
-	second, err := New(context.Background(), cfg, nil, nil, role)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changed, err := second.Prepare(sub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changed.CacheKey == before.CacheKey || !strings.Contains(second.DigestPrompt(), "second-persona") {
-		t.Fatal("replacing persona did not change prompts and cache identity")
+	if !strings.Contains(second.taskPrompt(), "second-persona") {
+		t.Fatal("new engine did not use the replacement persona")
 	}
 }
 
-func TestBlankStructuredBodyFailsSafely(t *testing.T) {
+func TestBlankTaskStageResponseFailsSafely(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeResponse(w, 1, responseAnalysis(domain.ResultKindAnalysis, "  \n "))
+		writeResponse(w, 1, responseText("  \n "))
 	}))
 	defer server.Close()
-	engine, err := New(context.Background(), engineConfig(t, server.URL), nil, nil, nil)
+	engine, err := New(context.Background(), engineConfig(t, server.URL), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,11 +493,11 @@ func TestBlankStructuredBodyFailsSafely(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := engine.Analyze(context.Background(), submission)
-	if err == nil || err != errInvalidAnalysisOutput {
+	result, err := engine.RunTaskStage(context.Background(), submission)
+	if err == nil || err.Error() != "task stage returned an empty response" {
 		t.Fatalf("empty answer error=%v", err)
 	}
-	if result.Kind != "" || result.Body != "" || result.Usage.TotalTokens != 18 || !result.UsageReported {
-		t.Fatalf("invalid output lost usage or exposed raw JSON: %+v", result)
+	if result.Body != "" || result.Usage.TotalTokens != 18 || !result.UsageReported {
+		t.Fatalf("empty output lost usage: %+v", result)
 	}
 }

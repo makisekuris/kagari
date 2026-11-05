@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/skip2/go-qrcode"
-	"kagari/internal/app"
 	"kagari/internal/config"
 	"kagari/internal/personal"
 	"kagari/internal/weixin"
@@ -46,7 +45,7 @@ func runChannelCommand(ctx context.Context, cfg config.Config, args []string, in
 		return json.NewEncoder(out).Encode(status)
 	}
 	if args[0] == "weixin" && args[1] == "rebind" {
-		unlock, err := app.Lock(cfg.Storage.Path)
+		unlock, err := lockFile(cfg.Storage.Path)
 		if err != nil {
 			return fmt.Errorf("换绑前请停止使用该数据库的服务: %w", err)
 		}
@@ -87,7 +86,7 @@ func runChannelCommand(ctx context.Context, cfg config.Config, args []string, in
 	if flags.NArg() != 0 {
 		return errors.New("unexpected login argument")
 	}
-	unlockLogin, err := app.Lock(credentialPath(cfg))
+	unlockLogin, err := lockFile(credentialPath(cfg))
 	if err != nil {
 		return fmt.Errorf("另一个微信登录流程正在运行: %w", err)
 	}

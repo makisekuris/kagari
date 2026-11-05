@@ -70,7 +70,7 @@ func TestLiveLinkExploration(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			e, err := New(ctx, cfg, read, nil, persona.Default())
+			e, err := New(ctx, cfg, read, persona.Default())
 			if err != nil {
 				t.Fatal(logging.ErrorReason(err))
 			}
@@ -82,7 +82,7 @@ func TestLiveLinkExploration(t *testing.T) {
 				if prepareErr != nil {
 					t.Fatal(prepareErr)
 				}
-				result, runErr := e.Analyze(ctx, s)
+				result, runErr := e.RunTaskStage(ctx, s)
 				err = runErr
 				usage = result.Usage
 				output = result.Body
@@ -276,7 +276,7 @@ func TestLiveAgentUsesBrowserAfterHTTPInsufficient(t *testing.T) {
 	r := reader.New(reader.Options{Timeout: cfg.Reader.Timeout, MaxBytes: cfg.Reader.MaxBytes, MaxContentChars: cfg.Reader.MaxContentChars, MaxLinks: cfg.Reader.MaxLinks, AllowedNonPublicCIDRs: cfg.Reader.AllowedNonPublicCIDRs})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	e, err := New(ctx, cfg, r.Read, nil, persona.Default())
+	e, err := New(ctx, cfg, r.Read, persona.Default())
 	if err != nil {
 		t.Fatal(logging.ErrorReason(err))
 	}
@@ -287,7 +287,7 @@ func TestLiveAgentUsesBrowserAfterHTTPInsufficient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := e.Analyze(ctx, s)
+	result, err := e.RunTaskStage(ctx, s)
 	usedBrowser, readEvidence := false, false
 	for _, reading := range result.Readings {
 		if reading.Backend == "browser" {

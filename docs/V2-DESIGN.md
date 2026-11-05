@@ -6,9 +6,9 @@
 
 ## 1. 服务入口
 
-`kagari run` 启动 V2 personal 服务：当前渠道收件、主对话、后台 Task、记忆维护与消息投递在同一进程中运行。进程持有数据库锁；不启动 V1 阅读任务队列或 weekly 定时调度。
+`kagari run` 启动 V2 personal 服务：当前渠道收件、主对话、后台 Task、记忆维护与消息投递在同一进程中运行。进程持有数据库锁。
 
-`personal.channel` 选择 `telegram`（默认）或 `weixin`。Telegram 要求 `telegram.allowed_user_ids` 恰好包含一个正数、`telegram.target_chat_ids` 为空；微信使用 `weixin login` 扫码绑定。服务只接收绑定使用者的私聊。文字回复按 UTF-8 字符边界切成每段最多 2,000 字节，普通附件单文件收发上限为 20,000,000 字节。登录、切换渠道和文件操作见 [渠道设计](CHANNEL-DESIGN.md)。
+`personal.channel` 选择 `telegram`（默认）或 `weixin`。Telegram 要求 `telegram.allowed_user_ids` 恰好包含一个正数；微信使用 `weixin login` 扫码绑定。服务只接收绑定使用者的私聊。文字回复按 UTF-8 字符边界切成每段最多 2,000 字节，普通附件单文件收发上限为 20,000,000 字节。登录、切换渠道和文件操作见 [渠道设计](CHANNEL-DESIGN.md)。
 
 | Worker | 默认并发 | 用途 |
 | --- | ---: | --- |
@@ -25,7 +25,7 @@
 
 Task 的阶段结果包含摘要、来源、本次成功写入或修改的文件相对路径（`files`）和生成的不可变附件（`attachments`）。Store 在保存阶段结果时更新 Task 状态：成功进入 `awaiting_review`，失败进入 `failed`；如果累计执行时间已达到上限，则优先进入 `waiting_budget`。下一阶段沿用原目标和已保存成果，不恢复上次模型调用的执行位置。
 
-Task 执行器返回文字摘要，程序记录成功写入或修改的文件路径。V1 阅读接口仍使用 `kind/body` JSON 输出。执行器将阶段摘要限制在 12,000 个字符以内，超出时在末尾加省略号；字符按 Unicode 码点计数，文件正文不受这项限制影响。模型调用报错、返回拒绝或未完成响应、摘要为空时，阶段均记为失败，已经保存的文件仍会保留。
+Task 执行器返回文字摘要，程序记录成功写入或修改的文件路径。执行器将阶段摘要限制在 12,000 个字符以内，超出时在末尾加省略号；字符按 Unicode 码点计数，文件正文不受这项限制影响。模型调用报错、返回拒绝或未完成响应、摘要为空时，阶段均记为失败，已经保存的文件仍会保留。
 
 Task 状态包括 `queued`、`running`、`awaiting_review`、`waiting_input`、`waiting_budget`、`completed`、`failed` 和 `cancelled`。Run 状态包括 `queued`、`running`、`completed`、`failed` 和 `cancelled`。等待使用者的 Task 不占执行槽。
 
@@ -83,11 +83,11 @@ Run 的 `files` 字段列出本次成功写入或修改的文件相对路径，�
 
 中断的主对话回合不重新调用模型执行工具，避免模型换一种措辞后重复建任务。已经提交的操作保留；用户消息得到中断说明，未提交的部分需要重新提出。任务回调若已安排续跑，就释放原有后续 Run；若还没决定下一步，则保留阶段成果并等待用户继续。渠道绑定与配置或微信凭证不一致时，服务拒绝启动；更换微信使用者需先停止服务再显式执行 `weixin rebind`。
 
-当前 V2 schema 不支持旧 V2 personal 数据库，也不迁移其中的数据。使用者需为当前版本指定新的 `storage.path`；服务不会自动删除旧数据库。V1 表仍由旧 CLI 单独读取，不迁移为 personal Task。
+当前 V2 schema 不支持旧 V2 personal 数据库，也不迁移其中的数据。使用者需为当前版本指定新的 `storage.path`；服务不会自动删除旧数据库。V1 代码与 CLI 已移除，旧表不会自动删除或迁移为 personal Task。
 
 若进程在发送期间退出，该 outbox 项恢复为 `uncertain`，不会自动重发，以免重复发送；已确认的回执保留。可确认未送达的失败最多尝试三次，包含首次尝试。发送结果未知时需要使用者判断是否重发。
 
-V2 不把 V1 的 `jobs`、归档、周报快照或 Telegram offset 导入 personal Task。旧表可留在同一 SQLite 文件中，旧 CLI 仍读取旧表；V1 `status` 等编号不能代替 V2 `tasks`/`runs` 编号。
+V2 不把 V1 的 `jobs`、归档、周报快照或 Telegram offset 导入 personal Task。旧表可留在同一 SQLite 文件中；本次清理不改变当前 personal schema。
 
 ## 5. 启动与使用
 
@@ -99,7 +99,6 @@ storage:
 
 telegram:
   allowed_user_ids: [123456789]
-  target_chat_ids: []
 
 personal:
   channel: telegram
@@ -130,7 +129,7 @@ make run CONFIG=config.yaml
 ./bin/kagari -config config.yaml trace --task 1 --full
 ```
 
-`tasks` 可列出最近任务或查看一个 Task；`runs` 列出该 Task 的执行；`memories` 按键或值搜索当前生效的记忆；`memory-history` 查看指定键的变更，省略键时查看最近变更。旧的 `read`、`analyze`、`digest`、`status`、`export`、`retry`、`retry-delivery` 和 `db` CLI 仍用于 V1 阅读归档工作，不属于 V2 personal Task 管理入口。
+`tasks` 可列出最近任务或查看一个 Task；`runs` 列出该 Task 的执行；`memories` 按键或值搜索当前生效的记忆；`memory-history` 查看指定键的变更，省略键时查看最近变更。旧的阅读归档 CLI 已移除，配置更新见 [README](../README.md#从旧版本更新--updating-from-older-versions)。
 
 `events` 列出近期事件及状态；`trace` 按事件或 Task 关联主对话、模型、工具、后台执行、记忆维护和投递日志，并附当前数据库快照。默认只显示元数据，`--full` 显示脱敏后的正文。V2 服务自动保存日志并输出终端摘要，配置与失败语义见[观测性说明](V2-OBSERVABILITY.md)。
 

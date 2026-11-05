@@ -51,7 +51,7 @@ func TaskExecutor(engine *agent.Engine, store Repository, directory string) Exec
 		stageEngine := *engine
 		stageEngine.AdditionalTools = append(append([]tool.BaseTool(nil), engine.AdditionalTools...), workspaceTools...)
 		stageEngine.AdditionalInstruction = strings.TrimSpace(engine.AdditionalInstruction + "\n\n" + workspace.Instruction)
-		result, err = readingExecutor(&stageEngine, store, true)(ctx, run, progress)
+		result, err = readingExecutor(&stageEngine, store)(ctx, run, progress)
 		return result, err
 	}
 }

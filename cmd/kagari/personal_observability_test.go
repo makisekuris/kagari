@@ -21,7 +21,7 @@ func TestPersonalRejectsUnusableLogsBeforeWorkers(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Model.Name, cfg.Model.APIKey, cfg.Model.BaseURL = "fixture", "test-key", "http://127.0.0.1:1/v1"
-	cfg.Telegram.Token, cfg.Telegram.AllowedUserIDs, cfg.Telegram.TargetChatIDs = "123:fixture", []int64{123}, nil
+	cfg.Telegram.Token, cfg.Telegram.AllowedUserIDs = "123:fixture", []int64{123}
 	cfg.Storage.Path = filepath.Join(t.TempDir(), "personal.db")
 	cfg.Logging.Directory = filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(cfg.Logging.Directory, []byte("keep"), 0600); err != nil {

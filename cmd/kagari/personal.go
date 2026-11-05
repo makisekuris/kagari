@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"kagari/internal/agent"
-	"kagari/internal/app"
 	"kagari/internal/browser"
 	"kagari/internal/channel"
 	"kagari/internal/config"
@@ -30,7 +29,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 	if err := cfg.ValidatePersonal(); err != nil {
 		return err
 	}
-	unlock, err := app.Lock(cfg.Storage.Path)
+	unlock, err := lockFile(cfg.Storage.Path)
 	if err != nil {
 		return err
 	}
@@ -74,7 +73,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 	// No polling or worker starts before the persistent log has opened successfully.
 	log.Info("service.starting", zap.String("log_directory", directory), zap.Int("task_concurrency", cfg.Personal.TaskConcurrency))
 	role := persona.Default()
-	engine, err := agent.New(ctx, cfg, read, nil, role)
+	engine, err := agent.New(ctx, cfg, read, role)
 	if err != nil {
 		return err
 	}

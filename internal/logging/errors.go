@@ -13,8 +13,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const noReadableContent = "no readable content; forward the discussion text or submit the original article URL"
-
 type errorInfo struct {
 	reason, kind, code string
 	status             int
@@ -100,9 +98,7 @@ func describeError(err error) errorInfo {
 	for current := err; current != nil; current = errors.Unwrap(current) {
 		message := current.Error()
 		switch message {
-		case noReadableContent:
-			return errorInfo{reason: "no readable content", kind: "read_error"}
-		case "empty analysis output", "empty digest output":
+		case "task stage returned an empty response":
 			return errorInfo{reason: message, kind: "empty_response"}
 		case "model response failed":
 			return errorInfo{reason: message, kind: "model_response_error"}
@@ -110,19 +106,12 @@ func describeError(err error) errorInfo {
 			return errorInfo{reason: message, kind: "model_response_incomplete"}
 		case "model response refused":
 			return errorInfo{reason: message, kind: "model_response_refused"}
-		case "invalid analysis output":
-			return errorInfo{reason: message, kind: "analysis_output_error"}
 		case "model.base_url, model.name and model.api_key are required":
 			return errorInfo{reason: "model configuration incomplete", kind: "configuration_error"}
-		case "unsupported digest version", "digest snapshot does not match request":
-			return errorInfo{reason: message, kind: "digest_snapshot_error"}
 		case "page budget exhausted":
 			return errorInfo{reason: message, kind: "reading_policy_error"}
 		}
-		switch {
-		case strings.HasPrefix(message, "digest input exceeds weekly.max_input_chars"):
-			return errorInfo{reason: "digest input exceeds weekly.max_input_chars", kind: "digest_input_limit"}
-		case strings.HasPrefix(message, "received error event:"):
+		if strings.HasPrefix(message, "received error event:") {
 			return errorInfo{reason: "model stream reported an error", kind: "model_stream_error"}
 		}
 	}

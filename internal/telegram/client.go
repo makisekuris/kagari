@@ -1,74 +1,18 @@
 package telegram
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	telegrambot "github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
-	"go.uber.org/zap"
-	"kagari/internal/config"
-	"kagari/internal/distribution"
-	"kagari/internal/domain"
-	"kagari/internal/store"
 )
 
 const (
 	apiURL      = "https://api.telegram.org"
 	httpTimeout = 30 * time.Second
 )
-
-type Client struct {
-	config  config.Telegram
-	allowed map[int64]struct{}
-	store   *store.Store
-	prepare func(domain.Submission) (domain.Submission, error)
-	replies ReplyTemplate
-	log     *zap.Logger
-	http    *http.Client
-	bot     *telegrambot.Bot
-	baseURL string
-}
-
-// ReplyTemplate 提供带任务编号的收件回执，具体角色由入口注入。
-type ReplyTemplate interface {
-	AskChatID(jobID int64) string
-}
-
-type SendError = distribution.SendError
-
-func New(cfg config.Telegram, st *store.Store, prepare func(domain.Submission) (domain.Submission, error), log *zap.Logger, replies ReplyTemplate) (*Client, error) {
-	transport := &http.Transport{Proxy: nil}
-	return newClient(cfg, st, prepare, log, replies, apiURL, transport)
-}
-
-// newClient is the package-private API fixture seam; New always uses api.telegram.org.
-func newClient(cfg config.Telegram, st *store.Store, prepare func(domain.Submission) (domain.Submission, error), log *zap.Logger, replies ReplyTemplate, baseURL string, transport http.RoundTripper) (*Client, error) {
-	if replies == nil {
-		return nil, errors.New("telegram reply template is required")
-	}
-	if !validToken(cfg.Token) || len(cfg.AllowedUserIDs) == 0 || st == nil || prepare == nil {
-		return nil, errors.New("telegram token, allowlist, store, and prepare function are required")
-	}
-	if log == nil {
-		log = zap.NewNop()
-	}
-	allowed := make(map[int64]struct{}, len(cfg.AllowedUserIDs))
-	for _, id := range cfg.AllowedUserIDs {
-		if id <= 0 {
-			return nil, errors.New("telegram allowlist IDs must be positive")
-		}
-		allowed[id] = struct{}{}
-	}
-	httpClient, sdk, baseURL, err := newAPI(cfg.Token, baseURL, transport)
-	if err != nil {
-		return nil, err
-	}
-	return &Client{config: cfg, allowed: allowed, store: st, prepare: prepare, replies: replies, log: log, http: httpClient, bot: sdk, baseURL: baseURL}, nil
-}
 
 func newAPI(token, baseURL string, transport http.RoundTripper) (*http.Client, *telegrambot.Bot, string, error) {
 	if strings.TrimSpace(baseURL) == "" {
@@ -106,57 +50,4 @@ func validToken(token string) bool {
 		}
 	}
 	return true
-}
-
-func (c *Client) Send(ctx context.Context, chatID int64, content domain.Content) (int64, error) {
-	return sendTelegram(c.bot, ctx, chatID, content)
-}
-
-func sendTelegram(bot *telegrambot.Bot, ctx context.Context, chatID int64, content domain.Content) (int64, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	var message *models.Message
-	var err error
-	switch content.Format {
-	case domain.ContentPlainText:
-		message, err = bot.SendMessage(ctx, &telegrambot.SendMessageParams{
-			ChatID: chatID,
-			Text:   content.Text,
-			LinkPreviewOptions: &models.LinkPreviewOptions{
-				IsDisabled: telegrambot.True(),
-			},
-		})
-	case domain.ContentMarkdown:
-		message, err = bot.SendRichMessage(ctx, &telegrambot.SendRichMessageParams{
-			ChatID:      chatID,
-			RichMessage: models.InputRichMessage{Markdown: content.Text},
-		})
-	default:
-		return 0, &SendError{Reason: "Telegram content format is unsupported", Permanent: true}
-	}
-	if err != nil {
-		return 0, sendError(err)
-	}
-	if message == nil || message.ID == 0 {
-		return 0, &SendError{Reason: "Telegram send outcome is unknown", Uncertain: true}
-	}
-	return int64(message.ID), nil
-}
-
-func sendError(err error) *SendError {
-	var limited *telegrambot.TooManyRequestsError
-	if errors.As(err, &limited) {
-		return &SendError{Reason: "Telegram rate limit", APICode: 429, RetryAfter: retryAfter(limited.RetryAfter)}
-	}
-	switch {
-	case errors.Is(err, telegrambot.ErrorBadRequest):
-		return &SendError{Reason: "Telegram rejected the message", APICode: 400, Permanent: true}
-	case errors.Is(err, telegrambot.ErrorUnauthorized):
-		return &SendError{Reason: "Telegram authorization failed", APICode: 401, Permanent: true}
-	case errors.Is(err, telegrambot.ErrorForbidden):
-		return &SendError{Reason: "Telegram does not allow this message", APICode: 403, Permanent: true}
-	default:
-		return &SendError{Reason: "Telegram send outcome is unknown", Uncertain: true}
-	}
 }

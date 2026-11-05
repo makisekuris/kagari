@@ -37,13 +37,6 @@ type updatesResponse struct {
 	} `json:"parameters"`
 }
 
-func (c *Client) Poll(ctx context.Context) error {
-	return pollUpdates(ctx, c.store.Offset, c.getUpdates, c.acceptUpdate, func(ctx context.Context, updateID int64) error {
-		_, _, err := c.store.AcceptUpdate(ctx, updateID, "", "", nil, nil)
-		return err
-	}, c.log)
-}
-
 type offsetReader func(context.Context) (int64, error)
 type updateReader func(context.Context, int64) ([]json.RawMessage, error)
 type updateAcceptor func(context.Context, *models.Update) error
@@ -126,10 +119,6 @@ func pollUpdates(ctx context.Context, readOffset offsetReader, readUpdates updat
 			}
 		}
 	}
-}
-
-func (c *Client) getUpdates(ctx context.Context, offset int64) ([]json.RawMessage, error) {
-	return getUpdates(ctx, c.http, c.baseURL, c.config.Token, offset)
 }
 
 func getUpdates(ctx context.Context, client *http.Client, baseURL, token string, offset int64) ([]json.RawMessage, error) {

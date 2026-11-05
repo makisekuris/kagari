@@ -252,19 +252,19 @@ func TestLivePersonalReadingStage(t *testing.T) {
 		t.Fatal("cannot claim fictional reading task")
 	}
 	started := time.Now()
-	result, executeErr := ReadingExecutor(engine, s)(ctx, *run, nil)
+	result, executeErr := TaskExecutor(engine, s, t.TempDir())(ctx, *run, nil)
 	if err := s.FinishStage(ctx, run.ID, result, logging.ErrorReason(executeErr)); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("reading stage duration=%s reads=%d sources=%d error=%s", time.Since(started).Round(time.Millisecond), reads, len(result.Sources), logging.ErrorReason(executeErr))
 	if reads == 0 {
-		t.Fatal("mechanism FAIL: ReadingExecutor did not invoke read_url against the controlled page")
+		t.Fatal("mechanism FAIL: TaskExecutor did not invoke read_url against the controlled page")
 	}
 	persisted, err := s.Run(ctx, run.ID)
 	if executeErr != nil || err != nil || persisted == nil || persisted.Status != RunCompleted || !strings.Contains(result.Summary, code) || len(result.Sources) != 1 || !strings.Contains(persisted.Result, code) {
 		t.Fatal("semantic FAIL: reading stage did not return and persist the random evidence value")
 	}
-	t.Log("mechanism PASS: ReadingExecutor read_url → controlled page → persisted real Store stage; semantic PASS: answer contains random source evidence")
+	t.Log("mechanism PASS: TaskExecutor read_url → controlled page → persisted real Store stage; semantic PASS: answer contains random source evidence")
 }
 
 func livePersonalAgent(t *testing.T) *MainAgent {
@@ -305,7 +305,7 @@ func livePersonalEngine(t *testing.T) *agent.Engine {
 	transport := http.DefaultTransport
 	http.DefaultTransport = &livePersonalTransport{next: transport, t: t}
 	t.Cleanup(func() { http.DefaultTransport = transport })
-	engine, err := agent.New(context.Background(), cfg, nil, nil, nil)
+	engine, err := agent.New(context.Background(), cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("cannot construct live evaluation model: %s", logging.ErrorReason(err))
 	}

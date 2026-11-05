@@ -20,11 +20,8 @@ func TestConfigEnvironmentAndValidation(t *testing.T) {
 	if c.Model.APIKey != "secret" || len(c.Telegram.AllowedUserIDs) != 2 {
 		t.Fatalf("environment not loaded: %+v", c.Telegram)
 	}
-	if c.Browser.Enabled || c.Weekly.Enabled {
+	if c.Browser.Enabled {
 		t.Fatal("optional integrations enabled by default")
-	}
-	if c.MaxAttempts != 6 {
-		t.Fatalf("max_attempts default = %d, want 6 total attempts", c.MaxAttempts)
 	}
 	if err := c.Validate(true, true); err == nil {
 		t.Fatal("missing model endpoint accepted")
@@ -61,6 +58,23 @@ func TestAgentStreamingOverride(t *testing.T) {
 	}
 }
 
+func TestRemovedArchiveSettingsAreRejected(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for name, yaml := range map[string]string{
+		"weekly":          "weekly:\n  enabled: false\n",
+		"max_attempts":    "max_attempts: 6\n",
+		"cache_ttl":       "reader:\n  cache_ttl: 24h\n",
+		"target_chat_ids": "telegram:\n  target_chat_ids: []\n",
+	} {
+		if err := os.WriteFile("config.yaml", []byte(yaml), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(""); err == nil || !strings.Contains(err.Error(), name) {
+			t.Fatalf("removed setting %s: got %v", name, err)
+		}
+	}
+}
+
 func TestLoggingDefaultsAndEnvironment(t *testing.T) {
 	t.Chdir(t.TempDir())
 	unsetLoggingEnv(t)
@@ -81,9 +95,9 @@ func TestLoggingDefaultsAndEnvironment(t *testing.T) {
 	}
 }
 
-func TestLegacyValidationDoesNotRequireLoggingConfig(t *testing.T) {
+func TestLocalValidationDoesNotRequireServiceLoggingConfig(t *testing.T) {
 	if err := validConfigForTest().Validate(false, false); err != nil {
-		t.Fatalf("V1 validation rejected a config without logging fields: %v", err)
+		t.Fatalf("local validation rejected a config without logging fields: %v", err)
 	}
 }
 
@@ -164,7 +178,7 @@ func TestExampleDotEnvCanStartLocalCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Load(""); err != nil {
-		t.Fatalf("example dotenv and YAML cannot load for read/digest: %v", err)
+		t.Fatalf("example dotenv and YAML cannot load for local inspection: %v", err)
 	}
 }
 
@@ -270,13 +284,8 @@ func validConfigForTest() Config {
 	c.Reader.MaxBytes = 4 << 20
 	c.Reader.MaxContentChars = 20_000
 	c.Reader.MaxLinks = 40
-	c.Reader.CacheTTL = 24 * time.Hour
 	c.Agent.MaxSources = 6
 	c.Agent.MaxIterations = 10
 	c.Agent.Timeout = 3 * time.Minute
-	c.Weekly.MaxInputChars = DefaultWeeklyInputChars
-	c.Weekly.Timezone = "UTC"
-	c.Weekly.Time = "09:00"
-	c.MaxAttempts = 3
 	return c
 }

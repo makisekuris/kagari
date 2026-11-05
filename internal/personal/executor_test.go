@@ -23,16 +23,34 @@ func readingEngine(fixture *responsesFixture, read func(context.Context, string)
 
 func executorRun(input TaskInput) Run {
 	raw, _ := json.Marshal(input)
-	return Run{Kind: RunTask, Input: string(raw)}
+	return Run{ID: 190, TaskID: 90, Revision: 1, Kind: RunTask, Status: RunRunning, Input: string(raw)}
 }
 
-func analysisResponse(body string) fixtureResponse {
-	raw, _ := json.Marshal(map[string]string{"kind": string(domain.ResultKindAnalysis), "body": body})
-	return responseText(string(raw))
+func runTaskExecutor(t *testing.T, ctx context.Context, engine *agent.Engine, repo *toolRepo, run Run, progress func(string) error) (StageResult, error) {
+	t.Helper()
+	repo.tasks[run.TaskID] = Task{ID: run.TaskID, Revision: run.Revision, Status: TaskRunning}
+	repo.runs[run.ID] = run
+	return TaskExecutor(engine, repo, t.TempDir())(ctx, run, progress)
 }
 
-func TestReadingExecutorFramesTaskAndInjectsOnlyActiveBoundedMemory(t *testing.T) {
-	fixture := &responsesFixture{t: t, responses: []fixtureResponse{analysisResponse("Stage report.")}}
+func createRunningTask(t *testing.T, store *Store, key string, input TaskInput) Run {
+	t.Helper()
+	ctx := context.Background()
+	event := openUserEvent(t, store, 1, 1, "Run task stage")
+	_, _, err := store.CreateTask(ctx, event.ID, key, key, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishEvent(t, store, event, TurnOutput{}, nil)
+	run, err := store.ClaimRun(ctx, RunTask)
+	if err != nil || run == nil {
+		t.Fatalf("ClaimRun() = (%+v, %v)", run, err)
+	}
+	return *run
+}
+
+func TestTaskExecutorFramesTaskAndInjectsOnlyActiveBoundedMemory(t *testing.T) {
+	fixture := &responsesFixture{t: t, responses: []fixtureResponse{responseText("Stage report.")}}
 	repo := newToolRepo()
 	repo.memories["answer_style"] = Memory{Key: "answer_style", Value: "Concise answers are preferred.", Version: 2}
 	repo.memories["forgotten_fact"] = Memory{Key: "forgotten_fact", Value: "must not be injected", Deleted: true, Version: 4}
@@ -42,7 +60,7 @@ func TestReadingExecutorFramesTaskAndInjectsOnlyActiveBoundedMemory(t *testing.T
 		Step:     "Read the first guide and record its recovery steps.",
 		Previous: "Earlier evidence: the second guide mentions checkpoints.",
 	}
-	result, err := ReadingExecutor(readingEngine(fixture, nil), repo)(context.Background(), executorRun(input), nil)
+	result, err := runTaskExecutor(t, context.Background(), readingEngine(fixture, nil), repo, executorRun(input), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,18 +81,18 @@ func TestReadingExecutorFramesTaskAndInjectsOnlyActiveBoundedMemory(t *testing.T
 	}
 }
 
-func TestReadingExecutorReportsReadsAndClosesBrowser(t *testing.T) {
+func TestTaskExecutorReportsReadsAndClosesBrowser(t *testing.T) {
 	t.Run("HTTP", func(t *testing.T) {
 		fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 			responseTool("read_url", map[string]string{"url": "https://example.org/guide"}, "http-read"),
-			analysisResponse("Read the guide."),
+			responseText("Read the guide."),
 		}}
 		engine := readingEngine(fixture, func(_ context.Context, rawURL string) (domain.Source, error) {
 			return domain.Source{ID: "guide", URL: rawURL, Title: "Guide", Status: "ok", Content: "Step one."}, nil
 		})
 		repo := newToolRepo()
 		var progress []string
-		result, err := ReadingExecutor(engine, repo)(context.Background(), executorRun(TaskInput{Goal: "Read the guide."}), func(message string) error {
+		result, err := runTaskExecutor(t, context.Background(), engine, repo, executorRun(TaskInput{Goal: "Read the guide."}), func(message string) error {
 			progress = append(progress, message)
 			return nil
 		})
@@ -92,7 +110,7 @@ func TestReadingExecutorReportsReadsAndClosesBrowser(t *testing.T) {
 	t.Run("browser cleanup", func(t *testing.T) {
 		fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 			responseTool("browse_url", map[string]string{"url": "https://example.org/rendered"}, "browser-read"),
-			analysisResponse("The browser returned a restricted result."),
+			responseText("The browser returned a restricted result."),
 		}}
 		engine := readingEngine(fixture, nil)
 		closed := 0
@@ -103,7 +121,8 @@ func TestReadingExecutorReportsReadsAndClosesBrowser(t *testing.T) {
 			}, func() { closed++ }, nil
 		}
 		var progress []string
-		result, err := ReadingExecutor(engine, newToolRepo())(context.Background(), executorRun(TaskInput{Goal: "Read the rendered page."}), func(message string) error {
+		repo := newToolRepo()
+		result, err := runTaskExecutor(t, context.Background(), engine, repo, executorRun(TaskInput{Goal: "Read the rendered page."}), func(message string) error {
 			progress = append(progress, message)
 			return nil
 		})
@@ -122,11 +141,11 @@ func TestReadingExecutorReportsReadsAndClosesBrowser(t *testing.T) {
 	})
 }
 
-func TestReadingExecutorCancellationKeepsPartialEvidence(t *testing.T) {
+func TestTaskExecutorCancellationKeepsPartialEvidence(t *testing.T) {
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("read_url", map[string]string{"url": "https://example.org/first"}, "first-read"),
 		responseTool("read_url", map[string]string{"url": "https://example.org/second"}, "second-read"),
-		analysisResponse("This response should not be reached."),
+		responseText("This response should not be reached."),
 	}}
 	engine := readingEngine(fixture, func(_ context.Context, rawURL string) (domain.Source, error) {
 		return domain.Source{ID: "first", URL: rawURL, Status: "ok", Content: "Actual evidence from the first page."}, nil
@@ -134,7 +153,8 @@ func TestReadingExecutorCancellationKeepsPartialEvidence(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var progress []string
-	result, err := ReadingExecutor(engine, newToolRepo())(ctx, executorRun(TaskInput{Goal: "Read both pages."}), func(message string) error {
+	repo := newToolRepo()
+	result, err := runTaskExecutor(t, ctx, engine, repo, executorRun(TaskInput{Goal: "Read both pages."}), func(message string) error {
 		progress = append(progress, message)
 		if strings.Contains(message, "/second") {
 			cancel()
@@ -162,10 +182,12 @@ func TestReadingExecutorCancellationKeepsPartialEvidence(t *testing.T) {
 	}
 }
 
-func TestReadingExecutorRejectsBadTaskInputAndRetainsSourceEvidenceOnModelError(t *testing.T) {
+func TestTaskExecutorRejectsBadTaskInputAndRetainsSourceEvidenceOnModelError(t *testing.T) {
 	t.Run("bad task input", func(t *testing.T) {
 		fixture := &responsesFixture{t: t}
-		result, err := ReadingExecutor(readingEngine(fixture, nil), newToolRepo())(context.Background(), Run{Kind: RunTask, Input: `{"goal":"x"} {}`}, nil)
+		repo := newToolRepo()
+		run := Run{ID: 190, TaskID: 90, Revision: 1, Kind: RunTask, Status: RunRunning, Input: `{"goal":"x"} {}`}
+		result, err := runTaskExecutor(t, context.Background(), readingEngine(fixture, nil), repo, run, nil)
 		if err == nil || !strings.Contains(err.Error(), "trailing JSON") {
 			t.Fatalf("result=%+v err=%v", result, err)
 		}
@@ -174,12 +196,13 @@ func TestReadingExecutorRejectsBadTaskInputAndRetainsSourceEvidenceOnModelError(
 	t.Run("model error", func(t *testing.T) {
 		fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 			responseTool("read_url", map[string]string{"url": "https://example.org/evidence"}, "partial-read"),
-			{status: "incomplete", output: responseText(`{"kind":"analysis","body":"incomplete"}`).output},
+			{status: "incomplete", output: responseText("incomplete task-stage output").output},
 		}}
 		engine := readingEngine(fixture, func(_ context.Context, rawURL string) (domain.Source, error) {
 			return domain.Source{ID: "evidence", URL: rawURL, Status: "ok", Content: "Observed text only."}, nil
 		})
-		result, err := ReadingExecutor(engine, newToolRepo())(context.Background(), executorRun(TaskInput{Goal: "Read the evidence."}), nil)
+		repo := newToolRepo()
+		result, err := runTaskExecutor(t, context.Background(), engine, repo, executorRun(TaskInput{Goal: "Read the evidence."}), nil)
 		if err == nil {
 			t.Fatalf("result=%+v err=%v", result, err)
 		}

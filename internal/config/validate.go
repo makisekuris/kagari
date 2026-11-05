@@ -2,7 +2,6 @@ package config
 
 import (
 	"errors"
-	"fmt"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -14,7 +13,7 @@ const (
 	maxLoggingRetentionDays int64 = (1<<63 - 1) / (24 * int64(time.Hour))
 )
 
-// ValidatePersonal checks the single owner's service, independently of archive CLI commands.
+// ValidatePersonal checks the single owner's service configuration.
 func (c Config) ValidatePersonal() error {
 	if c.Personal.Channel != "" && c.Personal.Channel != "telegram" && c.Personal.Channel != "weixin" {
 		return errors.New("personal.channel must be telegram or weixin")
@@ -22,8 +21,8 @@ func (c Config) ValidatePersonal() error {
 	if err := c.Validate(true, c.Personal.Channel != "weixin"); err != nil {
 		return err
 	}
-	if c.Personal.Channel != "weixin" && (len(c.Telegram.AllowedUserIDs) != 1 || len(c.Telegram.TargetChatIDs) != 0) {
-		return errors.New("personal mode requires exactly one telegram.allowed_user_ids entry and no target_chat_ids")
+	if c.Personal.Channel != "weixin" && len(c.Telegram.AllowedUserIDs) != 1 {
+		return errors.New("personal mode requires exactly one telegram.allowed_user_ids entry")
 	}
 	if c.Personal.TaskConcurrency < 1 || c.Personal.TaskBudget < time.Millisecond {
 		return errors.New("personal.task_concurrency must be positive and personal.task_budget at least 1ms")
@@ -42,15 +41,8 @@ func (c Config) ValidatePersonal() error {
 }
 
 // Validate 先校验所有命令共享的边界，再按调用方需求检查凭证。
-// read 和归档回放不要求凭证；生成非空周报及 analyze/run 再启用模型检查。
+// 本地检查不要求凭证；启动服务时再检查模型和所选渠道。
 func (c Config) Validate(modelRequired, telegramRequired bool) error {
-	seenChats := map[int64]bool{}
-	for _, id := range c.Telegram.TargetChatIDs {
-		if id == 0 || seenChats[id] {
-			return errors.New("telegram.target_chat_ids must contain nonzero, unique chat IDs")
-		}
-		seenChats[id] = true
-	}
 	for _, cidr := range c.Reader.AllowedNonPublicCIDRs {
 		prefix, err := netip.ParsePrefix(cidr)
 		if err != nil || prefix.Addr().Zone() != "" || prefix.Addr().Is4In6() {
@@ -73,29 +65,14 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 	if strings.HasPrefix(c.Storage.Path, "file:") {
 		return errors.New("storage.path must be a filesystem path, not a SQLite URI")
 	}
-	if c.Model.Timeout <= 0 || c.Reader.Timeout <= 0 || c.Agent.Timeout <= 0 || c.Reader.CacheTTL < 0 {
-		return errors.New("timeouts must be positive and cache_ttl nonnegative")
+	if c.Model.Timeout <= 0 || c.Reader.Timeout <= 0 || c.Agent.Timeout <= 0 {
+		return errors.New("timeouts must be positive")
 	}
 	if c.Reader.MaxBytes < 1024 || c.Reader.MaxContentChars < 256 || c.Reader.MaxLinks < 1 || c.Model.MaxOutputTokens < 1 {
 		return errors.New("reader and model limits must be positive")
 	}
 	if c.Agent.MaxSources < 1 || c.Agent.MaxSources > 30 || c.Agent.MaxIterations < 1 {
 		return errors.New("invalid agent reading limits")
-	}
-	if c.MaxAttempts < 1 {
-		return errors.New("max_attempts must be positive")
-	}
-	if _, err := time.LoadLocation(c.Weekly.Timezone); err != nil {
-		return fmt.Errorf("weekly.timezone: %w", err)
-	}
-	if c.Weekly.Weekday < 0 || c.Weekly.Weekday > 6 {
-		return errors.New("weekly.weekday must be 0..6 (Sunday..Saturday)")
-	}
-	if _, err := time.Parse("15:04", c.Weekly.Time); err != nil {
-		return errors.New("weekly.time must be HH:MM")
-	}
-	if c.Weekly.MaxInputChars < 1024 {
-		return errors.New("weekly.max_input_chars must be at least 1024")
 	}
 	if modelRequired {
 		if c.Model.Name == "" || c.Model.APIKey == "" || c.Model.BaseURL == "" {

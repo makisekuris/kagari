@@ -12,11 +12,9 @@ type Config struct {
 	Browser     Browser  `mapstructure:"browser"`
 	Agent       Agent    `mapstructure:"agent"`
 	Personal    Personal `mapstructure:"personal"`
-	Weekly      Weekly   `mapstructure:"weekly"`
 	Logging     Logging  `mapstructure:"logging"`
 	ProfilePath string   `mapstructure:"profile_path"`
 	LogLevel    string   `mapstructure:"log_level"`
-	MaxAttempts int      `mapstructure:"max_attempts"` // 包含首次尝试；处理任务和已知未发送的投递共用上限。
 }
 
 type Model struct {
@@ -36,18 +34,6 @@ type Personal struct {
 type Telegram struct {
 	Token          string  `mapstructure:"token"`
 	AllowedUserIDs []int64 `mapstructure:"allowed_user_ids"`
-	TargetChatIDs  []int64 `mapstructure:"target_chat_ids"`
-}
-
-// ChatIDs returns configured destinations or the submitting private chat.
-func (t Telegram) ChatIDs(fallback int64) []int64 {
-	if len(t.TargetChatIDs) > 0 {
-		return append([]int64(nil), t.TargetChatIDs...)
-	}
-	if fallback != 0 {
-		return []int64{fallback}
-	}
-	return nil
 }
 
 type Reader struct {
@@ -55,7 +41,6 @@ type Reader struct {
 	MaxBytes              int64         `mapstructure:"max_bytes"`
 	MaxContentChars       int           `mapstructure:"max_content_chars"`
 	MaxLinks              int           `mapstructure:"max_links"`
-	CacheTTL              time.Duration `mapstructure:"cache_ttl"` // 来源缓存与已完成分析的复用时限；0 禁用复用。
 	AllowedNonPublicCIDRs []string      `mapstructure:"allowed_non_public_cidrs"`
 }
 
@@ -73,19 +58,9 @@ type Agent struct {
 	Streaming     bool          `mapstructure:"streaming"`
 }
 
-type Weekly struct {
-	Enabled       bool   `mapstructure:"enabled"`
-	Timezone      string `mapstructure:"timezone"`
-	Weekday       int    `mapstructure:"weekday"`
-	Time          string `mapstructure:"time"`
-	MaxInputChars int    `mapstructure:"max_input_chars"`
-}
-
 type Logging struct {
 	Directory     string `mapstructure:"directory"`
 	RotateMiB     int64  `mapstructure:"rotate_mib"`
 	MaxTotalMiB   int64  `mapstructure:"max_total_mib"`
 	RetentionDays int    `mapstructure:"retention_days"`
 }
-
-const DefaultWeeklyInputChars = 120000
