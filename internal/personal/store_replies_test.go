@@ -363,38 +363,74 @@ func TestBindReplyTaskMergesGroupsAndPreservesInputs(t *testing.T) {
 }
 
 func TestGetTaskReplyDoesNotKeepInquiryGroupOpen(t *testing.T) {
-	ctx := context.Background()
-	s := testStore(t, ":memory:", time.Minute)
-	taskEvent := openUserEvent(t, s, 1, 1, "请研究")
-	task, _, err := s.CreateTask(ctx, taskEvent.ID, "create", "研究", TaskInput{Goal: "核对资料"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := bindReplyTaskTx(ctx, tx, taskEvent.ID, task.ID); err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	inquiry := openUserEvent(t, s, 2, 2, "查看任务状态")
-	finishEvent(t, s, inquiry, TurnOutput{TaskID: task.ID, Text: "任务仍在排队。"}, []string{"任务仍在排队。"})
-	var inquiryGroupClosed, originalGroupClosed, inquiryTaskLinks int
-	if err := s.db.QueryRowContext(ctx, `SELECT closed FROM personal_reply_groups WHERE id=?`, inquiry.ID).Scan(&inquiryGroupClosed); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT closed FROM personal_reply_groups WHERE id=?`, taskEvent.ID).Scan(&originalGroupClosed); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_reply_tasks WHERE group_id=?`, inquiry.ID).Scan(&inquiryTaskLinks); err != nil {
-		t.Fatal(err)
-	}
-	if inquiryGroupClosed != 1 || originalGroupClosed != 0 || inquiryTaskLinks != 0 {
-		t.Fatalf("inquiry group: closed=%d original closed=%d task links=%d", inquiryGroupClosed, originalGroupClosed, inquiryTaskLinks)
+	for _, waitQueued := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before wait", true: "pending wait"}[waitQueued], func(t *testing.T) {
+			ctx := context.Background()
+			s := testStore(t, ":memory:", time.Minute)
+			taskEvent := openUserEvent(t, s, 1, 1, "请研究")
+			task, _, err := s.CreateTask(ctx, taskEvent.ID, "create", "研究", TaskInput{Goal: "核对资料"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := bindReplyTaskTx(ctx, tx, taskEvent.ID, task.ID); err != nil {
+				tx.Rollback()
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			finishEvent(t, s, taskEvent, TurnOutput{TaskID: task.ID, Silent: true}, nil)
+			if waitQueued {
+				if queued, err := s.QueueWaitingReply(ctx, taskEvent.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
+					t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
+				}
+			}
+			inquiry := openUserEvent(t, s, 2, 2, "目前确认了什么？")
+			answer := "已确认资料中的关键进展，我还会继续核对。"
+			finishEvent(t, s, inquiry, TurnOutput{TaskID: task.ID, Text: answer}, []string{answer})
+			var inquiryGroupClosed, originalGroupContent, originalGroupClosed, inquiryTaskLinks int
+			if err := s.db.QueryRowContext(ctx, `SELECT closed FROM personal_reply_groups WHERE id=?`, inquiry.ID).Scan(&inquiryGroupClosed); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRowContext(ctx, `SELECT has_content,closed FROM personal_reply_groups WHERE id=?`, taskEvent.ID).Scan(&originalGroupContent, &originalGroupClosed); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_reply_tasks WHERE group_id=?`, inquiry.ID).Scan(&inquiryTaskLinks); err != nil {
+				t.Fatal(err)
+			}
+			if inquiryGroupClosed != 1 || originalGroupContent != 1 || originalGroupClosed != 0 || inquiryTaskLinks != 0 {
+				t.Fatalf("reply groups: inquiry closed=%d, original content=%d closed=%d, inquiry task links=%d", inquiryGroupClosed, originalGroupContent, originalGroupClosed, inquiryTaskLinks)
+			}
+			if waitQueued {
+				var waits, histories int
+				if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE event_id=?`, taskEvent.ID).Scan(&waits); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_history WHERE event_id=? AND role='assistant'`, taskEvent.ID).Scan(&histories); err != nil {
+					t.Fatal(err)
+				}
+				if waits != 0 || histories != 0 {
+					t.Fatalf("pending wait after progress reply: outbox=%d history=%d", waits, histories)
+				}
+			} else if queued, err := s.QueueWaitingReply(ctx, taskEvent.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || queued {
+				t.Fatalf("QueueWaitingReply() after progress reply = (%v,%v), want false", queued, err)
+			}
+			cancelEvent := openUserEvent(t, s, 3, 3, "取消研究")
+			if _, err := s.CancelTask(ctx, cancelEvent.ID, task.ID, task.Revision); err != nil {
+				t.Fatal(err)
+			}
+			finishEvent(t, s, cancelEvent, TurnOutput{TaskID: task.ID, Text: "已取消。"}, []string{"已取消。"})
+			if err := s.db.QueryRowContext(ctx, `SELECT closed FROM personal_reply_groups WHERE id=?`, taskEvent.ID).Scan(&originalGroupClosed); err != nil {
+				t.Fatal(err)
+			}
+			if originalGroupClosed != 1 {
+				t.Fatalf("original task group closed=%d after task cancellation, want 1", originalGroupClosed)
+			}
+		})
 	}
 }
 

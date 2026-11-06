@@ -14,6 +14,7 @@ import (
 )
 
 type personalToolReply struct {
+	ActionID string   `json:"action_id,omitempty"`
 	OK       bool     `json:"ok"`
 	Error    string   `json:"error,omitempty"`
 	Queued   bool     `json:"queued,omitempty"`
@@ -26,6 +27,7 @@ type personalToolReply struct {
 }
 
 type createTaskArgs struct {
+	ActionID     string   `json:"action_id,omitempty"`
 	SourceRunIDs []int64  `json:"source_run_ids,omitempty"`
 	MemoryRefs   []string `json:"memory_refs,omitempty"`
 	Title        string   `json:"title"`
@@ -39,6 +41,7 @@ type taskArgs struct {
 }
 
 type reviseTaskArgs struct {
+	ActionID         string   `json:"action_id,omitempty"`
 	SourceRunIDs     []int64  `json:"source_run_ids,omitempty"`
 	MemoryRefs       []string `json:"memory_refs,omitempty"`
 	TaskID           int64    `json:"task_id"`
@@ -54,6 +57,7 @@ type cancelTaskArgs struct {
 }
 
 type continueTaskArgs struct {
+	ActionID         string `json:"action_id,omitempty"`
 	TaskID           int64  `json:"task_id"`
 	ExpectedRevision int64  `json:"expected_revision"`
 	Step             string `json:"step"`
@@ -102,14 +106,18 @@ type memoryHistoryArgs struct {
 }
 
 type personalTools struct {
-	timezone    string
-	scheduleIDs map[int64]struct{}
-	store       Repository
-	log         *zap.Logger
-	input       TurnInput
-	event       Event
-	taskIDs     map[int64]struct{}
-	mustNotify  bool
+	timezone         string
+	scheduleIDs      map[int64]struct{}
+	store            Repository
+	log              *zap.Logger
+	input            TurnInput
+	event            Event
+	taskIDs          map[int64]struct{}
+	mustNotify       bool
+	questions        []string
+	taskActions      map[string]*taskActionState
+	taskActionOrder  []string
+	nextTaskActionID uint64
 }
 
 func (p *personalTools) addScheduleID(id int64) {
@@ -211,30 +219,38 @@ func (p *personalTools) taskByID(id int64) *Task {
 }
 
 func (p *personalTools) build() ([]tool.BaseTool, error) {
-	createTask, err := utils.InferTool("create_task", "为明确的新目标创建后台任务并排队；只允许直接用户事件。", func(ctx context.Context, a createTaskArgs) (personalToolReply, error) {
+	createTask, err := utils.InferTool("create_task", "为明确的新目标创建后台任务并排队；只允许直接用户事件。收到失败结果后修正参数并沿用返回的 action_id 重试。", func(ctx context.Context, a createTaskArgs) (personalToolReply, error) {
 		if err := p.directUserMutation(); err != nil {
-			return toolError(err), nil
+			return taskActionToolError(a.ActionID, err), nil
 		}
+		actionArgs := a
+		actionArgs.ActionID = ""
+		attempt, err := p.beginTaskAction("create_task", a.ActionID, 0, taskActionTarget(a.Title), actionArgs)
+		if err != nil {
+			return taskActionToolError(attempt.actionID, err), nil
+		}
+		fail := func(err error) (personalToolReply, error) { return p.failTaskAction(attempt, err), nil }
 		if strings.TrimSpace(a.Title) == "" || strings.TrimSpace(a.Goal) == "" {
-			return toolError(fmt.Errorf("title and goal are required")), nil
+			return fail(fmt.Errorf("title and goal are required"))
 		}
 		attachments, err := resolveAttachments(ctx, p.store, a.Attachments)
 		if err != nil {
-			return toolError(err), nil
+			return fail(err)
 		}
-		key, err := p.requestKey("create_task", a)
+		key, err := p.requestKey("create_task", actionArgs)
 		if err != nil {
-			return toolError(err), nil
+			return fail(err)
 		}
 		task, run, err := p.store.CreateTask(ctx, p.event.ID, key, a.Title, TaskInput{Goal: a.Goal, Context: a.Context, Attachments: attachments, SourceRunIDs: a.SourceRunIDs, MemoryRefs: a.MemoryRefs})
 		if err != nil {
-			return toolError(err), nil
+			return fail(err)
 		}
 		if task.ID <= 0 {
-			return toolError(fmt.Errorf("task creation returned no task")), nil
+			return fail(fmt.Errorf("task creation returned no task"))
 		}
 		p.addTaskID(task.ID)
-		return personalToolReply{OK: true, Queued: run.Status == RunQueued, Task: &task, Run: &run}, nil
+		p.succeedTaskAction(attempt)
+		return personalToolReply{ActionID: attempt.actionID, OK: true, Queued: run.Status == RunQueued, Task: &task, Run: &run}, nil
 	})
 	if err != nil {
 		return nil, err
@@ -266,40 +282,48 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	updateTask, err := utils.InferTool("update_task", "由直接用户事件更新任务目标，并排队新版本。使用当前 revision；省略 attachments 保留原材料，空数组清除选定材料。", func(ctx context.Context, a reviseTaskArgs) (personalToolReply, error) {
+	updateTask, err := utils.InferTool("update_task", "由直接用户事件更新任务目标，并排队新版本。使用当前 revision；省略 attachments 保留原材料，空数组清除选定材料。收到失败结果后修正参数并沿用返回的 action_id 重试。", func(ctx context.Context, a reviseTaskArgs) (personalToolReply, error) {
 		if err := p.directUserMutation(); err != nil {
-			return toolError(err), nil
+			return taskActionToolError(a.ActionID, err), nil
 		}
+		actionArgs := a
+		actionArgs.ActionID = ""
+		attempt, err := p.beginTaskAction("update_task", a.ActionID, a.TaskID, p.taskActionName(a.TaskID), actionArgs)
+		if err != nil {
+			return taskActionToolError(attempt.actionID, err), nil
+		}
+		fail := func(err error) (personalToolReply, error) { return p.failTaskAction(attempt, err), nil }
 		if a.TaskID <= 0 || a.ExpectedRevision <= 0 || strings.TrimSpace(a.Goal) == "" {
-			return toolError(fmt.Errorf("task_id, expected_revision and goal are required")), nil
+			return fail(fmt.Errorf("task_id, expected_revision and goal are required"))
 		}
 		attachments, err := resolveAttachments(ctx, p.store, a.Attachments)
 		if err != nil {
-			return toolError(err), nil
+			return fail(err)
 		}
 		if a.Attachments == nil {
 			current, err := p.store.Task(ctx, a.TaskID)
 			if err != nil {
-				return toolError(err), nil
+				return fail(err)
 			}
 			if current == nil {
-				return toolError(fmt.Errorf("task not found")), nil
+				return fail(fmt.Errorf("task not found"))
 			}
 			attachments = current.Attachments
 		}
-		key, err := p.requestKey("update_task", a)
+		key, err := p.requestKey("update_task", actionArgs)
 		if err != nil {
-			return toolError(err), nil
+			return fail(err)
 		}
 		task, run, err := p.store.ReviseTask(ctx, p.event.ID, key, a.TaskID, a.ExpectedRevision, TaskInput{Goal: a.Goal, Context: a.Context, Attachments: attachments, SourceRunIDs: a.SourceRunIDs, MemoryRefs: a.MemoryRefs})
 		if err != nil {
-			return toolError(err), nil
+			return fail(err)
 		}
 		if task.ID <= 0 {
-			return toolError(fmt.Errorf("task update returned no task")), nil
+			return fail(fmt.Errorf("task update returned no task"))
 		}
 		p.addTaskID(task.ID)
-		return personalToolReply{OK: true, Queued: run.Status == RunQueued, Task: &task, Run: &run}, nil
+		p.succeedTaskAction(attempt)
+		return personalToolReply{ActionID: attempt.actionID, OK: true, Queued: run.Status == RunQueued, Task: &task, Run: &run}, nil
 	})
 	if err != nil {
 		return nil, err
@@ -327,47 +351,70 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	continueTask, err := utils.InferTool("continue_task", "在原目标内排队继续任务。任务回调只能继续自己的任务且不能扩展预算；直接用户明确授权后才可将 extend_budget 设为 true。", func(ctx context.Context, a continueTaskArgs) (personalToolReply, error) {
-		if a.TaskID <= 0 || a.ExpectedRevision <= 0 || strings.TrimSpace(a.Step) == "" {
-			return toolError(fmt.Errorf("task_id, expected_revision and step are required")), nil
-		}
+	continueTask, err := utils.InferTool("continue_task", "在原目标内排队继续任务。任务回调只能继续自己的任务且不能扩展预算；直接用户明确授权后才可将 extend_budget 设为 true。收到失败结果后修正参数并沿用返回的 action_id 重试。", func(ctx context.Context, a continueTaskArgs) (personalToolReply, error) {
+		var attempt taskActionAttempt
+		tracking := false
+		replyActionID := a.ActionID
 		switch p.event.Kind {
 		case EventUser:
 			if err := p.directUserMutation(); err != nil {
-				return toolError(err), nil
+				return taskActionToolError(a.ActionID, err), nil
 			}
+			actionArgs := a
+			actionArgs.ActionID = ""
+			var err error
+			attempt, err = p.beginTaskAction("continue_task", a.ActionID, a.TaskID, p.taskActionName(a.TaskID), actionArgs)
+			if err != nil {
+				return taskActionToolError(attempt.actionID, err), nil
+			}
+			tracking = true
+			replyActionID = attempt.actionID
 		case EventTask:
 			if err := p.ownTask(a.TaskID); err != nil {
-				return toolError(err), nil
+				return taskActionToolError(a.ActionID, err), nil
 			}
 			if a.ExtendBudget {
-				return toolError(fmt.Errorf("task callbacks cannot extend the budget")), nil
+				return taskActionToolError(a.ActionID, fmt.Errorf("task callbacks cannot extend the budget")), nil
 			}
 			if task := p.taskByID(a.TaskID); task != nil && (task.Status == TaskWaitingBudget || task.BudgetMS > 0 && task.UsedMS >= task.BudgetMS) {
-				return toolError(fmt.Errorf("task budget is exhausted; ask the user to continue")), nil
+				return taskActionToolError(a.ActionID, fmt.Errorf("task budget is exhausted; ask the user to continue")), nil
 			}
 		default:
-			return toolError(fmt.Errorf("continuing tasks requires a direct user event or task callback")), nil
+			return taskActionToolError(a.ActionID, fmt.Errorf("continuing tasks requires a direct user event or task callback")), nil
 		}
-		key, err := p.requestKey("continue_task", a)
+		fail := func(err error) (personalToolReply, error) {
+			if tracking {
+				return p.failTaskAction(attempt, err), nil
+			}
+			return taskActionToolError(a.ActionID, err), nil
+		}
+		if a.TaskID <= 0 || a.ExpectedRevision <= 0 || strings.TrimSpace(a.Step) == "" {
+			return fail(fmt.Errorf("task_id, expected_revision and step are required"))
+		}
+		actionArgs := a
+		actionArgs.ActionID = ""
+		key, err := p.requestKey("continue_task", actionArgs)
 		if err != nil {
-			return toolError(err), nil
+			return fail(err)
 		}
 		task, run, err := p.store.ContinueTask(ctx, p.event.ID, key, a.TaskID, a.ExpectedRevision, a.Step, a.ExtendBudget)
 		if err != nil {
-			return toolError(err), nil
+			return fail(err)
 		}
 		if task.ID <= 0 {
-			return toolError(fmt.Errorf("task continuation returned no task")), nil
+			return fail(fmt.Errorf("task continuation returned no task"))
 		}
 		p.addTaskID(task.ID)
-		return personalToolReply{OK: true, Queued: run.Status == RunQueued, Task: &task, Run: &run}, nil
+		if tracking {
+			p.succeedTaskAction(attempt)
+		}
+		return personalToolReply{ActionID: replyActionID, OK: true, Queued: run.Status == RunQueued, Task: &task, Run: &run}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	settleTask, err := utils.InferTool("settle_task", "结束当前任务回调的任务。status 只能为 completed、waiting_input 或 failed。", func(ctx context.Context, a settleTaskArgs) (personalToolReply, error) {
+	settleTask, err := utils.InferTool("settle_task", "结束当前任务回调的任务。status 只能为 completed、waiting_input 或 failed。summary 将直接发给用户：写实际结论、失败原因或必要问题及来源链接，不复制内部编号、工具调用或检查点日志。", func(ctx context.Context, a settleTaskArgs) (personalToolReply, error) {
 		if err := p.ownTask(a.TaskID); err != nil {
 			return toolError(err), nil
 		}

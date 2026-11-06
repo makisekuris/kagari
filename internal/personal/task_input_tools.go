@@ -26,6 +26,7 @@ type TaskInputReference struct {
 }
 
 type addTaskInputArgs struct {
+	ActionID         string  `json:"action_id,omitempty"`
 	TaskID           int64   `json:"task_id"`
 	ExpectedRevision int64   `json:"expected_revision"`
 	InputEventIDs    []int64 `json:"input_event_ids"`
@@ -38,10 +39,11 @@ type addTaskInputTask struct {
 }
 
 type addTaskInputReply struct {
-	OK     bool              `json:"ok"`
-	Error  string            `json:"error,omitempty"`
-	Task   *addTaskInputTask `json:"task,omitempty"`
-	Inputs []Event           `json:"inputs,omitempty"`
+	ActionID string            `json:"action_id,omitempty"`
+	OK       bool              `json:"ok"`
+	Error    string            `json:"error,omitempty"`
+	Task     *addTaskInputTask `json:"task,omitempty"`
+	Inputs   []Event           `json:"inputs,omitempty"`
 }
 
 type TaskInputProcessingRepository interface {
@@ -176,12 +178,22 @@ func boundedTaskInputError(err error) string {
 
 // inputTools exposes only explicit same-task input addition.
 func (p *personalTools) inputTools() ([]tool.BaseTool, error) {
-	addInput, err := utils.InferTool("add_task_input", "为同一任务补充当前消息和用户刚发送的纯链接消息；只选择 PendingInputs 中相关链接，不创建新目标。", func(ctx context.Context, args addTaskInputArgs) (addTaskInputReply, error) {
+	addInput, err := utils.InferTool("add_task_input", "为同一任务补充当前消息和用户刚发送的纯链接消息；只选择 PendingInputs 中相关链接，不创建新目标。收到失败结果后修正参数并沿用返回的 action_id 重试。", func(ctx context.Context, args addTaskInputArgs) (addTaskInputReply, error) {
 		if err := p.directUserMutation(); err != nil {
-			return addTaskInputToolError(err), nil
+			return addTaskInputToolErrorWithID(args.ActionID, err), nil
+		}
+		actionArgs := args
+		actionArgs.ActionID = ""
+		attempt, err := p.beginTaskAction("add_task_input", args.ActionID, args.TaskID, p.taskActionName(args.TaskID), actionArgs)
+		if err != nil {
+			return addTaskInputToolErrorWithID(attempt.actionID, err), nil
+		}
+		fail := func(err error) (addTaskInputReply, error) {
+			p.recordTaskActionFailure(attempt, err)
+			return addTaskInputToolErrorWithID(attempt.actionID, err), nil
 		}
 		if len(args.InputEventIDs) == 0 || len(args.InputEventIDs) > maxPendingInputs+1 {
-			return addTaskInputToolError(fmt.Errorf("input_event_ids must include the current event and up to %d pending inputs", maxPendingInputs)), nil
+			return fail(fmt.Errorf("input_event_ids must include the current event and up to %d pending inputs", maxPendingInputs))
 		}
 		allowed := make(map[int64]Event, len(p.input.PendingInputs))
 		for _, event := range p.input.PendingInputs {
@@ -192,7 +204,7 @@ func (p *personalTools) inputTools() ([]tool.BaseTool, error) {
 		includesCurrent := false
 		for _, id := range args.InputEventIDs {
 			if id <= 0 || seen[id] {
-				return addTaskInputToolError(fmt.Errorf("input event IDs must be positive and unique")), nil
+				return fail(fmt.Errorf("input event IDs must be positive and unique"))
 			}
 			seen[id] = true
 			if id == p.event.ID {
@@ -202,35 +214,37 @@ func (p *personalTools) inputTools() ([]tool.BaseTool, error) {
 			}
 			event, ok := allowed[id]
 			if !ok {
-				return addTaskInputToolError(fmt.Errorf("event %d is not an available pending URL input", id)), nil
+				return fail(fmt.Errorf("event %d is not an available pending URL input", id))
 			}
 			selected = append(selected, event)
 		}
 		if !includesCurrent {
-			return addTaskInputToolError(fmt.Errorf("input_event_ids must include the current event %d", p.event.ID)), nil
+			return fail(fmt.Errorf("input_event_ids must include the current event %d", p.event.ID))
 		}
 		preview := addTaskInputReply{
-			OK:     true,
-			Task:   &addTaskInputTask{ID: args.TaskID, Revision: math.MaxInt64, Status: TaskAwaitingReview},
-			Inputs: selected,
+			ActionID: attempt.actionID,
+			OK:       true,
+			Task:     &addTaskInputTask{ID: args.TaskID, Revision: math.MaxInt64, Status: TaskAwaitingReview},
+			Inputs:   selected,
 		}
 		encodedReply, err := json.Marshal(preview)
 		if err != nil {
-			return addTaskInputToolError(err), nil
+			return fail(err)
 		}
 		if runeLen(string(encodedReply)) > maxTaskChars {
-			return addTaskInputToolError(fmt.Errorf("selected input messages exceed the tool reply size limit")), nil
+			return fail(fmt.Errorf("selected input messages exceed the tool reply size limit"))
 		}
-		key, err := p.requestKey("add_task_input", args)
+		key, err := p.requestKey("add_task_input", actionArgs)
 		if err != nil {
-			return addTaskInputToolError(err), nil
+			return fail(err)
 		}
 		task, err := p.store.AddTaskInputs(ctx, p.event.ID, key, args.TaskID, args.ExpectedRevision, args.InputEventIDs)
 		if err != nil {
-			return addTaskInputToolError(err), nil
+			return fail(err)
 		}
 		p.addTaskID(task.ID)
-		return addTaskInputReply{OK: true, Task: &addTaskInputTask{ID: task.ID, Revision: task.Revision, Status: task.Status}, Inputs: selected}, nil
+		p.succeedTaskAction(attempt)
+		return addTaskInputReply{ActionID: attempt.actionID, OK: true, Task: &addTaskInputTask{ID: task.ID, Revision: task.Revision, Status: task.Status}, Inputs: selected}, nil
 	})
 	if err != nil {
 		return nil, err
@@ -238,6 +252,6 @@ func (p *personalTools) inputTools() ([]tool.BaseTool, error) {
 	return []tool.BaseTool{addInput}, nil
 }
 
-func addTaskInputToolError(err error) addTaskInputReply {
-	return addTaskInputReply{OK: false, Error: err.Error()}
+func addTaskInputToolErrorWithID(actionID string, err error) addTaskInputReply {
+	return addTaskInputReply{ActionID: actionID, OK: false, Error: err.Error()}
 }

@@ -72,7 +72,7 @@ func TestMainAgentScheduleReplyDoesNotInheritAnUnrelatedTask(t *testing.T) {
 				responses = append(responses, responseTool("get_schedule", getScheduleArgs{ScheduleID: a.ID}, "get-a"))
 				wantSchedule = 0
 			}
-			responses = append(responses, responseTool("get_schedule", getScheduleArgs{ScheduleID: b.ID}, "get-b"), responseText(`{"text":"Requested plan details.","notify":true,"attachments":[]}`))
+			responses = append(responses, responseTool("get_schedule", getScheduleArgs{ScheduleID: b.ID}, "get-b"), responseText(`{"text":"Requested plan details.","reply_kind":"content","attachments":[]}`))
 			fixture := &responsesFixture{t: t, responses: responses}
 			main := newMainAgent(t, fixture, s)
 			output, err := main.Think(ctx, livePersonalInput(t, ctx, s, *event))
@@ -105,15 +105,15 @@ func TestMainAgentScheduleCRUDAndCreateAuthorization(t *testing.T) {
 	input := ScheduleInput{Title: "Daily exercise", Goal: "Generate a short Go exercise", Cron: "0 9 * * *", Timezone: ""}
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("create_schedule", input, "schedule-create"),
-		responseText(`{"text":"计划已登记。","notify":true,"attachments":[]}`),
+		responseText(`{"text":"计划已登记。","reply_kind":"content","attachments":[]}`),
 		responseTool("update_schedule", updateScheduleArgs{ScheduleID: 1, ExpectedRevision: 1, Patch: SchedulePatch{Title: &newTitle}}, "schedule-update"),
-		responseText(`{"text":"计划已更新。","notify":true,"attachments":[]}`),
+		responseText(`{"text":"计划已更新。","reply_kind":"content","attachments":[]}`),
 		responseTool("cancel_schedule", cancelScheduleArgs{ScheduleID: 1, ExpectedRevision: 2}, "schedule-cancel"),
-		responseText(`{"text":"计划已取消。","notify":true,"attachments":[]}`),
+		responseText(`{"text":"计划已取消。","reply_kind":"content","attachments":[]}`),
 		responseTool("create_schedule", input, "schedule-material-denied"),
-		responseText(`{"text":"网页材料不能授权创建计划。","notify":true,"attachments":[]}`),
+		responseText(`{"text":"网页材料不能授权创建计划。","reply_kind":"content","attachments":[]}`),
 		responseTool("create_schedule", input, "schedule-callback-denied"),
-		responseText(`{"text":"任务回调不能创建计划。","notify":true,"attachments":[]}`),
+		responseText(`{"text":"任务回调不能创建计划。","reply_kind":"content","attachments":[]}`),
 	}}
 	main := newMainAgent(t, fixture, store)
 	main.Timezone = "UTC"
@@ -209,7 +209,7 @@ func TestMainAgentScheduledCheckAssessmentCreditsCoverage(t *testing.T) {
 	}
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("settle_task", settleTaskArgs{TaskID: run.TaskID, ExpectedRevision: run.Revision, Status: TaskCompleted, Summary: "Complete feed check saved.", Assessment: assessment}, "scheduled-settle"),
-		responseText(`{"text":"连续检查已完成。","notify":false,"attachments":[]}`),
+		responseText(`{"text":"连续检查已完成。","reply_kind":"silent","attachments":[]}`),
 	}}
 	main := newMainAgent(t, fixture, store)
 	output := thinkAndFinishEvent(t, ctx, main, store, *callback)
@@ -248,7 +248,7 @@ func TestMainAgentOrdinaryTaskCompletesWithoutCheckAssessment(t *testing.T) {
 	}
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("settle_task", settleTaskArgs{TaskID: task.ID, ExpectedRevision: run.Revision, Status: TaskCompleted, Summary: "The exercise is complete."}, "ordinary-settle"),
-		responseText(`{"text":"普通任务已完成。","notify":false,"attachments":[]}`),
+		responseText(`{"text":"普通任务已完成。","reply_kind":"silent","attachments":[]}`),
 	}}
 	main := newMainAgent(t, fixture, store)
 	thinkAndFinishEvent(t, ctx, main, store, *callback)

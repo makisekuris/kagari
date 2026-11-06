@@ -289,17 +289,10 @@ func recordReplyTx(ctx context.Context, tx *sql.Tx, eventID int64, output TurnOu
 			return err
 		}
 	}
-	// Task IDs on ordinary replies can come from get_task; only a terminal task closes its existing reply group.
+	// Ordinary replies can report progress through get_task while the task remains active.
 	if kind == EventUser && len(requestTasks) == 0 && output.TaskID > 0 {
-		var status TaskStatus
-		err := tx.QueryRowContext(ctx, `SELECT status FROM personal_tasks WHERE id=?`, output.TaskID).Scan(&status)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		if err := appendOpenReplyTaskGroupsTx(ctx, tx, output.TaskID, &groupIDs); err != nil {
 			return err
-		}
-		if err == nil && status != TaskQueued && status != TaskRunning && status != TaskAwaitingReview {
-			if err := appendOpenReplyTaskGroupsTx(ctx, tx, output.TaskID, &groupIDs); err != nil {
-				return err
-			}
 		}
 	}
 	for _, groupID := range groupIDs {

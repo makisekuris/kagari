@@ -41,10 +41,18 @@ type MainAgent struct {
 	Timeout            time.Duration
 }
 
+type personalReplyKind string
+
+const (
+	replySilent  personalReplyKind = "silent"
+	replyReceipt personalReplyKind = "receipt"
+	replyContent personalReplyKind = "content"
+)
+
 type personalTurnResponse struct {
-	Text        string   `json:"text"`
-	Notify      bool     `json:"notify"`
-	Attachments []string `json:"attachments"`
+	Text        string            `json:"text"`
+	ReplyKind   personalReplyKind `json:"reply_kind"`
+	Attachments []string          `json:"attachments"`
 }
 
 func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, error) {
@@ -65,6 +73,11 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 	if err != nil {
 		return TurnOutput{}, fmt.Errorf("build personal tools: %w", err)
 	}
+	replyTools, err := tools.replyTools()
+	if err != nil {
+		return TurnOutput{}, err
+	}
+	registeredTools = append(registeredTools, replyTools...)
 	fileTools, err := attachmentTools(a.Store, nil, nil, nil)
 	if err != nil {
 		return TurnOutput{}, err
@@ -135,14 +148,7 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 	}
 	observer.Wait()
 	cancelModel()
-	if err != nil {
-		return TurnOutput{}, err
-	}
-	response, err := decodePersonalTurnResponse(output)
-	if err != nil {
-		// Formatting gets one tool-free attempt; committed actions are never replayed.
-		response, err = a.formatTurn(ctx, output)
-	}
+	response, err := a.selectReply(ctx, input, tools, output, err)
 	if err != nil {
 		return TurnOutput{}, err
 	}
@@ -154,17 +160,7 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 	for _, file := range files {
 		response.Attachments = append(response.Attachments, file.ID)
 	}
-	notify := response.Notify
-	if !tools.mustNotify && input.Event.Kind == EventUser && len(input.Event.Attachments) == 0 && len(files) == 0 && isPureURLMessage(input.Event.Text) {
-		deferred, err := a.Store.CanDeferReply(ctx, input.Event.ID)
-		if err != nil {
-			return TurnOutput{}, err
-		}
-		// The conversation agent cannot read a webpage; successful queuing alone is not a reading result.
-		if deferred {
-			notify, response.Text = false, ""
-		}
-	}
+	notify := response.ReplyKind != replySilent
 	if tools.mustNotify || taskOutcomeRequiresNotification(input) {
 		notify = true
 	}
@@ -194,17 +190,17 @@ func personalJSONOutputOption(name string, schema map[string]any) model.Option {
 }
 
 func decodePersonalTurnResponse(raw string) (personalTurnResponse, error) {
-	fields, err := strictJSONObject(raw, "text", "notify", "attachments")
+	fields, err := strictJSONObject(raw, "text", "reply_kind", "attachments")
 	if err != nil {
 		return personalTurnResponse{}, fmt.Errorf("invalid personal response: %w", err)
 	}
 	var text *string
-	var notify *bool
+	var kind personalReplyKind
 	if err := json.Unmarshal(fields["text"], &text); err != nil || text == nil {
 		return personalTurnResponse{}, errors.New("invalid personal response text")
 	}
-	if err := json.Unmarshal(fields["notify"], &notify); err != nil || notify == nil {
-		return personalTurnResponse{}, errors.New("invalid personal response notify flag")
+	if err := json.Unmarshal(fields["reply_kind"], &kind); err != nil || (kind != replySilent && kind != replyReceipt && kind != replyContent) {
+		return personalTurnResponse{}, errors.New("invalid personal response reply kind")
 	}
 	var attachments []string
 	if err := json.Unmarshal(fields["attachments"], &attachments); err != nil || attachments == nil {
@@ -215,13 +211,13 @@ func decodePersonalTurnResponse(raw string) (personalTurnResponse, error) {
 			return personalTurnResponse{}, errors.New("blank attachment ID")
 		}
 	}
-	if *notify && strings.TrimSpace(*text) == "" && len(attachments) == 0 {
+	if kind != replySilent && strings.TrimSpace(*text) == "" && len(attachments) == 0 {
 		return personalTurnResponse{}, errors.New("personal response text is blank")
 	}
-	if !*notify && len(attachments) > 0 {
-		return personalTurnResponse{}, errors.New("silent personal response cannot include attachments")
+	if kind != replyContent && len(attachments) > 0 {
+		return personalTurnResponse{}, errors.New("only a content response can include attachments")
 	}
-	return personalTurnResponse{Text: *text, Notify: *notify, Attachments: attachments}, nil
+	return personalTurnResponse{Text: *text, ReplyKind: kind, Attachments: attachments}, nil
 }
 
 func taskOutcomeRequiresNotification(input TurnInput) bool {

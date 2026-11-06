@@ -160,7 +160,7 @@ func TestRuntimeFourTasksLeaveConversationAndMemoryResponsive(t *testing.T) {
 	}
 	close(release)
 	for i := 0; i < 4; i++ {
-		if got := receive(t, sent); !strings.HasPrefix(got, "completed ") || got == "completed 1" {
+		if got := receive(t, sent); !strings.Contains(got, "已经处理完了") || !strings.HasSuffix(got, "\n\ncomplete") || strings.Contains(got, "「task 1」") {
 			t.Fatal(got)
 		}
 	}
@@ -259,7 +259,7 @@ func TestRuntimeContinuesSameTaskAndAccountsRecoveredRun(t *testing.T) {
 	if err != nil || after.Status != TaskCompleted || after.Summary != "final evidence" || after.BudgetMS != 60000 {
 		t.Fatalf("final task: %+v, %v", after, err)
 	}
-	if message, err := s.ClaimDelivery(ctx); err != nil || message == nil || message.Text != "complete" {
+	if message, err := s.ClaimDelivery(ctx); err != nil || message == nil || !strings.Contains(message.Text, "已经处理完了") || !strings.Contains(message.Text, "final evidence") {
 		t.Fatalf("completion: %+v, %v", message, err)
 	}
 }

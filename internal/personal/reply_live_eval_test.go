@@ -3,6 +3,7 @@ package personal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -17,6 +18,76 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+type retryInputStore struct {
+	*Store
+	inputAttempts int
+}
+
+func (s *retryInputStore) AddTaskInputs(ctx context.Context, eventID int64, key string, taskID, revision int64, inputIDs []int64) (Task, error) {
+	s.inputAttempts++
+	if s.inputAttempts == 1 {
+		return Task{}, errors.New("temporary input-storage failure before commit; retry this operation with the returned action_id")
+	}
+	return s.Store.AddTaskInputs(ctx, eventID, key, taskID, revision, inputIDs)
+}
+
+func TestLivePersonalRecoversTaskActionWithoutReceipt(t *testing.T) {
+	engine := livePersonalEngine(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	s := testStore(t, filepath.Join(t.TempDir(), "retry.db"), time.Minute)
+	retrying := &retryInputStore{Store: s}
+	main := &MainAgent{Model: engine.Model, Store: retrying, Profile: "请用中文回复。", MaxIterations: 8, Timeout: 2 * time.Minute}
+	r := testRuntime(s)
+	logs, observed := observer.New(zapcore.InfoLevel)
+	r.Log = zap.New(logs)
+	t.Cleanup(func() {
+		if t.Failed() {
+			for _, entry := range observed.FilterMessage("tool.finished").All() {
+				fields := entry.ContextMap()
+				payload, _ := json.Marshal(fields["payload"])
+				t.Logf("fictional tool=%v outcome=%v payload=%s", fields["tool_name"], fields["outcome"], payload)
+			}
+		}
+	})
+	r.Think = main.Think
+	original := openUserEvent(t, s, 1, 1, "阅读这份资料：https://example.org/fictional-meridian/overview")
+	task, _, err := s.CreateTask(ctx, original.ID, "read", "Meridian 资料核对", TaskInput{Goal: "阅读用户提供的 Meridian 产品资料，并核对使用限制。"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishEvent(t, s, original, TurnOutput{TaskID: task.ID, Silent: true}, nil)
+	run, err := s.ClaimRun(ctx, RunTask)
+	if err != nil || run == nil {
+		t.Fatalf("start original reading: %+v %v", run, err)
+	}
+	supplement := sourceInput("2", "https://example.org/fictional-meridian/offline")
+	supplement.ReplyToID = original.MessageID
+	supplementID := acceptInput(t, s, "2", supplement)
+	if worked, err := r.turn(ctx); err != nil || !worked {
+		t.Fatalf("intake turn=%v %v", worked, err)
+	}
+	if retrying.inputAttempts < 2 {
+		t.Fatalf("material addition was not retried: %d attempts", retrying.inputAttempts)
+	}
+	var pending int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_task_inputs WHERE task_id=? AND event_id=? AND status='pending'`, task.ID, supplementID).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("late material not pending for the existing task: count=%d error=%v", pending, err)
+	}
+	tasks, err := s.Tasks(ctx, 10)
+	if err != nil || len(tasks) != 1 || tasks[0].ID != task.ID || tasks[0].Revision != task.Revision || tasks[0].Status != TaskRunning {
+		t.Fatalf("retry created extra tasks: count=%d error=%v", len(tasks), err)
+	}
+	active, err := s.Run(ctx, run.ID)
+	if err != nil || active == nil || active.Input != run.Input || active.Status != RunRunning {
+		t.Fatalf("late material changed the active run: %+v %v", active, err)
+	}
+	if delivery, err := s.ClaimDelivery(ctx); err != nil || delivery != nil {
+		t.Fatalf("recovered action produced a receipt or stale failure: %+v %v", delivery, err)
+	}
+	t.Logf("PASS: explicit late material → injected failure → recovered addition → silent, unchanged running task (%d attempts)", retrying.inputAttempts)
+}
 
 func TestLivePersonalBareLinksReply(t *testing.T) {
 	engine := livePersonalEngine(t)
@@ -112,8 +183,11 @@ func TestLivePersonalBareLinksReply(t *testing.T) {
 	if !strings.Contains(text, "17") || !(strings.Contains(text, "不支持离线") || strings.Contains(text, "不能离线") || strings.Contains(text, "必须联网")) {
 		t.Fatalf("reply lacks price, limitation or evidence: %s", text)
 	}
-	if regexp.MustCompile(`(?i)(?:task|run|任务)\s*(?:编号|号|#)?\s*\d+`).MatchString(text) {
+	if regexp.MustCompile(`(?i)(?:task|run|event|material|任务|事件)\s*(?:_?id|编号|号|#)?\s*[:：]?\s*\d+|\bm_[a-f0-9]{16,}\b|submit_progress|\breported\b`).MatchString(text) {
 		t.Fatalf("ordinary reading exposes an internal ID: %s", text)
+	}
+	if !strings.Contains(text, overview) || !strings.Contains(text, offline) {
+		t.Fatalf("reading result omitted supporting source URLs: %s", text)
 	}
 	t.Logf("PASS: two related links → one silent task → both pages read → evidence-based reply: %s", text)
 }

@@ -66,7 +66,7 @@ func TestThinkBoundsTaskCallbackAndKeepsFullRunAvailable(t *testing.T) {
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("get_run", map[string]any{"run_id": currentRun.ID}, "get-full-run"),
 		responseTool("read_material", map[string]any{"material_id": ref.ID}, "read-source"),
-		responseText(`{"text":"Saved the report at reports/report.md.","notify":true,"attachments":[]}`),
+		responseText(`{"text":"Saved the report at reports/report.md.","reply_kind":"content","attachments":[]}`),
 	}}
 	_, err = newMainAgent(t, fixture, repo).Think(context.Background(), TurnInput{
 		Event: Event{ID: 90, Kind: EventTask, TaskID: 7, RunID: currentRun.ID},

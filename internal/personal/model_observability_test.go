@@ -19,7 +19,7 @@ import (
 func TestThinkObservabilityCorrelatesToolOutcomeWithoutExtraRequests(t *testing.T) {
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("get_task", taskArgs{TaskID: 9}, "get-task-9"),
-		responseText(`{"text":"I could not find that task.","notify":true,"attachments":[]}`),
+		responseText(`{"text":"I could not find that task.","reply_kind":"content","attachments":[]}`),
 	}}
 	model := fixture.model(t)
 	core, logs := observer.New(zapcore.DebugLevel)

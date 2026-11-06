@@ -138,16 +138,22 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 				output = TurnOutput{TaskID: task.ID, Silent: true}
 			} else {
 				// An incomplete planning turn must not strand work without a visible state.
-				_, err = r.Store.SettleTask(ctx, event.ID, task.ID, current.Revision, TaskWaitingInput, current.Summary)
+				settled, err := r.Store.SettleTask(ctx, event.ID, task.ID, current.Revision, TaskWaitingInput, current.Summary)
 				if err != nil {
 					return true, err
 				}
-				output = TurnOutput{TaskID: task.ID, Text: fmt.Sprintf("「%s」的阶段成果已保存，后续安排未能完成。你可以让我继续。\n\n%s", task.Title, clip(current.Summary, 6000))}
+				output.Text = fmt.Sprintf("「%s」的阶段成果已保存，后续安排未能完成。你可以让我继续。\n\n%s", settled.Title, clip(settled.Summary, 6000))
+				output.TaskID = task.ID
+				output.Silent = false
 			}
 		} else if current != nil && current.Status == TaskWaitingBudget {
-			output = TurnOutput{TaskID: task.ID, Text: taskBudgetText(current)}
-		} else if current != nil && (output.Silent || outcome == "fallback_reply") && (current.Status == TaskCompleted || current.Status == TaskFailed || current.Status == TaskWaitingInput) {
-			output = TurnOutput{TaskID: task.ID, Text: taskClosingText(current)}
+			output.Text = taskBudgetText(current)
+			output.TaskID = task.ID
+			output.Silent = false
+		} else if current != nil && (current.Status == TaskCompleted || current.Status == TaskFailed || current.Status == TaskWaitingInput) {
+			output.Text = taskClosingText(current, summarizeRunResult(*input.CurrentRun).Sources)
+			output.TaskID = task.ID
+			output.Silent = false
 		}
 	}
 	if errors.Is(thinkErr, ErrAttachmentUnavailable) && !strings.Contains(output.Text, "要发送的附件已删除或不可用") {

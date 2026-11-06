@@ -38,29 +38,79 @@ func TestIsPureURLMessageBoundaries(t *testing.T) {
 	}
 }
 
-func TestPendingInputsOnlyListsSameSourceQueuedPureURLs(t *testing.T) {
+func TestPendingInputsStopAtNonURLAndPreserveSourceIsolation(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Hour)
 	current := openUserEvent(t, s, 1, 101, "Research this page")
-	urlID := acceptInput(t, s, "2", sourceInput("102", "https://example.com/article"))
-	acceptInput(t, s, "3", sourceInput("103", "Read https://example.com/mixed"))
-	acceptInput(t, s, "4", sourceInput("104", "/continue_task https://example.com/command"))
-	forwarded := sourceInput("105", "https://example.com/forwarded")
-	forwarded.Material = true
-	acceptInput(t, s, "5", forwarded)
-	withAttachment := sourceInput("106", "https://example.com/attachment")
-	withAttachment.Attachments = []channel.Attachment{{Name: "forwarded.txt", Error: "attachment unavailable"}}
-	acceptInput(t, s, "6", withAttachment)
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO personal_events(kind,text,channel,account,sender,message_id,attachments,status,created_at)
 		VALUES('user','https://example.com/other-owner','telegram','test-bot','other-owner','107','[]','queued',?)`, timestamp(time.Now())); err != nil {
 		t.Fatal(err)
 	}
+	urlID := acceptInput(t, s, "2", sourceInput("102", "https://example.com/article"))
+	acceptInput(t, s, "3", sourceInput("103", "Read https://example.com/mixed"))
+	afterInstructionID := acceptInput(t, s, "4", sourceInput("104", "https://example.com/after-instruction"))
+	acceptInput(t, s, "5", sourceInput("105", "/continue_task https://example.com/command"))
+	forwarded := sourceInput("106", "https://example.com/forwarded")
+	forwarded.Material = true
+	acceptInput(t, s, "6", forwarded)
+	withAttachment := sourceInput("107", "https://example.com/attachment")
+	withAttachment.Attachments = []channel.Attachment{{Name: "forwarded.txt", Error: "attachment unavailable"}}
+	acceptInput(t, s, "7", withAttachment)
 	pending, err := s.PendingInputs(ctx, current.ID)
 	if err != nil || len(pending) != 1 || pending[0].ID != urlID || pending[0].Text != "https://example.com/article" {
-		t.Fatalf("PendingInputs()=(%+v,%v), want only direct pure URL", pending, err)
+		t.Fatalf("PendingInputs()=(%+v,%v), want URLs only through the first non-URL message", pending, err)
+	}
+	var status string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM personal_events WHERE id=?`, afterInstructionID).Scan(&status); err != nil || status != string(EventQueued) {
+		t.Fatalf("URL after intervening text status=(%q,%v), want queued", status, err)
 	}
 	if _, err := s.PendingInputs(ctx, urlID); err == nil {
 		t.Fatal("PendingInputs accepted a queued event instead of the current running user event")
+	}
+}
+
+func TestPendingInputsDoNotCrossInterveningUserMessageOrAttachment(t *testing.T) {
+	for _, blocker := range []struct {
+		name           string
+		text           string
+		withAttachment bool
+	}{
+		{name: "user instruction", text: "下一条链接先不要读取，等我确认。"},
+		{name: "attachment", text: "https://example.com/attached", withAttachment: true},
+	} {
+		t.Run(blocker.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := testStore(t, ":memory:", time.Hour)
+			current := openUserEvent(t, s, 1, 101, "https://example.com/first")
+			middle := sourceInput("102", blocker.text)
+			if blocker.withAttachment {
+				middle.Attachments = []channel.Attachment{{Name: "forwarded.txt", Error: "attachment unavailable"}}
+			}
+			middleID := acceptInput(t, s, "2", middle)
+			secondURLID := acceptInput(t, s, "3", sourceInput("103", "https://example.com/second"))
+			task, _ := createTask(t, s, current, "create-before-instruction", "Read first link", "Read the first link", "")
+
+			pending, err := s.PendingInputs(ctx, current.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, addErr := s.AddTaskInputs(ctx, current.ID, "cross-instruction", task.ID, task.Revision, []int64{current.ID, secondURLID})
+			if len(pending) != 0 {
+				t.Errorf("PendingInputs() crossed the intervening %s: %+v", blocker.name, pending)
+			}
+			if addErr == nil {
+				t.Errorf("AddTaskInputs accepted a later URL across the intervening %s", blocker.name)
+			}
+			for _, id := range []int64{middleID, secondURLID} {
+				var status string
+				if err := s.db.QueryRowContext(ctx, `SELECT status FROM personal_events WHERE id=?`, id).Scan(&status); err != nil {
+					t.Fatal(err)
+				}
+				if status != string(EventQueued) {
+					t.Errorf("event %d status=%q, want queued", id, status)
+				}
+			}
+		})
 	}
 }
 

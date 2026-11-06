@@ -68,7 +68,7 @@ func taskInputKind(event Event) string {
 	return "feedback"
 }
 
-// PendingInputs returns up to ten later queued direct-user messages containing only HTTP(S) URLs.
+// PendingInputs returns up to ten consecutive later queued direct-user messages containing only HTTP(S) URLs.
 func (s *Store) PendingInputs(ctx context.Context, currentEventID int64) ([]Event, error) {
 	if currentEventID <= 0 {
 		return nil, errors.New("personal: current event ID must be positive")
@@ -103,11 +103,12 @@ func pendingInputsTx(ctx context.Context, tx *sql.Tx, currentEventID int64) ([]E
 			_ = rows.Close()
 			return nil, err
 		}
-		if isPureURLMessage(event.Text) && len(event.Attachments) == 0 {
-			events = append(events, *event)
-			if len(events) == maxPendingInputs {
-				break
-			}
+		if !isPureURLMessage(event.Text) || len(event.Attachments) > 0 {
+			break
+		}
+		events = append(events, *event)
+		if len(events) == maxPendingInputs {
+			break
 		}
 	}
 	if err := rows.Err(); err != nil {

@@ -176,11 +176,11 @@ func TestReadAttachmentPagesStayBoundedAndRecheckDeletion(t *testing.T) {
 }
 
 func TestDecodeFileOnlyReply(t *testing.T) {
-	reply, err := decodePersonalTurnResponse(`{"text":"","notify":true,"attachments":["file-id"]}`)
+	reply, err := decodePersonalTurnResponse(`{"text":"","reply_kind":"content","attachments":["file-id"]}`)
 	if err != nil || len(reply.Attachments) != 1 {
 		t.Fatalf("reply=%+v err=%v", reply, err)
 	}
-	for _, raw := range []string{`{"text":"","notify":true,"attachments":[]}`, `{"text":"ok","notify":true,"attachments":null}`, `{"text":"ok","notify":true,"attachments":[""]}`} {
+	for _, raw := range []string{`{"text":"","reply_kind":"content","attachments":[]}`, `{"text":"ok","reply_kind":"content","attachments":null}`, `{"text":"ok","reply_kind":"content","attachments":[""]}`} {
 		if _, err := decodePersonalTurnResponse(raw); err == nil {
 			t.Fatalf("accepted %s", raw)
 		}
@@ -205,7 +205,7 @@ func TestFileOnlyModelReplyQueuesAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(personalTurnResponse{Notify: true, Attachments: []string{file.ID}})
+	raw, _ := json.Marshal(personalTurnResponse{ReplyKind: replyContent, Attachments: []string{file.ID}})
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{responseText(string(raw))}}
 	main := &MainAgent{Store: s, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 3}
 	runtime := testRuntime(s)
@@ -240,7 +240,7 @@ func TestUnavailableModelAttachmentBecomesReplyFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := &responsesFixture{t: t, responses: []fixtureResponse{responseText(`{"text":"","notify":true,"attachments":["00000000000000000000000000000000"]}`)}}
+	fixture := &responsesFixture{t: t, responses: []fixtureResponse{responseText(`{"text":"","reply_kind":"content","attachments":["00000000000000000000000000000000"]}`)}}
 	main := &MainAgent{Store: s, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 3}
 	runtime := testRuntime(s)
 	runtime.Think = main.Think
@@ -273,7 +273,7 @@ func TestTaskUpdatePreservesOmittedAttachmentsAndClearsExplicitEmpty(t *testing.
 			args["attachments"] = []string{}
 		}
 		fixture := &responsesFixture{t: t, responses: []fixtureResponse{
-			responseTool("update_task", args, "update"), responseText(`{"text":"Updated.","notify":true,"attachments":[]}`),
+			responseTool("update_task", args, "update"), responseText(`{"text":"Updated.","reply_kind":"content","attachments":[]}`),
 		}}
 		main := &MainAgent{Store: s, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 4}
 		output, err := main.Think(ctx, TurnInput{Event: event})

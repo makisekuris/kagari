@@ -326,7 +326,7 @@ func TestThinkContinuesOnlyCallbackTaskAndCanBeSilent(t *testing.T) {
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("get_task", map[string]any{"task_id": 7}, "get-task"),
 		responseTool("continue_task", map[string]any{"task_id": 7, "expected_revision": 2, "step": "Read two more sources", "extend_budget": false}, "continue-task"),
-		responseText(`{"text":"我会沿原目标继续执行。","notify":false,"attachments":[]}`),
+		responseText(`{"text":"我会沿原目标继续执行。","reply_kind":"silent","attachments":[]}`),
 	}}
 	repo := newToolRepo()
 	repo.tasks[7] = Task{ID: 7, Title: "Compare approaches", Goal: "Compare two documented approaches", Revision: 2, Status: TaskAwaitingReview, BudgetMS: 1_800_000, UsedMS: 500_000}
@@ -355,7 +355,7 @@ func TestThinkContinuesOnlyCallbackTaskAndCanBeSilent(t *testing.T) {
 func TestThinkSettlesItsOwnTaskAndNotifiesOnCompletion(t *testing.T) {
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("settle_task", map[string]any{"task_id": 7, "expected_revision": 2, "status": TaskCompleted, "summary": "The original comparison is complete."}, "settle-own-task"),
-		responseText(`{"text":"任务已完成：比较结果已保存。","notify":false,"attachments":[]}`),
+		responseText(`{"text":"任务已完成：比较结果已保存。","reply_kind":"silent","attachments":[]}`),
 	}}
 	repo := newToolRepo()
 	repo.tasks[7] = Task{ID: 7, Goal: "Compare two approaches", Revision: 2, Status: TaskAwaitingReview}
@@ -377,7 +377,7 @@ func TestThinkCallbackCannotMutateOtherTasksOrMemory(t *testing.T) {
 		responseTool("memory_put", map[string]any{"key": "language", "value": "English", "expected_version": 0, "evidence": "Please remember"}, "memory-denied"),
 		responseTool("continue_task", map[string]any{"task_id": 8, "expected_revision": 1, "step": "continue unrelated", "extend_budget": false}, "other-task-denied"),
 		responseTool("continue_task", map[string]any{"task_id": 7, "expected_revision": 1, "step": "extend from callback", "extend_budget": true}, "budget-denied"),
-		responseText(`{"text":"我不能从任务回调中创建任务、改记忆或继续其他任务。","notify":false,"attachments":[]}`),
+		responseText(`{"text":"我不能从任务回调中创建任务、改记忆或继续其他任务。","reply_kind":"silent","attachments":[]}`),
 	}}
 	repo := newToolRepo()
 	repo.tasks[7] = Task{ID: 7, Goal: "Only this task", Revision: 1, Status: TaskAwaitingReview, BudgetMS: 1000}
@@ -404,7 +404,7 @@ func TestThinkDirectUserQueuesTaskAndCommitsEvidenceBackedMemory(t *testing.T) {
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("create_task", map[string]any{"title": "Find a guide", "goal": "Find a guide to local cycling", "context": "Preference snapshot: concise answers"}, "create-task"),
 		responseTool("memory_put", map[string]any{"key": "answer_style", "value": "concise", "expected_version": 0, "evidence": evidence}, "put-memory"),
-		responseText(`{"text":"任务已排队，记忆偏好已保存。","notify":true,"attachments":[]}`),
+		responseText(`{"text":"任务已排队，记忆偏好已保存。","reply_kind":"content","attachments":[]}`),
 	}}
 	repo := newToolRepo()
 	event := Event{ID: 22, Kind: EventUser, Text: "Find a guide to local cycling. " + evidence}
@@ -442,7 +442,7 @@ func TestThinkMemoryPutRejectsStaleVersionAndUnsupportedEvidence(t *testing.T) {
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("memory_put", map[string]any{"key": "answer_style", "value": "detailed", "expected_version": 2, "evidence": "I now prefer detailed answers."}, "stale-memory"),
 		responseTool("memory_put", map[string]any{"key": "answer_style", "value": "detailed", "expected_version": 3, "evidence": "I now prefer short answers."}, "unsupported-evidence"),
-		responseText(`{"text":"我无法验证这次记忆变更。","notify":true,"attachments":[]}`),
+		responseText(`{"text":"我无法验证这次记忆变更。","reply_kind":"content","attachments":[]}`),
 	}}
 	repo := newToolRepo()
 	repo.memoryErr = errors.New("expected_version does not match the current memory")
@@ -464,7 +464,7 @@ func TestThinkMemoryToolFailureIsReturnedAndLoggedWithoutEvidence(t *testing.T) 
 	const evidence = "PRIVATE_EVIDENCE_QUOTE"
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("memory_put", memoryPutArgs{Key: "answer_style", Value: value, Evidence: evidence}, "failed-put"),
-		responseText(`{"text":"暂时无法保存。","notify":true,"attachments":[]}`),
+		responseText(`{"text":"暂时无法保存。","reply_kind":"content","attachments":[]}`),
 	}}
 	repo := newToolRepo()
 	repo.memoryErr = errors.New("store unavailable")
@@ -496,7 +496,7 @@ func TestThinkReadsRunsAndReturnsMemoryTombstone(t *testing.T) {
 		responseTool("list_runs", map[string]any{"task_id": 7}, "list-runs"),
 		responseTool("memory_get", map[string]any{"key": "answer_style"}, "get-memory"),
 		responseTool("memory_history", map[string]any{"key": "answer_style"}, "memory-history"),
-		responseText(`{"text":"当前记忆已删除，历史记录可供审计。","notify":true,"attachments":[]}`),
+		responseText(`{"text":"当前记忆已删除，历史记录可供审计。","reply_kind":"content","attachments":[]}`),
 	}}
 	repo := newToolRepo()
 	repo.tasks[7] = Task{ID: 7, Goal: "Old goal", Revision: 1}
@@ -521,10 +521,10 @@ func TestThinkNotificationRulesAndStrictFailures(t *testing.T) {
 		response fixtureResponse
 		wantErr  string
 	}{
-		{name: "invalid json", response: responseText(`{"text":"hello","notify":true,"attachments":[],"extra":1}`), wantErr: "unexpected field"},
-		{name: "blank text", response: responseText(`{"text":"  ","notify":true,"attachments":[]}`), wantErr: "blank"},
+		{name: "invalid json", response: responseText(`{"text":"hello","reply_kind":"content","attachments":[],"extra":1}`), wantErr: "unexpected field"},
+		{name: "blank text", response: responseText(`{"text":"  ","reply_kind":"content","attachments":[]}`), wantErr: "blank"},
 		{name: "refusal", response: responseRefusal(), wantErr: "refused"},
-		{name: "incomplete", response: fixtureResponse{status: "incomplete", output: responseText(`{"text":"not final","notify":true,"attachments":[]}`).output}, wantErr: "incomplete"},
+		{name: "incomplete", response: fixtureResponse{status: "incomplete", output: responseText(`{"text":"not final","reply_kind":"content","attachments":[]}`).output}, wantErr: "incomplete"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -540,14 +540,14 @@ func TestThinkNotificationRulesAndStrictFailures(t *testing.T) {
 		})
 	}
 
-	fixture := &responsesFixture{t: t, responses: []fixtureResponse{responseText(`{"text":"Continued quietly.","notify":false,"attachments":[]}`)}}
+	fixture := &responsesFixture{t: t, responses: []fixtureResponse{responseText(`{"text":"Continued quietly.","reply_kind":"silent","attachments":[]}`)}}
 	repo := newToolRepo()
 	repo.tasks[7] = Task{ID: 7, Revision: 1, Goal: "Goal", Status: TaskAwaitingReview, BudgetMS: 1000}
 	output, err := newMainAgent(t, fixture, repo).Think(context.Background(), TurnInput{Event: Event{ID: 25, Kind: EventTask, TaskID: 7}, Tasks: []Task{repo.tasks[7]}})
 	if err != nil || !output.Silent {
 		t.Fatalf("ordinary continuation should be silent, output=%+v err=%v", output, err)
 	}
-	fixture = &responsesFixture{t: t, responses: []fixtureResponse{responseText(`{"text":"The task completed.","notify":false,"attachments":[]}`)}}
+	fixture = &responsesFixture{t: t, responses: []fixtureResponse{responseText(`{"text":"The task completed.","reply_kind":"silent","attachments":[]}`)}}
 	output, err = newMainAgent(t, fixture, repo).Think(context.Background(), TurnInput{Event: Event{ID: 26, Kind: EventTask, TaskID: 7}, Tasks: []Task{{ID: 7, Status: TaskCompleted}}})
 	if err != nil || output.Silent {
 		t.Fatalf("task completion must notify, output=%+v err=%v", output, err)
