@@ -15,8 +15,8 @@ import (
 )
 
 const personalSchema = `
-CREATE TABLE IF NOT EXISTS personal_schema (version INTEGER PRIMARY KEY CHECK(version=2));
-INSERT OR IGNORE INTO personal_schema(version) VALUES(2);
+CREATE TABLE IF NOT EXISTS personal_schema (version INTEGER PRIMARY KEY CHECK(version=4));
+INSERT OR IGNORE INTO personal_schema(version) VALUES(4);
 CREATE TABLE IF NOT EXISTS personal_meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS personal_tasks (
 	status TEXT NOT NULL CHECK(status IN ('queued','running','awaiting_review','waiting_input','waiting_budget','completed','failed','cancelled')),
 	summary TEXT NOT NULL DEFAULT '',
 	checkpoint TEXT NOT NULL DEFAULT '',
+	source_run_ids TEXT NOT NULL DEFAULT '[]',
+	memory_refs TEXT NOT NULL DEFAULT '[]',
 	budget_ms INTEGER NOT NULL CHECK(budget_ms>0),
 	used_ms INTEGER NOT NULL DEFAULT 0 CHECK(used_ms>=0),
 	updated_at TEXT NOT NULL
@@ -65,6 +67,8 @@ CREATE TABLE IF NOT EXISTS personal_runs (
 	input TEXT NOT NULL,
 	status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),
 	result TEXT NOT NULL DEFAULT '',
+	context_manifest TEXT NOT NULL DEFAULT '',
+	memory_versions TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(memory_versions)),
 	error TEXT NOT NULL DEFAULT '',
 	elapsed_ms INTEGER NOT NULL DEFAULT 0 CHECK(elapsed_ms>=0),
 	created_at TEXT NOT NULL,
@@ -75,7 +79,9 @@ CREATE INDEX IF NOT EXISTS personal_runs_task ON personal_runs(task_id,revision,
 CREATE UNIQUE INDEX IF NOT EXISTS personal_runs_memory_review ON personal_runs(event_id) WHERE kind='memory_review';
 CREATE TABLE IF NOT EXISTS personal_events (
 	id INTEGER PRIMARY KEY,
-	kind TEXT NOT NULL CHECK(kind IN ('user','material','task')),
+	schedule_id INTEGER REFERENCES personal_schedules(id),
+	reply_outbox_id INTEGER REFERENCES personal_outbox(id),
+	kind TEXT NOT NULL CHECK(kind IN ('user','material','task','schedule')),
 	text TEXT NOT NULL,
 	task_id INTEGER REFERENCES personal_tasks(id),
 	run_id INTEGER REFERENCES personal_runs(id),
@@ -88,13 +94,15 @@ CREATE TABLE IF NOT EXISTS personal_events (
 	status TEXT NOT NULL CHECK(status IN ('queued','running','completed')),
 	interrupted INTEGER NOT NULL DEFAULT 0 CHECK(interrupted IN (0,1)),
 	elapsed_ms INTEGER NOT NULL DEFAULT 0 CHECK(elapsed_ms>=0),
-	created_at TEXT NOT NULL
+	created_at TEXT NOT NULL,
+	CHECK(kind<>'schedule' OR (status='completed' AND run_id IS NULL AND schedule_id IS NOT NULL))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS personal_events_message ON personal_events(channel,account,sender,message_id) WHERE message_id<>'';
 CREATE UNIQUE INDEX IF NOT EXISTS personal_events_run ON personal_events(run_id) WHERE run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS personal_events_claim ON personal_events(status,id);
 CREATE TABLE IF NOT EXISTS personal_history (
 	id INTEGER PRIMARY KEY,
+	schedule_id INTEGER REFERENCES personal_schedules(id),
 	event_id INTEGER NOT NULL REFERENCES personal_events(id),
 	role TEXT NOT NULL,
 	text TEXT NOT NULL,
@@ -109,8 +117,11 @@ CREATE TABLE IF NOT EXISTS personal_requests (
 	task_id INTEGER REFERENCES personal_tasks(id),
 	run_id INTEGER REFERENCES personal_runs(id),
 	memory_history_id INTEGER REFERENCES personal_memory_history(id),
-	CHECK((task_id IS NOT NULL AND run_id IS NOT NULL AND memory_history_id IS NULL) OR
-		(task_id IS NULL AND run_id IS NULL AND memory_history_id IS NOT NULL)),
+	schedule_id INTEGER REFERENCES personal_schedules(id),
+	result_json TEXT,
+	CHECK((task_id IS NOT NULL AND run_id IS NOT NULL AND memory_history_id IS NULL AND schedule_id IS NULL) OR
+		(task_id IS NULL AND run_id IS NULL AND memory_history_id IS NOT NULL AND schedule_id IS NULL) OR
+		(task_id IS NULL AND run_id IS NULL AND memory_history_id IS NULL AND schedule_id IS NOT NULL AND result_json IS NOT NULL)),
 	PRIMARY KEY(event_id,request_key)
 );
 CREATE TABLE IF NOT EXISTS personal_memories (
@@ -136,6 +147,7 @@ CREATE INDEX IF NOT EXISTS personal_memory_history_key ON personal_memory_histor
 CREATE INDEX IF NOT EXISTS personal_memory_history_recent ON personal_memory_history(id DESC);
 CREATE TABLE IF NOT EXISTS personal_outbox (
 	id INTEGER PRIMARY KEY,
+	suggestion_id INTEGER REFERENCES personal_schedule_context_suggestions(id),
 	event_id INTEGER NOT NULL REFERENCES personal_events(id),
 	part INTEGER NOT NULL CHECK(part>0),
 	text TEXT NOT NULL,
@@ -242,7 +254,7 @@ func NewStore(path string, taskBudget time.Duration) (*Store, error) {
 		}
 		return nil, fmt.Errorf("personal: begin schema transaction: %w", err)
 	}
-	if _, err := tx.Exec(personalSchema); err != nil {
+	if _, err := tx.Exec(personalSchema + scheduleSchema + scheduleSuggestionSchema + replySchema + taskInputSchema + materialSchema + progressSchema); err != nil {
 		_ = tx.Rollback()
 		_ = db.Close()
 		if tempDir {
@@ -281,7 +293,7 @@ func checkPersonalSchema(ctx context.Context, db *sql.DB) error {
 	var marker int
 	err := db.QueryRowContext(ctx, `SELECT version FROM personal_schema LIMIT 1`).Scan(&marker)
 	if err == nil {
-		if marker != 2 {
+		if marker != 4 {
 			return fmt.Errorf("personal: unsupported database schema version %d", marker)
 		}
 		return nil

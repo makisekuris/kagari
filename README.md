@@ -8,6 +8,10 @@ Kagari is a personal agent written in Go. `kagari run` starts a Telegram or Weix
 
 Requires Go 1.27. The process lock uses `flock` and supports macOS and Linux. You provide the model endpoint and configure Telegram or sign in to Weixin; the service replies only to the bound owner in private chat.
 
+任务材料在采集后即保存，模型按页回查，并在后续阶段继承累计进展与未处理输入。请按端点实际容量设置必填的 `model.context_window`；超过容量的请求会明确失败，不会删掉当前任务要求后继续。数据与恢复规则见[上下文管理实现方案](docs/CONTEXT-MANAGEMENT-IMPLEMENTATION.md)。
+
+Collected task material is saved immediately and read in pages. Later stages retain cumulative progress and unprocessed inputs. Set the required `model.context_window` to the endpoint's actual capacity. Requests that exceed it fail explicitly without dropping current task requirements. See the [context management implementation](docs/CONTEXT-MANAGEMENT-IMPLEMENTATION.md) for persistence and recovery rules.
+
 ## 日常操作 / Everyday commands
 
 在项目根目录运行 `make` 或 `make help` 查看命令。需要 Go 和 Make；macOS 和 Linux 的 Make 均可使用。
@@ -128,6 +132,10 @@ make run
 以后回答请简洁一些，但保留关键依据。
 ```
 
+只发送网页链接时，Agent 会先做范围有限的初步阅读，再回复简短理解、判断和依据。成功入队本身不发确认消息；约 30 秒仍无实质回应时补一次等待提示。相关的连续链接可以合并阅读，后补材料沿用当前任务；需要补充信息、执行失败和最终结果仍会通知。普通阅读回复默认不显示 Task/Run 编号，可引用消息或用任务内容继续追问。
+
+Sending a bare link starts a bounded first read, followed by a concise interpretation and supporting evidence. Queuing alone produces no receipt; after about 30 seconds without a substantive reply, the service adds one waiting notice. Related links can be read together, and later material can join the existing task. Required input, failures, and final results still receive replies. Ordinary reading replies omit Task/Run IDs; quote a message or describe the work to follow up.
+
 ## 配置 / Configuration
 
 所有命令都会读取**当前工作目录**的 `.env`，无需手动 `source`。配置优先级为 **系统环境变量 > .env > YAML > 默认值**；显式设置的空值也会覆盖低优先级配置。`-config` 只指定 YAML 路径，不改变 `.env` 查找目录。
@@ -136,11 +144,13 @@ Commands load `.env` from the current working directory; no `source` command is 
 
 | 设置 / Setting | 默认值 / Default | 说明 / Description |
 | --- | --- | --- |
-| `storage.path` | `data/kagari.db` | SQLite 数据库 / SQLite database |
+| `model.context_window` | 必填 / required | 端点输入加输出总 token 容量，不从模型别名推断 / endpoint input plus output token capacity |
+| `storage.path` | `data/kagari-context.db` | SQLite 数据库 / SQLite database |
 | `profile_path` | `profile.md` | V2 Agent 的 owner 背景与表达偏好 / Owner context and style for the V2 agent |
 | `agent.streaming` | `false` | 启用 Responses SSE / Enables Responses SSE |
 | `personal.task_concurrency` | `4` | 并行 Task worker 数，必须为正数 / Concurrent task workers; must be positive |
 | `personal.task_budget` | `30m` | 每个 Task 的累计执行时长上限 / Total execution time limit per Task |
+| `personal.timezone` | `Asia/Shanghai` | 新计划的默认 IANA 时区 / Default IANA timezone for new schedules |
 
 `.env`、`config.yaml` 和 `profile.md` 已被 Git 忽略。不要将真实凭证写入示例文件或提交到仓库。
 
@@ -207,9 +217,9 @@ V2 的 Task 状态、阶段成果、已用执行时间与时长上限、记忆�
 
 V2 Task states, stage results, elapsed execution times and time limits, memories, and receipts are saved in the SQLite file at `storage.path`. When a worker claims a Task Run, it subtracts the Task's elapsed execution time from its time limit to find the time available for that Run. This calculated value is not stored separately. Restarting the service requeues interrupted background stages without resetting elapsed time. An interrupted conversation keeps committed actions and reports the interruption; the owner must repeat uncommitted requests, avoiding duplicate task creation. Interrupted sends are marked uncertain. V1 tables are not migrated into personal Tasks. The current V2 schema is incompatible with older V2 personal databases; start with a new `storage.path`. Kagari does not migrate or delete the old database automatically.
 
-Task 执行器可以读取网页，也可以用 `ls`、`read_file`、`write_file`、`edit_file` 读写当前 Task 工作区内的 UTF-8 文本文件，每个文件最多 1 MiB。执行器还可用 `read_attachment` 读取选定材料、用 `write_attachment` 保存独立文本附件；不能任意写入本地路径、执行命令或修改外部服务。
+Task 执行器可以读取网页，也可以用 `ls`、`read_file`、`write_file`、`edit_file` 读写当前 Task 工作区内的 UTF-8 文本文件，每个文件最多 1 MiB。执行器还可用 `read_attachment` 读取选定材料、用 `write_attachment` 保存独立文本附件；不能任意写入本地路径或执行命令。浏览器工具用于读取、搜索和页面导航；提示词禁止发布、删除、购买或提交个人数据，但网站操作本身不受通用只读沙箱保护。
 
-The Task executor can read web pages and use `ls`, `read_file`, `write_file`, and `edit_file` to read and write UTF-8 text files in the current Task's workspace, up to 1 MiB per file. It can also use `read_attachment` for selected materials and `write_attachment` to save independent text attachments. It cannot write arbitrary local paths, execute commands, or modify external services.
+The Task executor can read web pages and use `ls`, `read_file`, `write_file`, and `edit_file` to read and write UTF-8 text files in the current Task's workspace, up to 1 MiB per file. It can also use `read_attachment` for selected materials and `write_attachment` to save independent text attachments. It cannot write arbitrary local paths or execute commands. Browser tools are intended for reading, search, and navigation. Prompts prohibit publishing, deleting, purchasing, and submitting personal data, but website actions are not protected by a general read-only sandbox.
 
 每个 Task 的文件保存在 `<storage.path>.workspaces/<store_id>/tasks/<task_id>/`。继续任务或重启服务后，执行器仍使用这个目录。`edit_file` 要求待替换文本在文件中恰好出现一次。文件写入成功后就会保留，即使阶段随后失败或取消，也不会撤销修改。Run 的 `files` 列出本次成功写入或修改的文件相对路径；这些路径指向当前文件，不保存历史版本，也不表示文件已作为附件发送。选定文本成果需通过 `write_attachment` 保存，再由主 Agent 选择附件 ID 发送；工作目录文件不会自动转为附件。备份时需同时保留数据库、工作区、附件和凭证。
 
@@ -219,11 +229,33 @@ Each Task stores its files at `<storage.path>.workspaces/<store_id>/tasks/<task_
 
 Only one `run` process can hold a database's lock. Read-only inspection commands remain available while the service runs.
 
+### 定时计划 / Schedules
+
+在私聊中登记周期目标，例如“每天上海时间 9 点生成一道 Go 练习题”。普通计划每次创建独立 Task；连续检查计划只在完整检查已保存区间后推进进度。首次登记从未来的正常周期开始，不立即执行。停机错过多个周期时只创建一次任务；同计划仍有排队、执行或待决回调时跳过本次触发。稳定等待输入或执行时间用完的 Task 不阻止下一周期。
+
+Register a recurring goal in chat, such as a daily Go exercise at 09:00 in Shanghai. Each activation creates an independent Task. Continuous checks advance their saved coverage only after a complete assessment. Registration starts at a future activation. Missed periods coalesce into one task; active work or an unresolved callback prevents overlapping automatic runs. Tasks waiting for input or more execution time do not block later cycles.
+
+暂停或取消计划会取消尚未开始的 Task，已经开始的 Task 保留原输入。主动恢复从恢复时刻积累新的检查范围；固定附件或时间规则故障后的恢复保留原检查进度。回复某次结果默认只修改那一次 Task；明确说“以后每次”才修改计划。背景与当前记忆冲突时，程序附上具体建议；用户确认前不改计划，过期建议需重新确认。
+
+Pausing or cancelling removes unstarted tasks while started tasks retain their input. Manual resume begins a new coverage scope; recovery from an attachment or schedule fault preserves the previous progress. Replies affect one Task unless the owner explicitly requests changes to future cycles. Background suggestions show concrete replacements and require confirmation; stale suggestions require another confirmation.
+
+只读查询 / Read-only inspection:
+
+```sh
+make cli ARGS="schedules -limit 20"
+make cli ARGS="schedules 1"
+make cli ARGS="schedule-history -before 100 -limit 20 1"
+```
+
+计划详情包含待处理建议、近期 Task 摘要和投递状态。执行完成与消息送达分别记录。完整规则见[功能设计](docs/SCHEDULE-DESIGN.md)和[实现方案](docs/SCHEDULE-IMPLEMENTATION.md)。
+
+Schedule details include pending suggestions, recent Task summaries, and delivery states. Execution completion and delivery are recorded separately. See the [design](docs/SCHEDULE-DESIGN.md) and [implementation plan](docs/SCHEDULE-IMPLEMENTATION.md).
+
 ### 从旧版本更新 / Updating from older versions
 
-V1 阅读归档及其 `read`、`analyze`、`digest`、`status`、`export`、`retry`、`retry-delivery`、`db` 命令已移除。旧数据库和旧表不会自动删除，也不会导入 personal Task。现有 personal 数据库可继续使用，本次清理不改变其 schema。
+V1 阅读归档及其 `read`、`analyze`、`digest`、`status`、`export`、`retry`、`retry-delivery`、`db` 命令已移除。旧数据库和旧表不会自动删除，也不会导入 personal Task。上下文管理与定时计划使用 schema 4；请指定新的 `storage.path`，保留旧数据库及其工作区、附件和凭证，不执行迁移。
 
-V1 reading archives and the `read`, `analyze`, `digest`, `status`, `export`, `retry`, `retry-delivery`, and `db` commands have been removed. Old databases and tables are neither deleted automatically nor imported into personal Tasks. Existing personal databases remain usable; this cleanup does not change their schema.
+V1 reading archives and the `read`, `analyze`, `digest`, `status`, `export`, `retry`, `retry-delivery`, and `db` commands have been removed. Old databases and tables are neither deleted automatically nor imported into personal Tasks. Context management and schedules use schema 4. Choose a new `storage.path` and retain the old database, workspace, attachments, and credentials; no migration is performed.
 
 从旧配置删除 `weekly`、`max_attempts`、`reader.cache_ttl` 和 `telegram.target_chat_ids`，以及对应的 `KAGARI_*` 环境变量。YAML 仍严格校验，保留这些旧键会报错。网页读取只在同一次 Task 阶段内复用 HTTP 结果。
 
@@ -233,14 +265,31 @@ Remove `weekly`, `max_attempts`, `reader.cache_ttl`, and `telegram.target_chat_i
 
 - HTTP + Readability 读取网页，限制超时、响应大小、正文长度和链接数，并默认拒绝非公网地址。只有显式配置 `reader.allowed_non_public_cidrs` 才会放行指定网段。 / HTTP + Readability fetches web pages with timeout, response-size, content-length, and link limits. Non-public IPs are blocked by default; only explicitly configured CIDRs are allowed.
 - X 通过公开 oEmbed 读取单帖，并提取正文中的裸链接与短链。Agent 自主选择追读，未读内容不能当成已核实证据；oEmbed 可能缺少长帖、线程或链接卡片。 / X oEmbed provides public post text and extracted links. The agent chooses further reads; long posts, threads and link cards may be incomplete.
-- `read_url` 通过 HTTP GET 获取网页并提取正文与链接；启用 `browser.enabled` 后，`browse_url` 同时提供 Playwright MCP 的渲染页面读取。模型可选择或混用两个工具，HTTP 返回成功但正文不足时也可改用浏览器。浏览器需要 Node.js 18+ 和本机 Google Chrome；每个 Task 阶段使用独立无头会话，不继承 Codex 或个人 Chrome 的登录状态。 / `read_url` fetches pages over HTTP GET and extracts text and links. With `browser.enabled`, `browse_url` is also available through Playwright MCP. The model can choose either tool or use both, including when HTTP succeeds but returns insufficient content. Requires Node.js 18+ and local Google Chrome. Each Task stage gets an isolated headless browser without personal or Codex login state.
-- 默认每个 Task 阶段最多 6 次不同的 `(URL, 后端)` 读取；失败和 HTTP 改用浏览器都计数，同后端同 URL 重读复用本次结果。默认最多 10 次模型迭代、3 分钟阶段时限。 / The default is six distinct `(URL, backend)` reads, including failures and backend changes; repeated calls reuse the task's observation. Ten model iterations and a three-minute timeout bound each Task stage.
+- `read_url` 通过 HTTP GET 获取网页并提取正文与链接；显式启用 `browser.enabled` 后，`browse_url` 可在同一 Playwright MCP 会话中导航、读取快照、点击、输入、按键、等待或返回。省略 `action` 时默认为 `navigate`，兼容只传 `url` 的旧调用。`PageDown` 可向下滚动，`Enter` 可提交搜索。浏览器需要 Node.js 18+ 和本机 Google Chrome；每次 Task 阶段使用独立无头会话，不继承 Codex 或个人 Chrome 的登录状态。每次浏览器操作都会返回新快照；快照中的 `ref` 可用于点击或输入。仅支持这些交互，不提供任意代码、文件上传下载或标签页操作。 / `read_url` fetches pages over HTTP GET and extracts text and links. When `browser.enabled` is explicitly enabled, `browse_url` can navigate, read snapshots, click, type, press keys, wait, or go back in one Playwright MCP session. Omitting `action` defaults to `navigate`, preserving URL-only calls. `PageDown` scrolls down; `Enter` can submit a search. Requires Node.js 18+ and local Google Chrome. Each Task stage gets an isolated headless session without personal or Codex login state. Every browser operation returns a fresh snapshot; use its `ref` values to click or type. Only these interactions are supported; arbitrary code, file uploads/downloads, and tab operations are unavailable.
+- `browse_url` 调用示例（每行都是一次工具调用；每次调用都会返回新快照，后续 ref 从最近一次结果中选择，以下省略快照正文） / `browse_url` examples (each line is a separate tool call; every call returns a fresh snapshot, so choose each later ref from the latest result; snapshot content is omitted below):
+
+  ```json
+  {"action":"navigate","url":"https://example.com"}
+  {"action":"click","ref":"e5"}
+  {"action":"type","ref":"e8","text":"search terms"}
+  {"action":"press_key","key":"Enter"}
+  {"action":"wait_for","seconds":2}
+  {"action":"back"}
+  ```
+
+  单独刷新快照 / To request a snapshot explicitly:
+
+  ```json
+  {"action":"snapshot"}
+  ```
+
+- 默认每次 Task 阶段共享 6 次网页操作预算；每次有效浏览器操作都计数，包括失败，浏览器观察不会通过 URL 缓存复用。首次 `read_url` 请求会计数；同一 URL 后续读取可复用本阶段的 HTTP 结果且不再计数。默认最多 10 次模型迭代、3 分钟阶段时限。 / The default shared per-stage source budget is six operations. Each valid browser operation counts, including failures, and browser observations are not reused through the URL cache. The first `read_url` request counts; later reads of the same URL reuse this stage's HTTP result and do not count again. Ten model iterations and a three-minute timeout bound each Task stage.
 
 ## 日志与隐私 / Logs and privacy
 
-V2 `make run` 在 stderr 显示阶段、关联 ID、耗时和结果摘要；应用将完整调用记录保存为 JSONL。默认 `data/kagari.db` 对应 `data/kagari.logs/`，按约 50 MiB 轮转，保留最近 7 天且总量不超过 1 GiB，先触发的限制生效。`logging` 配置可修改这些值；V2 的 `log_level` 只调整终端阈值，文件始终保留 info 及以上记录。
+V2 `make run` 在 stderr 显示阶段、关联 ID、耗时和结果摘要；应用将完整调用记录保存为 JSONL。默认 `data/kagari-context.db` 对应 `data/kagari-context.logs/`，按约 50 MiB 轮转，保留最近 7 天且总量不超过 1 GiB，先触发的限制生效。`logging` 配置可修改这些值；V2 的 `log_level` 只调整终端阈值，文件始终保留 info 及以上记录。
 
-V2 writes concise progress to stderr and full application call records to JSONL files. For `data/kagari.db`, the default directory is `data/kagari.logs/`. Files rotate around 50 MiB and expire after 7 days or when total storage reaches 1 GiB, whichever comes first. Configure these values under `logging`; V2 `log_level` controls the terminal threshold while files retain info and above.
+V2 writes concise progress to stderr and full application call records to JSONL files. For `data/kagari-context.db`, the default directory is `data/kagari-context.logs/`. Files rotate around 50 MiB and expire after 7 days or when total storage reaches 1 GiB, whichever comes first. Configure these values under `logging`; V2 `log_level` controls the terminal threshold while files retain info and above.
 
 ```sh
 ./bin/kagari -config config.yaml events --limit 20

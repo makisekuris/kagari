@@ -16,6 +16,7 @@
 | Task 执行器 | `personal.task_concurrency`，默认 4 | 执行互相独立的读取、研究与内容生成任务；同一 Task 同时只有一个有效 Run |
 | 记忆维护 | 1 | 串行处理用户输入后的自动记忆检查 |
 | 消息投递 | 1 | 按顺序发送已保存的回复并记录当前渠道的投递目标和回执 |
+| 等待提示 | 1 | 检查尚无实质回应的输入，达到约 30 秒时保存一次等待提示，不调用模型 |
 
 模型只在处理消息、Task 或记忆操作时调用。待处理工作保存在 SQLite；Worker 每 200ms 检查队列，空闲时不调用模型。
 
@@ -33,11 +34,23 @@ Task 状态包括 `queued`、`running`、`awaiting_review`、`waiting_input`、`
 
 累计执行时间达到上限后，系统保存已有阶段成果并等待使用者。用户明确授权延长执行时间后，系统提高时长上限，每次增加的时长等于 `personal.task_budget` 的配置值。`personal.task_concurrency` 默认是 `4`，必须为正数。
 
-主 Agent 通过 `create_task`、`list_tasks`、`get_task`、`update_task`、`cancel_task`、`continue_task` 和 `settle_task` 管理 Task，通过 `get_run` 与 `list_runs` 查看 Run。Task 执行器可用 `read_url` 读取网页，启用浏览器后还可用 `browse_url`。`ls`、`read_file`、`write_file` 和 `edit_file` 只操作当前 Task 的工作区。
+主 Agent 通过 `create_task`、`list_tasks`、`get_task`、`update_task`、`cancel_task`、`continue_task` 和 `settle_task` 管理 Task，通过 `add_task_input` 补充同一目标的资料，通过 `get_run` 与 `list_runs` 查看 Run。Task 执行器可用 `read_url` 读取网页，启用浏览器后还可用 `browse_url`。`ls`、`read_file`、`write_file` 和 `edit_file` 只操作当前 Task 的工作区。
 
-修改目标会创建新版本，旧版本迟到的结果不能覆盖新目标。后台回调只能继续或结束自己的 Task，不能创建其他目标，也不能提高累计执行时长上限。创建长任务的对话回合只确认任务已入队，不能把入队说成完成。
+修改目标会创建新版本，旧版本迟到的结果不能覆盖新目标。后台回调只能继续或结束自己的 Task，不能创建其他目标，也不能提高累计执行时长上限。创建长任务后可静默结束当前事件；入队本身不要求通知，回复时不能把入队说成完成。
 
 直接回复某条已送达的 Task 消息时，系统用来源渠道、账号、会话和平台消息 ID 关联该 Task；未明确回复时，主 Agent 根据上下文判断目标，存在歧义就询问。
+
+### 初步阅读与回复时机
+
+只发送链接表示请求初步阅读：先读直接提供的页面，返回简短理解、重要判断及依据，不自动扩展为开放研究或生成附件。主 Agent 用 `notify` 决定是否有内容需要发送；纯链接已成功安排后台阅读、没有必须立即报告的操作结果时，程序会抑制模型生成的入队回执。静默输出可为空，但不能附带待发送附件。直接用户回合只有在实际提交了有效后台工作、且没有需要回复的操作结果时才允许静默。完成、失败、需要输入或增加执行时间时必须回复；发过重要中间结果并承诺继续后，结束时仍给出简短收尾。
+
+接收直接用户消息时创建回复记录。自接收起约 30 秒仍无实质回应，等待 worker 根据当前排队、执行或整理结果的状态保存一次提示；不为了凑齐链接延迟启动。实际发送受渠道可用性和投递队列影响。结果入队或任务结束后，未开始发送的旧等待提示会撤除；正在发送、已发送和发送结果不确定的记录保留。提示状态持久化，重启不重复提醒。
+
+主 Agent 每轮最多看到同一渠道、账号和发送者后续排队的 10 条纯 HTTP(S) 链接消息，自行选择相关资料。`add_task_input` 显式指定当前事件和所选候选；Store 在同一事务内校验、关联输入、合并回复记录并完成被吸收的事件，每条原始消息仍各自触发记忆检查。无关链接留待后续处理，带指令或附件的后续消息不会被自动吸收。
+
+补充资料不改变目标或版本，也不中断正在执行的 Run。只有当前创建回合尚未结束、唯一首 Run 仍不可被 worker 领取时，允许把同批资料补入该 Run；其他资料在下一阶段加入，并保留原始事件编号及各自附件来源。尚未进入 Run 的资料会阻止 Task 完成；下一阶段基于已有发现检查新增资料，再回复增量或修正。
+
+普通阅读回复默认隐藏 Task/Run 编号。等待提示和合并输入仍保留内部任务关联；一条回复关联多个任务时，主 Agent 根据内容选择，无法确定则询问。定时计划报告沿用计划编号、Task 编号和检查区间，详见下方定时计划规则。
 
 ## 3. 自动记忆与遗忘
 
@@ -49,7 +62,7 @@ Task 状态包括 `queued`、`running`、`awaiting_review`、`waiting_input`、`
 
 ## 4. 持久化与恢复
 
-personal 服务使用 `storage.path` 指向的 SQLite 文件，创建 13 张 personal 表：
+personal 服务使用 `storage.path` 指向的 SQLite 文件，使用 schema 4，创建 24 张 personal 表：
 
 | 表 | 保存内容 |
 | --- | --- |
@@ -58,18 +71,31 @@ personal 服务使用 `storage.path` 指向的 SQLite 文件，创建 13 张 per
 | `personal_bindings` | 各渠道绑定的 Bot 账号和使用者 |
 | `personal_inbox` | 按渠道及 Bot 账号保存接收游标 |
 | `personal_attachments` | 附件元数据、受控文件位置及删除状态 |
-| `personal_events` | 用户、材料和 Task 回调事件；记录事件关联的 Task/Run |
+| `personal_events` | 用户、材料、Task 回调和已完成的 schedule 来源事件；保留 Task/Run/Schedule 及具体回复通知归属 |
 | `personal_history` | 对话历史；Task 归属通过 `event_id` 关联 `personal_events` 读取 |
 | `personal_tasks` | Task 目标、状态、阶段摘要、累计执行时长和时长上限 |
 | `personal_runs` | Task 执行或自动记忆 review 的输入、结果、错误和耗时 |
-| `personal_requests` | 工具请求幂等记录；Task 操作关联 `task_id` 和 `run_id`，记忆操作关联 `memory_history_id` |
+| `personal_requests` | 工具请求幂等记录；Task/Memory 操作保留关联 ID，Schedule 操作保存结果快照 |
 | `personal_memories` | 当前有效记忆与遗忘 tombstone |
 | `personal_memory_history` | 版本化记忆变更；显式记忆写入的 `run_id` 为空，自动 review 写入则关联 review Run |
-| `personal_outbox` | 待发送消息和回执；Task 归属通过 `event_id` 关联 `personal_events` 读取 |
+| `personal_outbox` | 待发送消息、回执和建议分段归属；Task/Schedule 归属通过 `event_id` 关联事件读取 |
+| `personal_schedules` | 计划定义、授权来源、下次触发时间和成功检查进度 |
+| `personal_schedule_occurrences` | 每次调度决定、独立 Task、首次开始时间、冻结区间与成功凭据 |
+| `personal_schedule_context_suggestions` | 具体背景替换、记忆依据、提醒身份和确认状态 |
+| `personal_reply_groups` | 接收时间、等待提示引用、是否已有实质回应及是否结束 |
+| `personal_reply_inputs` | 原始用户事件与合并回复记录的关联 |
+| `personal_reply_tasks` | 回复记录关联的一个或多个 Task |
+| `personal_task_inputs` | Task 补充材料和反馈的原始事件、revision、pending/assigned/applied 状态和处理 Run |
+| `personal_materials` | 不可变来源正文、采集元数据，以及压缩前保存的工具记录 |
+| `personal_task_run_refs` | 每个 Task revision 明确授权读取的外部 Run |
+| `personal_read_checkpoints` | 当前 revision 已报告的阅读区间、资源版本和要点 |
+| `personal_progress` | 追加保存的累计进展条目、证据和纠正版本 |
+
+回复和输入关联与材料、引用、续读和累计进展共同使用 schema 4。旧事件不补建等待提示；schema 3 及更早版本拒绝写入，保留旧库、工作区和附件。
 
 显式记忆变更、其历史和请求记录在同一事务内提交；自动 review 单独保存为 Run。接收批次和推进渠道游标在同一事务中完成；消息按渠道、账号、发送者及消息 ID 去重。数据库文件权限设为仅当前用户读写。
 
-服务重启时，中断的后台 Run 重新排队，已保存的阶段成果和已用执行时间都保留。累计执行时间已达到上限的 Task 转为 `waiting_budget` 并通知使用者。中断的阶段可能重新执行，模型内部的执行位置不会恢复。完整来源正文保存在 Run 中；下一阶段接收限制长度后的摘要、来源地址、文件相对路径、独立附件引用和原 Run 编号，避免一次传入过长的材料。
+服务重启时，中断的后台 Run 重新排队，已保存的阶段成果和已用执行时间都保留。累计执行时间已达到上限的 Task 转为 `waiting_budget` 并通知使用者。中断的阶段可能重新执行，模型内部的执行位置不会恢复。完整来源正文和元数据在采集后即保存到材料表，Run.Result 只保留引用；下一阶段按容量选择累计进展、阅读要点和阶段摘要，其余内容通过分页工具回查。中断 Run 的 assigned 输入先释放为 pending，再领取时只重新分配原 Run.Input 中的事件；后来到达的输入保留到下一阶段。
 
 每个 Task 使用固定的本地工作区：`<storage.path>.workspaces/<store_id>/tasks/<task_id>/`。数据库元数据中的 `store_id` 用来区分不同数据库，避免新数据库中的同号 Task 读写旧文件。同一 Task 继续执行、修改目标或在服务重启后恢复时，执行器都使用原目录。文件工具只接受相对路径，并通过 `os.Root` 阻止路径和符号链接访问工作区外的文件。文件必须是 UTF-8 文本，每个文件最多 1 MiB。
 
@@ -87,7 +113,7 @@ Run 的 `files` 字段列出本次成功写入或修改的文件相对路径，�
 
 若进程在发送期间退出，该 outbox 项恢复为 `uncertain`，不会自动重发，以免重复发送；已确认的回执保留。可确认未送达的失败最多尝试三次，包含首次尝试。发送结果未知时需要使用者判断是否重发。
 
-V2 不把 V1 的 `jobs`、归档、周报快照或 Telegram offset 导入 personal Task。旧表可留在同一 SQLite 文件中；本次清理不改变当前 personal schema。
+V2 不把 V1 的 `jobs`、归档、周报快照或 Telegram offset 导入 personal Task。旧库独立保留；上下文与定时计划要求使用新的 schema 4 数据库，不向旧库增建计划表。
 
 ## 5. 启动与使用
 
@@ -95,13 +121,14 @@ V2 不把 V1 的 `jobs`、归档、周报快照或 Telegram offset 导入 person
 
 ```yaml
 storage:
-  path: data/kagari.db
+  path: data/kagari-context.db
 
 telegram:
   allowed_user_ids: [123456789]
 
 personal:
   channel: telegram
+  timezone: Asia/Shanghai
   task_concurrency: 4
   task_budget: 30m
 ```
@@ -112,7 +139,7 @@ personal:
 make run CONFIG=config.yaml
 ```
 
-例如，发送“调查 https://example.com 上这项方案的主要取舍”；之后可问“任务进展如何？”，或说“取消任务 #1”“继续任务 #1，补查它的兼容性”。累计执行时间达到上限后，需要用户明确授权增加执行时间才能继续。
+例如，发送“调查 https://example.com 上这项方案的主要取舍”；之后可引用回复问“进展如何？”，或说“取消刚才的方案调查”“继续补查兼容性”。内部编号仍可通过 CLI 查询。累计执行时间达到上限后，需要用户明确授权增加执行时间才能继续。
 
 稳定偏好会在用户消息后自动检查，例如“以后回答请简洁一些，但保留关键依据”。也可以直接纠正或遗忘：“更正：我现在主要使用 Rust”“忘记我偏好简洁回答这件事”。这些操作进入后台队列，不应在操作完成前宣称已保存或已遗忘。
 
@@ -148,6 +175,9 @@ make run CONFIG=config.yaml
 | 主对话与任务队列 | 让长任务与聊天分开推进 | 四个执行器被占用时，第五个排队；聊天和记忆仍响应；取消后的迟到结果不发布 |
 | 阶段推进、计时与恢复 | 长任务可分阶段执行，重启后保留已保存成果和已用执行时间 | 同 Task 跨 Run 继续；Run 与任务回调累计计时；达到时长上限后等待用户授权；中断主回合不重复执行工具；长来源正文不阻止下一阶段执行 |
 | 自动长期记忆 | 保存稳定背景并处理纠正与遗忘 | 真实模型识别稳定偏好、忽略临时变化、复用原键纠正、执行遗忘、跨重启调用工具召回；旧 review 和旧聊天不复活被遗忘的值 |
+| 初步阅读与回复时机 | 按结果决定回复，减少入队回执和重复提示 | 纯链接成功入队后静默；等待提示跨重启去重，结果先到时撤除未发提示；相关链接合并仍逐条检查记忆；新增资料不改正在运行的快照，未处理前不能结案；重要中间回复后有收尾 |
+
+回复回归另覆盖了引用等待提示定位多个候选 Task、引用被合并的原始消息，以及取消后重新继续时创建新的回复记录。`TestLivePersonalBareLinksReply` 使用真实模型和受控网页，验证两条相关链接合并为一个 Task、首回合无入队回执、实际读取两页后结案，回复包含页面中的价格和离线限制，且不显示内部 Task/Run 编号。链接归类和文字组织仍由模型判断，这个小样本不保证所有输入都能正确处理。
 
 已运行 `make check`（全仓测试与 `go vet`）、`go test -race ./internal/personal ./internal/telegram`、CLI 构建和临时数据库的查询命令。真实模型另分项验证了任务继续、任务完成判定，以及 `read_url` 返回的随机证据实际进入阶段结果与 SQLite。所有模型样本使用虚构个人信息、空 profile、临时数据库和受控页面；没有向真实 Telegram 发消息。
 
@@ -167,3 +197,9 @@ KAGARI_LIVE_EVAL=1 KAGARI_EVAL_CONFIG_DIR="$PWD" \
 ```
 
 后续实际使用从 `make run` 和 Telegram 私聊开始；先确认唯一 owner 配置正确。
+
+## 定时计划与 Task 的关系
+
+`Runtime` 在同一进程中调度已登记计划，复用 Task worker 和 outbox。调度事务只做入队与下次时间计算；worker 取得 Task 执行权后调用 `BeginScheduledRun`，固定首次开始时间和连续检查区间。`SettleTask` 把完整审查、Task 结案和检查进度放在同一事务中；后续消息发送不会改变检查进度。
+
+各次 Task 使用独立工作区和执行时长上限，不自动继承上次累计成果。恢复保留已固定的区间，普通 Task 沿用原恢复规则。计划暂停、取消和修改只取消未开始的 Task。背景建议随回调通知入队，建议确认必须来自新的直接用户事件。规则和验收列表见 [SCHEDULE-DESIGN.md](SCHEDULE-DESIGN.md) 与 [SCHEDULE-IMPLEMENTATION.md](SCHEDULE-IMPLEMENTATION.md)。

@@ -18,14 +18,9 @@ func boundedTaskResult(raw string) string {
 
 	files := append([]string(nil), result.Files...)
 	for i := range result.Sources {
-		source := &result.Sources[i]
-		source.Content, source.Links = "", nil
-		source.ID = limitRunes(source.ID, 128)
-		source.RequestedURL, source.URL = limitRunes(source.RequestedURL, 512), limitRunes(source.URL, 512)
-		source.Kind, source.Status = limitRunes(source.Kind, 64), limitRunes(source.Status, 32)
-		source.Title, source.Author = limitRunes(source.Title, 200), limitRunes(source.Author, 128)
-		source.Reason, source.ReadMethod = limitRunes(source.Reason, 256), limitRunes(source.ReadMethod, 64)
+		result.Sources[i].Title = limitRunes(result.Sources[i].Title, 200)
 	}
+
 	for i := range result.Attachments {
 		attachment := &result.Attachments[i]
 		attachment.Name = limitRunes(attachment.Name, 200)

@@ -79,11 +79,11 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 	}
 	engine.Log = log
 	if cfg.Browser.Enabled {
-		engine.OpenBrowser = func(ctx context.Context) (func(context.Context, string) (domain.Source, error), func(), error) {
+		engine.OpenBrowser = func(ctx context.Context) (browser.Browse, func(), error) {
 			return browser.Open(ctx, cfg)
 		}
 	}
-	main := &personal.MainAgent{Store: s, Log: log, Model: engine.Model, Persona: role.Prompt(), Profile: engine.Profile, MaxIterations: cfg.Agent.MaxIterations, Timeout: cfg.Agent.Timeout}
+	main := &personal.MainAgent{Store: s, Log: log, Model: engine.Model, Persona: role.Prompt(), Profile: engine.Profile, Timezone: cfg.Personal.Timezone, MaxIterations: cfg.Agent.MaxIterations, Timeout: cfg.Agent.Timeout}
 	var client channel.Client
 	if cfg.Personal.Channel == "weixin" {
 		credentials, loadErr := weixin.LoadCredentials(credentialPath(cfg))
@@ -108,6 +108,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 		return err
 	}
 	workspaceDirectory := filepath.Join(cfg.Storage.Path+".workspaces", storeID)
+	main.WorkspaceDirectory = workspaceDirectory
 	runtime := &personal.Runtime{
 		Store: s, Think: main.Think, Execute: personal.TaskExecutor(engine, s, workspaceDirectory), ReviewMemory: main.ReviewMemory,
 		TaskConcurrency: cfg.Personal.TaskConcurrency, Poll: client.Poll, Log: log,
@@ -151,7 +152,7 @@ func inspectPersonal(ctx context.Context, cfg config.Config, args []string, out 
 			result = task
 		}
 	case "runs":
-		result, err = s.Runs(ctx, taskID, 100)
+		result, err = s.ExportRuns(ctx, taskID, 100)
 	case "memories", "memory-history":
 		query := ""
 		if len(args) == 2 {

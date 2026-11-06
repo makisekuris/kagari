@@ -26,10 +26,12 @@ type personalToolReply struct {
 }
 
 type createTaskArgs struct {
-	Title       string   `json:"title"`
-	Goal        string   `json:"goal"`
-	Context     string   `json:"context"`
-	Attachments []string `json:"attachments,omitempty"`
+	SourceRunIDs []int64  `json:"source_run_ids,omitempty"`
+	MemoryRefs   []string `json:"memory_refs,omitempty"`
+	Title        string   `json:"title"`
+	Goal         string   `json:"goal"`
+	Context      string   `json:"context"`
+	Attachments  []string `json:"attachments,omitempty"`
 }
 
 type taskArgs struct {
@@ -37,6 +39,8 @@ type taskArgs struct {
 }
 
 type reviseTaskArgs struct {
+	SourceRunIDs     []int64  `json:"source_run_ids,omitempty"`
+	MemoryRefs       []string `json:"memory_refs,omitempty"`
 	TaskID           int64    `json:"task_id"`
 	ExpectedRevision int64    `json:"expected_revision"`
 	Goal             string   `json:"goal"`
@@ -57,10 +61,11 @@ type continueTaskArgs struct {
 }
 
 type settleTaskArgs struct {
-	TaskID           int64      `json:"task_id"`
-	ExpectedRevision int64      `json:"expected_revision"`
-	Status           TaskStatus `json:"status"`
-	Summary          string     `json:"summary"`
+	Assessment       *CheckAssessment `json:"check_assessment,omitempty"`
+	TaskID           int64            `json:"task_id"`
+	ExpectedRevision int64            `json:"expected_revision"`
+	Status           TaskStatus       `json:"status"`
+	Summary          string           `json:"summary"`
 }
 
 type runArgs struct {
@@ -97,15 +102,46 @@ type memoryHistoryArgs struct {
 }
 
 type personalTools struct {
-	store      Repository
-	log        *zap.Logger
-	input      TurnInput
-	event      Event
-	taskIDs    map[int64]struct{}
-	mustNotify bool
+	timezone    string
+	scheduleIDs map[int64]struct{}
+	store       Repository
+	log         *zap.Logger
+	input       TurnInput
+	event       Event
+	taskIDs     map[int64]struct{}
+	mustNotify  bool
+}
+
+func (p *personalTools) addScheduleID(id int64) {
+	if id > 0 {
+		if p.scheduleIDs == nil {
+			p.scheduleIDs = make(map[int64]struct{})
+		}
+		p.scheduleIDs[id] = struct{}{}
+	}
+}
+
+func (p *personalTools) scheduleID() int64 {
+	if len(p.scheduleIDs) == 0 {
+		if p.taskID() != p.event.TaskID {
+			return 0
+		}
+		return p.event.ScheduleID
+	}
+	if len(p.scheduleIDs) == 1 {
+		for id := range p.scheduleIDs {
+			return id
+		}
+	}
+	return 0
 }
 
 func (p *personalTools) taskID() int64 {
+	if len(p.taskIDs) == 0 && len(p.scheduleIDs) > 0 {
+		if _, sameSchedule := p.scheduleIDs[p.event.ScheduleID]; len(p.scheduleIDs) != 1 || !sameSchedule {
+			return 0
+		}
+	}
 	if p.event.TaskID > 0 {
 		if len(p.taskIDs) == 0 {
 			return p.event.TaskID
@@ -190,7 +226,7 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		if err != nil {
 			return toolError(err), nil
 		}
-		task, run, err := p.store.CreateTask(ctx, p.event.ID, key, a.Title, TaskInput{Goal: a.Goal, Context: a.Context, Attachments: attachments})
+		task, run, err := p.store.CreateTask(ctx, p.event.ID, key, a.Title, TaskInput{Goal: a.Goal, Context: a.Context, Attachments: attachments, SourceRunIDs: a.SourceRunIDs, MemoryRefs: a.MemoryRefs})
 		if err != nil {
 			return toolError(err), nil
 		}
@@ -204,12 +240,8 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	listTasks, err := utils.InferTool("list_tasks", "列出最近的后台任务。", func(ctx context.Context, _ struct{}) (personalToolReply, error) {
-		tasks, err := p.store.Tasks(ctx, 50)
-		if err != nil {
-			return toolError(err), nil
-		}
-		return personalToolReply{OK: true, Tasks: tasks}, nil
+	listTasks, err := utils.InferTool("list_tasks", "按关键词、更新时间及 ID 游标查找任务；后页同时传回 next_before_id、snapshot_max_id、query_key，并保持查询条件。goal/context 全文使用 read_task。", func(ctx context.Context, a TaskQuery) (TaskPage, error) {
+		return p.store.QueryTasks(ctx, ReadScope{EventID: p.event.ID}, a)
 	})
 	if err != nil {
 		return nil, err
@@ -227,7 +259,8 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 			return toolError(fmt.Errorf("task not found")), nil
 		}
 		p.addTaskID(task.ID)
-		return personalToolReply{OK: true, Task: task}, nil
+		card := taskCard(*task)
+		return personalToolReply{OK: true, Task: &card}, nil
 	})
 	if err != nil {
 		return nil, err
@@ -258,7 +291,7 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		if err != nil {
 			return toolError(err), nil
 		}
-		task, run, err := p.store.ReviseTask(ctx, p.event.ID, key, a.TaskID, a.ExpectedRevision, TaskInput{Goal: a.Goal, Context: a.Context, Attachments: attachments})
+		task, run, err := p.store.ReviseTask(ctx, p.event.ID, key, a.TaskID, a.ExpectedRevision, TaskInput{Goal: a.Goal, Context: a.Context, Attachments: attachments, SourceRunIDs: a.SourceRunIDs, MemoryRefs: a.MemoryRefs})
 		if err != nil {
 			return toolError(err), nil
 		}
@@ -276,6 +309,7 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		if err := p.directUserMutation(); err != nil {
 			return toolError(err), nil
 		}
+		p.mustNotify = true
 		if a.TaskID <= 0 || a.ExpectedRevision <= 0 {
 			return toolError(fmt.Errorf("task_id and expected_revision are required")), nil
 		}
@@ -343,7 +377,7 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		if a.Status != TaskCompleted && a.Status != TaskWaitingInput && a.Status != TaskFailed {
 			return toolError(fmt.Errorf("status must be completed, waiting_input or failed")), nil
 		}
-		task, err := p.store.SettleTask(ctx, p.event.ID, a.TaskID, a.ExpectedRevision, a.Status, a.Summary)
+		task, err := p.store.SettleTask(ctx, p.event.ID, a.TaskID, a.ExpectedRevision, a.Status, a.Summary, a.Assessment)
 		if err != nil {
 			return toolError(err), nil
 		}
@@ -370,29 +404,19 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 			return toolError(fmt.Errorf("run not found")), nil
 		}
 		p.addTaskID(run.TaskID)
-		return personalToolReply{OK: true, Run: run}, nil
+		card := runCard(*run)
+		return personalToolReply{OK: true, Run: &card}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	listRuns, err := utils.InferTool("list_runs", "按任务 ID 列出最近的执行记录。", func(ctx context.Context, a listRunsArgs) (personalToolReply, error) {
-		if a.TaskID <= 0 {
-			return toolError(fmt.Errorf("task_id must be positive")), nil
-		}
-		runs, err := p.store.Runs(ctx, a.TaskID, 30)
-		if err != nil {
-			return toolError(err), nil
-		}
-		if len(runs) == 0 {
-			if task, taskErr := p.store.Task(ctx, a.TaskID); taskErr != nil {
-				return toolError(taskErr), nil
-			} else if task == nil {
-				return toolError(fmt.Errorf("task not found")), nil
-			}
-		}
+	listRuns, err := utils.InferTool("list_runs", "按 ID 游标列出执行摘要；后页同时传回 next_before_id、snapshot_max_id、query_key。全文使用 read_run，来源使用 list_materials。", func(ctx context.Context, a struct {
+		TaskID int64 `json:"task_id"`
+		ListPage
+	}) (RunPage, error) {
 		p.addTaskID(a.TaskID)
-		return personalToolReply{OK: true, Runs: runs}, nil
+		return p.store.QueryRuns(ctx, ReadScope{EventID: p.event.ID}, a.TaskID, a.ListPage)
 	})
 	if err != nil {
 		return nil, err
@@ -444,6 +468,7 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		if err := p.directUserMutation(); err != nil {
 			return p.memoryError(a.Key, "put", err), nil
 		}
+		p.mustNotify = true
 		if strings.TrimSpace(a.Key) == "" || strings.TrimSpace(a.Value) == "" || a.ExpectedVersion < 0 || !strings.Contains(p.event.Text, a.Evidence) || strings.TrimSpace(a.Evidence) == "" {
 			return p.memoryError(a.Key, "put", fmt.Errorf("key, value, nonnegative expected_version and an exact current-message evidence quote are required")), nil
 		}
@@ -465,6 +490,7 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		if err := p.directUserMutation(); err != nil {
 			return p.memoryError(a.Key, "forget", err), nil
 		}
+		p.mustNotify = true
 		if strings.TrimSpace(a.Key) == "" || a.ExpectedVersion <= 0 || !strings.Contains(p.event.Text, a.Evidence) || strings.TrimSpace(a.Evidence) == "" {
 			return p.memoryError(a.Key, "forget", fmt.Errorf("key, positive expected_version and an exact current-message evidence quote are required")), nil
 		}
@@ -493,5 +519,19 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	return []tool.BaseTool{createTask, listTasks, getTask, updateTask, cancelTask, continueTask, settleTask, getRun, listRuns, memorySearch, memoryGet, memoryPut, memoryForget, memoryHistory}, nil
+	scheduled, err := p.buildScheduleTools()
+	if err != nil {
+		return nil, err
+	}
+	suggestions, err := p.buildScheduleSuggestionTools()
+	if err != nil {
+		return nil, err
+	}
+	scheduled = append(scheduled, suggestions...)
+	inputs, err := p.inputTools()
+	if err != nil {
+		return nil, err
+	}
+	scheduled = append(scheduled, inputs...)
+	return append([]tool.BaseTool{createTask, listTasks, getTask, updateTask, cancelTask, continueTask, settleTask, getRun, listRuns, memorySearch, memoryGet, memoryPut, memoryForget, memoryHistory}, scheduled...), nil
 }

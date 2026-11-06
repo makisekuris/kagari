@@ -17,6 +17,9 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*Outgoing, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := suppressStaleWaitRepliesTx(ctx, tx); err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	var id int64
 	err = tx.QueryRowContext(ctx, `SELECT d.id FROM personal_outbox d
@@ -111,6 +114,11 @@ func (s *Store) UpdateDelivery(ctx context.Context, id int64, status string, rec
 		targetStatus, receipt.Channel, receipt.Account, receipt.Conversation, receipt.MessageID, detail, nextAttemptAt, id)
 	if err != nil {
 		return err
+	}
+	if targetStatus == "pending" {
+		if err := suppressStaleWaitRepliesTx(ctx, tx); err != nil {
+			return err
+		}
 	}
 	return commitStoreOutcome(ctx, tx, "delivery.update", "saved", deliveryOutcomePayload{
 		Status: targetStatus, Receipt: receipt, Detail: detail, NextAttemptAt: nextAttemptAt,

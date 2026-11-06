@@ -278,10 +278,23 @@ func toolBusinessFailure(toolName string, output *tool.CallbackOutput) bool {
 		}
 	}
 	if toolName == "read_url" || toolName == "browse_url" {
-		// Only the read tools return domain.Source; other tools may use an unrelated source field.
+		// Only the read tools return source references and text pages; other tools may use an unrelated source field.
 		var source *domain.Source
-		if raw, ok := result["source"]; ok && json.Unmarshal(raw, &source) == nil && source != nil {
-			return !source.Usable()
+		if raw, ok := result["source"]; ok {
+			if json.Unmarshal(raw, &source) == nil && source != nil && source.Content != "" {
+				return !source.Usable()
+			}
+			var ref domain.SourceRef
+			if json.Unmarshal(raw, &ref) != nil || ref.Status == "" {
+				return false
+			}
+			var page struct {
+				Text string `json:"text"`
+			}
+			if rawPage, ok := result["page"]; ok {
+				_ = json.Unmarshal(rawPage, &page)
+			}
+			return !(domain.Source{Status: ref.Status, Truncated: ref.SourceTruncated, Content: page.Text}).Usable()
 		}
 	}
 	return false

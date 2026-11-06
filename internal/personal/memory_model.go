@@ -31,9 +31,13 @@ func (a *MainAgent) ReviewMemory(ctx context.Context, input MemoryReviewInput) (
 	defer cancel()
 
 	input = boundedMemoryReviewInput(input)
+	boundedModel, err := modelWithSchema(a.Model, memoryReviewOutputSchema())
+	if err != nil {
+		return MemoryReview{}, err
+	}
 	agent, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name: "memory_reviewer", Description: "Extract only durable personal facts directly supported by the current user event.",
-		Instruction: memoryReviewInstruction, Model: a.Model, MaxIterations: 1,
+		Instruction: memoryReviewInstruction, Model: boundedModel, MaxIterations: 1,
 	})
 	if err != nil {
 		return MemoryReview{}, fmt.Errorf("create memory reviewer: %w", err)
@@ -65,7 +69,6 @@ func (a *MainAgent) ReviewMemory(ctx context.Context, input MemoryReviewInput) (
 }
 
 func boundedMemoryReviewInput(input MemoryReviewInput) MemoryReviewInput {
-	input.Event.Text = limitRunes(input.Event.Text, maxEventRunes)
 	input.Memories = append([]Memory(nil), input.Memories...)
 	if len(input.Memories) > maxMemories {
 		input.Memories = input.Memories[:maxMemories]
@@ -81,7 +84,11 @@ func boundedMemoryReviewInput(input MemoryReviewInput) MemoryReviewInput {
 }
 
 func memoryReviewOutputOption() model.Option {
-	return personalJSONOutputOption("personal_memory_review", map[string]any{
+	return personalJSONOutputOption("personal_memory_review", memoryReviewOutputSchema())
+}
+
+func memoryReviewOutputSchema() map[string]any {
+	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"changes": map[string]any{"type": "array", "items": map[string]any{
@@ -100,7 +107,7 @@ func memoryReviewOutputOption() model.Option {
 		},
 		"required":             []string{"changes", "question"},
 		"additionalProperties": false,
-	})
+	}
 }
 
 func decodeMemoryReview(raw string) (MemoryReview, error) {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"kagari/internal/agent"
+	"kagari/internal/browser"
 	"kagari/internal/config"
 	"kagari/internal/domain"
 )
@@ -55,10 +56,11 @@ func TestTaskExecutorFramesTaskAndInjectsOnlyActiveBoundedMemory(t *testing.T) {
 	repo.memories["answer_style"] = Memory{Key: "answer_style", Value: "Concise answers are preferred.", Version: 2}
 	repo.memories["forgotten_fact"] = Memory{Key: "forgotten_fact", Value: "must not be injected", Deleted: true, Version: 4}
 	input := TaskInput{
-		Goal:     "Compare the two official recovery guides.",
-		Context:  "Use official sources and keep the comparison concise.",
-		Step:     "Read the first guide and record its recovery steps.",
-		Previous: "Earlier evidence: the second guide mentions checkpoints.",
+		Goal:       "Compare the two official recovery guides.",
+		Context:    "Use official sources and keep the comparison concise.",
+		Step:       "Read the first guide and record its recovery steps.",
+		Previous:   "Earlier evidence: the second guide mentions checkpoints.",
+		MemoryRefs: []string{"answer_style"},
 	}
 	result, err := runTaskExecutor(t, context.Background(), readingEngine(fixture, nil), repo, executorRun(input), nil)
 	if err != nil {
@@ -99,7 +101,10 @@ func TestTaskExecutorReportsReadsAndClosesBrowser(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Sources) != 1 || result.Sources[0].Content != "Step one." {
+		if len(result.Sources) != 1 {
+			t.Fatalf("result=%+v", result)
+		}
+		if fixtureSource(t, repo, result.Sources[0]).Content != "Step one." {
 			t.Fatalf("result=%+v", result)
 		}
 		if len(progress) != 1 || !strings.Contains(progress[0], "https://example.org/guide") {
@@ -115,9 +120,9 @@ func TestTaskExecutorReportsReadsAndClosesBrowser(t *testing.T) {
 		engine := readingEngine(fixture, nil)
 		closed := 0
 		readErr := errors.New("browser returned partial content")
-		engine.OpenBrowser = func(context.Context) (func(context.Context, string) (domain.Source, error), func(), error) {
-			return func(_ context.Context, rawURL string) (domain.Source, error) {
-				return domain.Source{ID: "partial", URL: rawURL, Title: "Rendered page", Status: "restricted", Content: "visible heading"}, readErr
+		engine.OpenBrowser = func(context.Context) (browser.Browse, func(), error) {
+			return func(_ context.Context, request browser.Request) (domain.Source, error) {
+				return domain.Source{ID: "partial", URL: request.URL, Title: "Rendered page", Status: "restricted", Content: "visible heading"}, readErr
 			}, func() { closed++ }, nil
 		}
 		var progress []string
@@ -135,10 +140,77 @@ func TestTaskExecutorReportsReadsAndClosesBrowser(t *testing.T) {
 		if len(progress) != 1 || !strings.Contains(progress[0], "https://example.org/rendered") {
 			t.Fatalf("browser progress=%v", progress)
 		}
-		if len(result.Sources) != 1 || result.Sources[0].Status != "restricted" || result.Sources[0].Content != "visible heading" || result.Sources[0].Reason != "operation failed" {
+		if len(result.Sources) != 1 {
+			t.Fatalf("partial browser evidence lost: %+v", result.Sources)
+		}
+		source := fixtureSource(t, repo, result.Sources[0])
+		if source.Status != "restricted" || source.Content != "visible heading" || source.Reason != "operation failed" {
 			t.Fatalf("partial browser evidence lost: %+v", result.Sources)
 		}
 	})
+}
+
+func TestTaskExecutorPassesBrowserRequestAndHidesTypedTextFromProgress(t *testing.T) {
+	request := browser.Request{Action: "type", Ref: "e8", Text: "private search terms"}
+	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
+		responseTool("browse_url", map[string]any{"action": request.Action, "ref": request.Ref, "text": request.Text}, "browser-type"),
+		responseText("Entered the search terms."),
+	}}
+	engine := readingEngine(fixture, nil)
+	var received browser.Request
+	engine.OpenBrowser = func(context.Context) (browser.Browse, func(), error) {
+		return func(_ context.Context, got browser.Request) (domain.Source, error) {
+			received = got
+			return domain.Source{ID: "search", URL: "https://example.org/search", Status: "ok", Content: "Search page"}, nil
+		}, func() {}, nil
+	}
+	var progress []string
+	repo := newToolRepo()
+	result, err := runTaskExecutor(t, context.Background(), engine, repo, executorRun(TaskInput{Goal: "Search for the guide."}), func(message string) error {
+		progress = append(progress, message)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if received.Action != request.Action || received.Ref != request.Ref || received.Text != request.Text {
+		t.Fatalf("browser request=%+v, want %+v", received, request)
+	}
+	if len(result.Sources) != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	if fixtureSource(t, repo, result.Sources[0]).Content != "Search page" {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(progress) != 1 || !strings.Contains(progress[0], "type") || strings.Contains(progress[0], request.Text) {
+		t.Fatalf("browser progress exposed typed text or omitted action: %v", progress)
+	}
+}
+
+func TestTaskExecutorReturnsBrowserProgressFailure(t *testing.T) {
+	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
+		responseTool("browse_url", map[string]string{"url": "https://example.org/rendered"}, "browser-read"),
+		responseText("The progress update failed."),
+	}}
+	engine := readingEngine(fixture, nil)
+	called := false
+	engine.OpenBrowser = func(context.Context) (browser.Browse, func(), error) {
+		return func(context.Context, browser.Request) (domain.Source, error) {
+			called = true
+			return domain.Source{ID: "page", Status: "ok", Content: "page"}, nil
+		}, func() {}, nil
+	}
+	progressErr := errors.New("progress callback failed")
+	repo := newToolRepo()
+	result, err := runTaskExecutor(t, context.Background(), engine, repo, executorRun(TaskInput{Goal: "Read the rendered page."}), func(string) error {
+		return progressErr
+	})
+	if !errors.Is(err, progressErr) {
+		t.Fatalf("result=%+v err=%v, want progress error", result, err)
+	}
+	if called {
+		t.Fatal("browser action ran after progress reporting failed")
+	}
 }
 
 func TestTaskExecutorCancellationKeepsPartialEvidence(t *testing.T) {
@@ -168,7 +240,8 @@ func TestTaskExecutorCancellationKeepsPartialEvidence(t *testing.T) {
 		t.Fatalf("partial result=%+v", result)
 	}
 	joinedSources := ""
-	for _, source := range result.Sources {
+	for _, ref := range result.Sources {
+		source := fixtureSource(t, repo, ref)
 		joinedSources += source.Content + " " + source.Reason
 	}
 	if !strings.Contains(joinedSources, "Actual evidence from the first page.") {

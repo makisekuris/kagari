@@ -83,9 +83,13 @@ func TestToolBusinessFailureUsesOnlyKnownReadReplySources(t *testing.T) {
 		want                 bool
 	}{
 		{name: "restricted read", tool: "read_url", response: `{"source":{"status":"restricted","reason":"HTTP 403"}}`, want: true},
+		{name: "restricted reference", tool: "read_url", response: `{"source":{"id":"m_1","status":"restricted","source_truncated":false},"page":{"text":""}}`, want: true},
 		{name: "empty read", tool: "browse_url", response: `{"source":{"status":"ok","content":"  "}}`, want: true},
+		{name: "empty source page", tool: "browse_url", response: `{"source":{"id":"m_2","status":"ok","source_truncated":false},"page":{"text":"  "}}`, want: true},
 		{name: "truncated citation", tool: "read_url", response: `{"source":{"status":"incomplete","truncated":true,"content":"usable excerpt"}}`},
+		{name: "truncated source page", tool: "read_url", response: `{"source":{"id":"m_3","status":"incomplete","source_truncated":true},"page":{"text":"usable excerpt","source_truncated":true}}`},
 		{name: "untruncated incomplete read", tool: "read_url", response: `{"source":{"status":"incomplete","content":"not complete enough to cite"}}`, want: true},
+		{name: "untruncated incomplete page", tool: "read_url", response: `{"source":{"id":"m_4","status":"incomplete","source_truncated":false},"page":{"text":"not complete enough to cite"}}`, want: true},
 		{name: "other tool source field", tool: "lookup", response: `{"source":{"status":"restricted"}}`},
 		{name: "top level ok false", tool: "lookup", response: `{"ok":false}`, want: true},
 		{name: "top level error", tool: "lookup", response: `{"error":"lookup failed"}`, want: true},

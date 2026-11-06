@@ -19,12 +19,12 @@ func Load(path string) (Config, error) {
 	}
 	v := viper.New()
 	defaults := map[string]any{
-		"storage.path": "data/kagari.db", "profile_path": "profile.md", "log_level": "info",
-		"model.timeout": "60s", "model.max_output_tokens": 5000,
+		"storage.path": "data/kagari-context.db", "profile_path": "profile.md", "log_level": "info",
+		"model.context_window": int64(0), "model.timeout": "60s", "model.max_output_tokens": 5000,
 		"reader.timeout": "20s", "reader.max_bytes": 4 << 20, "reader.max_content_chars": 20000,
 		"reader.max_links": 40, "reader.allowed_non_public_cidrs": []string{},
 		"agent.max_sources": 6,
-		"personal.channel":  "telegram", "personal.task_concurrency": 4, "personal.task_budget": "30m",
+		"personal.channel":  "telegram", "personal.timezone": "Asia/Shanghai", "personal.task_concurrency": 4, "personal.task_budget": "30m",
 		"logging.directory": "", "logging.rotate_mib": 50, "logging.max_total_mib": 1024, "logging.retention_days": 7,
 		"browser.enabled": false, "browser.command": "npx", "browser.args": []string{"-y", "@playwright/mcp@0.0.82", "--headless", "--isolated", "--codegen", "none"},
 		"agent.max_iterations": 10, "agent.timeout": "3m",

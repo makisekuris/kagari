@@ -40,7 +40,7 @@ func TestTaskStageCallbacksHaveOneCorrelatedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := logging.WithLogger(context.Background(), engine.Log.With(zap.Int64("event_id", 31), zap.Int64("task_id", 41), zap.Int64("run_id", 51), zap.Int64("revision", 2)))
-	result, err := engine.RunTaskStage(ctx, submission)
+	result, err := engine.RunTaskStage(ctx, submission, memorySourceRecorder)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestTaskStageProviderFailureHasOneCorrelatedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := logging.WithLogger(context.Background(), engine.Log.With(zap.Int64("event_id", 61)))
-	if _, err := engine.RunTaskStage(ctx, submission); err == nil {
+	if _, err := engine.RunTaskStage(ctx, submission, memorySourceRecorder); err == nil {
 		t.Fatal("RunTaskStage unexpectedly succeeded")
 	}
 	if requests.Load() != 1 {
@@ -129,7 +129,7 @@ func TestTaskStageStreamingUsesOneModelLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := logging.WithLogger(context.Background(), engine.Log.With(zap.Int64("event_id", 62)))
-	result, err := engine.RunTaskStage(ctx, submission)
+	result, err := engine.RunTaskStage(ctx, submission, memorySourceRecorder)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestReadToolOutcomesUseSourceUsabilityAndKeepCachedToolOutput(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := engine.RunTaskStage(logging.WithLogger(context.Background(), engine.Log), submission)
+	result, err := engine.RunTaskStage(logging.WithLogger(context.Background(), engine.Log), submission, memorySourceRecorder)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,17 +255,31 @@ func assertReadToolOutput(t *testing.T, request map[string]any, callID, status, 
 		text, _ := part["text"].(string)
 		var reply struct {
 			Source struct {
-				Status    string `json:"status"`
-				Content   string `json:"content"`
-				Reason    string `json:"reason"`
-				Truncated bool   `json:"truncated"`
+				ID              string `json:"id"`
+				Status          string `json:"status"`
+				SourceTruncated bool   `json:"source_truncated"`
+				TotalRunes      int    `json:"total_runes"`
 			} `json:"source"`
+			Card struct {
+				Reason string `json:"reason"`
+			} `json:"card"`
+			Page struct {
+				Text            string `json:"text"`
+				Offset          int    `json:"offset"`
+				End             int    `json:"end"`
+				TotalRunes      int    `json:"total_runes"`
+				HasMore         bool   `json:"has_more"`
+				SourceTruncated bool   `json:"source_truncated"`
+			} `json:"page"`
 		}
 		if err := json.Unmarshal([]byte(text), &reply); err != nil {
 			t.Errorf("decode tool output %q: %v; output=%s", callID, err, text)
 			return
 		}
-		if reply.Source.Status != status || reply.Source.Content != content || reply.Source.Reason != reason || reply.Source.Truncated != truncated {
+		wantRunes := len([]rune(content))
+		if reply.Source.ID == "" || reply.Source.Status != status || reply.Source.TotalRunes != wantRunes || reply.Page.Text != content ||
+			reply.Page.Offset != 0 || reply.Page.End != wantRunes || reply.Page.TotalRunes != wantRunes || reply.Page.HasMore ||
+			reply.Source.SourceTruncated != truncated || reply.Page.SourceTruncated != truncated || reply.Card.Reason != reason {
 			t.Errorf("tool output %q source changed: %+v", callID, reply.Source)
 		}
 		return
@@ -295,7 +309,7 @@ func TestTaskStageStreamingErrorRetainsPartialOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.RunTaskStage(logging.WithLogger(context.Background(), engine.Log), submission); err == nil {
+	if _, err := engine.RunTaskStage(logging.WithLogger(context.Background(), engine.Log), submission, memorySourceRecorder); err == nil {
 		t.Fatal("streaming provider error was swallowed")
 	}
 	starts, failures := logs.FilterMessage("model.started").All(), logs.FilterMessage("model.failed").All()

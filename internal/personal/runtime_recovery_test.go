@@ -90,7 +90,14 @@ func TestLongStageEvidenceRemainsQueryableAndCanContinue(t *testing.T) {
 	if _, err := s.ClaimRun(ctx, RunTask); err != nil {
 		t.Fatal(err)
 	}
-	result := StageResult{Summary: strings.Repeat("summary ", 4000), Sources: []domain.Source{{ID: "s1", URL: "https://example.com/source", Status: "ok", Content: strings.Repeat("evidence", 6000)}}}
+	content := strings.Repeat("evidence", 6000)
+	ref, err := s.SaveSource(ctx, first.ID, "recovery-source", domain.Source{
+		URL: "https://example.com/source", Status: "ok", Content: content, FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := StageResult{Summary: strings.Repeat("summary ", 4000), Sources: []domain.SourceRef{ref}}
 	if err := s.FinishStage(ctx, first.ID, result, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +121,11 @@ func TestLongStageEvidenceRemainsQueryableAndCanContinue(t *testing.T) {
 		t.Fatal(err)
 	}
 	var full StageResult
-	if err = json.Unmarshal([]byte(stored.Result), &full); err != nil || len(full.Sources) != 1 || full.Sources[0].Content != result.Sources[0].Content {
+	if err = json.Unmarshal([]byte(stored.Result), &full); err != nil || len(full.Sources) != 1 || full.Sources[0].ID != ref.ID {
 		t.Fatal("full stage evidence was lost")
+	}
+	expanded, err := s.ExpandSource(ctx, full.Sources[0].ID)
+	if err != nil || expanded.Content != content {
+		t.Fatalf("expanded source body = %d runes, err=%v", len([]rune(expanded.Content)), err)
 	}
 }

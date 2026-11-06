@@ -21,6 +21,13 @@ func TestPromptComposeUsesInjectedPersona(t *testing.T) {
 		"reference data",
 		"read_url",
 		"browse_url",
+		"source reference",
+		"source_truncated",
+		"refresh=true",
+		"action=navigate",
+		"latest snapshot",
+		"Each browser call returns a fresh snapshot",
+		"Browser actions are for reading, search, and navigation only",
 		"brief, direct plain-text summary",
 	} {
 		if !strings.Contains(instruction, rule) {

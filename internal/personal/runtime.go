@@ -54,7 +54,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var group sync.WaitGroup
-	failures := make(chan error, r.TaskConcurrency+4)
+	failures := make(chan error, r.TaskConcurrency+6)
 	start := func(name string, fn func(context.Context) error) {
 		group.Add(1)
 		go func() {
@@ -70,7 +70,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 			}
 		}()
 	}
+	start("schedule", func(ctx context.Context) error { return r.loop(ctx, r.schedule) })
 	start("conversation", func(ctx context.Context) error { return r.loop(ctx, r.turn) })
+	start("reply", func(ctx context.Context) error { return r.loop(ctx, r.waitingReply) })
 	for i := 0; i < r.TaskConcurrency; i++ {
 		start("task", func(ctx context.Context) error { return r.loop(ctx, r.task) })
 	}

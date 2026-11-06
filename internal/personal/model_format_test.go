@@ -33,6 +33,16 @@ func TestFormatTurnUsesOneStrictRequestWithoutTools(t *testing.T) {
 	}
 }
 
+func TestFormatTurnAcceptsSilentEmptyResponse(t *testing.T) {
+	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
+		responseText(`{"text":"","notify":false,"attachments":[]}`),
+	}}
+	response, err := (&MainAgent{Model: fixture.model(t)}).formatTurn(context.Background(), "Routine background task continuation is queued.")
+	if err != nil || response.Notify || response.Text != "" || len(response.Attachments) != 0 {
+		t.Fatalf("silent format response=%+v error=%v", response, err)
+	}
+}
+
 func TestFormatTurnRejectsInvalidOrRefusedResultsWithoutRetry(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

@@ -19,27 +19,26 @@ import (
 	"go.uber.org/zap"
 
 	"kagari/internal/logging"
+	"kagari/internal/textpage"
 )
 
 const (
-	maxHistoryMessages = 24
-	maxTasks           = 30
-	maxMemories        = 40
-	maxEventRunes      = 16_000
-	maxHistoryRunes    = 2_000
-	maxTaskRunes       = 2_000
-	maxMemoryRunes     = 1_500
+	maxMemories    = 40
+	maxTaskRunes   = 2_000
+	maxMemoryRunes = 1_500
 )
 
-// MainAgent handles the owner's conversation and manages tasks and memory.
+// MainAgent handles the owner's conversation and manages tasks, schedules and memory.
 type MainAgent struct {
-	Store         Repository
-	Log           *zap.Logger
-	Model         model.AgenticModel
-	Persona       string
-	Profile       string
-	MaxIterations int
-	Timeout       time.Duration
+	WorkspaceDirectory string
+	Timezone           string
+	Store              Repository
+	Log                *zap.Logger
+	Model              model.AgenticModel
+	Persona            string
+	Profile            string
+	MaxIterations      int
+	Timeout            time.Duration
 }
 
 type personalTurnResponse struct {
@@ -61,7 +60,7 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 	ctx, cancel := context.WithTimeout(ctx, a.Timeout)
 	defer cancel()
 
-	tools := &personalTools{store: a.Store, log: a.Log, input: input, event: input.Event, taskIDs: make(map[int64]struct{})}
+	tools := &personalTools{timezone: a.Timezone, store: a.Store, log: a.Log, input: input, event: input.Event, taskIDs: make(map[int64]struct{})}
 	registeredTools, err := tools.build()
 	if err != nil {
 		return TurnOutput{}, fmt.Errorf("build personal tools: %w", err)
@@ -71,15 +70,57 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 		return TurnOutput{}, err
 	}
 	registeredTools = append(registeredTools, fileTools...)
+	contextTools, err := (&contextTools{store: a.Store, scope: ReadScope{EventID: input.Event.ID}}).build()
+	if err != nil {
+		return TurnOutput{}, err
+	}
+	registeredTools = append(registeredTools, contextTools...)
+	progressTools, err := progressTools(a.Store, ReadScope{EventID: input.Event.ID}, nil)
+	if err != nil {
+		return TurnOutput{}, err
+	}
+	registeredTools = append(registeredTools, progressTools...)
+	workspaceTools, err := a.workspaceTools()
+	if err != nil {
+		return TurnOutput{}, err
+	}
+	registeredTools = append(registeredTools, workspaceTools...)
+	budgetModel, err := modelWithSchema(a.Model, nil)
+	if err != nil {
+		return TurnOutput{}, err
+	}
+	ctx = textpage.WithMaxBytes(ctx, int(min(int64(textpage.MaxJSONBytes), budgetModel.Limits().Hard/4)))
+	registeredTools = boundContextTools(registeredTools)
+	budgetHandler, err := contextBudgetHandler(ctx, budgetModel, a.Store, ReadScope{EventID: input.Event.ID})
+	if err != nil {
+		return TurnOutput{}, err
+	}
+	memoryKeys := make([]string, 0, len(input.Memories))
+	for _, m := range input.Memories {
+		if !m.Deleted {
+			memoryKeys = append(memoryKeys, m.Key)
+		}
+	}
+	memoryContext, err := newRunMemoryContext(ctx, a.Store, Run{}, memoryKeys)
+	if err != nil {
+		return TurnOutput{}, err
+	}
+	memoryContext.limits = budgetModel.Limits()
+	instruction := personalInstruction(a.Persona, a.Profile, input.Event.Kind == EventTask && input.Schedule != nil)
+	view, err := assembleTurn(ctx, input, instruction, registeredTools, budgetModel.Limits())
+	if err != nil {
+		return TurnOutput{}, err
+	}
 	agent, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
-		Name: "personal_assistant", Description: "Answer the owner's message and manage personal tasks and memory.",
-		Instruction: personalInstruction(a.Persona, a.Profile), Model: a.Model, MaxIterations: a.MaxIterations,
+		Name: "personal_assistant", Description: "Answer the owner's message and manage personal tasks, schedules and memory.",
+		Instruction: instruction, Model: budgetModel, MaxIterations: a.MaxIterations,
+		Handlers:    []adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage]{memoryContext, budgetHandler},
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: registeredTools, ExecuteSequentially: true}},
 	})
 	if err != nil {
 		return TurnOutput{}, fmt.Errorf("create personal agent: %w", err)
 	}
-	encoded, err := json.Marshal(boundedTurnInput(input))
+	encoded, err := json.Marshal(view)
 	if err != nil {
 		return TurnOutput{}, fmt.Errorf("encode personal input: %w", err)
 	}
@@ -114,10 +155,34 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 		response.Attachments = append(response.Attachments, file.ID)
 	}
 	notify := response.Notify
-	if input.Event.Kind == EventUser || tools.mustNotify || taskOutcomeRequiresNotification(input) {
+	if !tools.mustNotify && input.Event.Kind == EventUser && len(input.Event.Attachments) == 0 && len(files) == 0 && isPureURLMessage(input.Event.Text) {
+		deferred, err := a.Store.CanDeferReply(ctx, input.Event.ID)
+		if err != nil {
+			return TurnOutput{}, err
+		}
+		// The conversation agent cannot read a webpage; successful queuing alone is not a reading result.
+		if deferred {
+			notify, response.Text = false, ""
+		}
+	}
+	if tools.mustNotify || taskOutcomeRequiresNotification(input) {
 		notify = true
 	}
-	return TurnOutput{Text: response.Text, TaskID: tools.taskID(), Silent: !notify, Attachments: response.Attachments}, nil
+	taskID, scheduleID := tools.taskID(), tools.scheduleID()
+	if input.Event.Kind == EventTask {
+		taskID, scheduleID = input.Event.TaskID, input.Event.ScheduleID
+	} else if len(tools.scheduleIDs) > 1 {
+		taskID = 0
+	} else if taskID > 0 && scheduleID > 0 {
+		info, err := a.Store.ScheduleForTask(ctx, taskID)
+		if err != nil {
+			return TurnOutput{}, err
+		}
+		if info == nil || info.Schedule.ID != scheduleID {
+			taskID, scheduleID = 0, 0
+		}
+	}
+	return TurnOutput{ScheduleID: scheduleID, Text: response.Text, TaskID: taskID, Silent: !notify, Attachments: response.Attachments}, nil
 }
 
 func personalJSONOutputOption(name string, schema map[string]any) model.Option {
@@ -150,8 +215,11 @@ func decodePersonalTurnResponse(raw string) (personalTurnResponse, error) {
 			return personalTurnResponse{}, errors.New("blank attachment ID")
 		}
 	}
-	if strings.TrimSpace(*text) == "" && len(attachments) == 0 {
+	if *notify && strings.TrimSpace(*text) == "" && len(attachments) == 0 {
 		return personalTurnResponse{}, errors.New("personal response text is blank")
+	}
+	if !*notify && len(attachments) > 0 {
+		return personalTurnResponse{}, errors.New("silent personal response cannot include attachments")
 	}
 	return personalTurnResponse{Text: *text, Notify: *notify, Attachments: attachments}, nil
 }
@@ -165,59 +233,7 @@ func taskOutcomeRequiresNotification(input TurnInput) bool {
 			return true
 		}
 	}
-	if input.CurrentRun != nil && input.CurrentRun.TaskID == input.Event.TaskID {
-		var result StageResult
-		if json.Unmarshal([]byte(input.CurrentRun.Result), &result) == nil {
-			if len(result.Sources) > 0 || len(result.Files) > 0 || len(result.Attachments) > 0 {
-				return true
-			}
-		}
-	}
 	return false
-}
-
-func boundedTurnInput(input TurnInput) TurnInput {
-	input.Event.Text = limitRunes(input.Event.Text, maxEventRunes)
-	input.History = append([]Message(nil), input.History...)
-	input.Tasks = append([]Task(nil), input.Tasks...)
-	input.Memories = append([]Memory(nil), input.Memories...)
-	if input.CurrentRun != nil {
-		current := *input.CurrentRun
-		input.CurrentRun = &current
-		input.CurrentRun.Input = limitRunes(input.CurrentRun.Input, maxTaskRunes)
-		if input.CurrentRun.Kind == RunTask {
-			input.CurrentRun.Result = boundedTaskResult(input.CurrentRun.Result)
-		} else {
-			input.CurrentRun.Result = limitRunes(input.CurrentRun.Result, maxTaskRunes)
-		}
-		input.CurrentRun.Error = limitRunes(input.CurrentRun.Error, 800)
-	}
-	if len(input.History) > maxHistoryMessages {
-		input.History = input.History[len(input.History)-maxHistoryMessages:]
-	}
-	for i := range input.History {
-		input.History[i].Text = limitRunes(input.History[i].Text, maxHistoryRunes)
-	}
-	if len(input.Tasks) > maxTasks {
-		input.Tasks = input.Tasks[:maxTasks]
-	}
-	for i := range input.Tasks {
-		input.Tasks[i].Title = limitRunes(input.Tasks[i].Title, 300)
-		input.Tasks[i].Goal = limitRunes(input.Tasks[i].Goal, maxTaskRunes)
-		input.Tasks[i].Context = limitRunes(input.Tasks[i].Context, maxTaskRunes)
-		input.Tasks[i].Summary = limitRunes(input.Tasks[i].Summary, maxTaskRunes)
-	}
-	if len(input.Memories) > maxMemories {
-		input.Memories = input.Memories[:maxMemories]
-	}
-	for i := range input.Memories {
-		input.Memories[i].Key = limitRunes(input.Memories[i].Key, 300)
-		input.Memories[i].Value = limitRunes(input.Memories[i].Value, maxMemoryRunes)
-		if input.Memories[i].Deleted {
-			input.Memories[i].Value = ""
-		}
-	}
-	return input
 }
 
 func limitRunes(s string, limit int) string {

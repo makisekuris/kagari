@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"kagari/internal/domain"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,9 +13,11 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
+	"github.com/cloudwego/eino/components/model"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"kagari/internal/inputbudget"
 )
 
 type fixtureResponse struct {
@@ -52,7 +55,7 @@ func (f *responsesFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (f *responsesFixture) model(t *testing.T) *agenticopenai.ResponsesModel {
+func (f *responsesFixture) model(t *testing.T) model.AgenticModel {
 	t.Helper()
 	server := httptest.NewServer(f)
 	t.Cleanup(server.Close)
@@ -65,7 +68,15 @@ func (f *responsesFixture) model(t *testing.T) *agenticopenai.ResponsesModel {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return m
+	limits, err := inputbudget.NewLimits(262144, 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounded, err := inputbudget.NewAgenticModel(m, inputbudget.ModelConfig{Limits: limits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bounded
 }
 
 func responseTool(name string, args any, id string) fixtureResponse {
@@ -105,8 +116,27 @@ func assertPersonalToolMode(t *testing.T, request map[string]any) {
 	text, _ := request["text"].(map[string]any)
 	format, _ := text["format"].(map[string]any)
 	tools, _ := request["tools"].([]any)
-	if format["type"] == "json_schema" || len(tools) != 16 {
+	if format["type"] == "json_schema" {
 		t.Fatalf("personal tool loop must expose tools without forcing final JSON format: tools=%d format=%v", len(tools), format["type"])
+	}
+	names := make(map[string]bool, len(tools))
+	for _, raw := range tools {
+		definition := raw.(map[string]any)
+		name := definition["name"].(string)
+		if names[name] {
+			t.Fatalf("duplicate personal tool %q", name)
+		}
+		names[name] = true
+	}
+	for _, name := range []string{
+		"create_task", "list_tasks", "get_task", "update_task", "cancel_task", "continue_task", "settle_task", "get_run", "list_runs",
+		"memory_search", "memory_get", "memory_put", "memory_forget", "memory_history", "read_attachment", "write_attachment",
+		"create_schedule", "list_schedules", "get_schedule", "update_schedule", "cancel_schedule",
+		"propose_schedule_context_update", "resolve_schedule_context_update", "add_task_input",
+	} {
+		if !names[name] {
+			t.Errorf("personal tool loop is missing %q", name)
+		}
 	}
 	for _, raw := range tools {
 		definition, _ := raw.(map[string]any)
@@ -130,6 +160,7 @@ func requestInput(request map[string]any) string {
 }
 
 type toolRepo struct {
+	sources map[string]domain.Source
 	Repository
 	tasks         map[int64]Task
 	runs          map[int64]Run
@@ -205,7 +236,7 @@ func (r *toolRepo) ContinueTask(_ context.Context, _ int64, key string, taskID, 
 	return task, run, nil
 }
 
-func (r *toolRepo) SettleTask(_ context.Context, _, taskID, revision int64, status TaskStatus, summary string) (Task, error) {
+func (r *toolRepo) SettleTask(_ context.Context, _, taskID, revision int64, status TaskStatus, summary string, assessment ...*CheckAssessment) (Task, error) {
 	r.settled = append(r.settled, settleRecord{taskID: taskID, revision: revision, status: status, summary: summary})
 	task := r.tasks[taskID]
 	task.Status, task.Summary = status, summary
@@ -269,6 +300,9 @@ func (r *toolRepo) Memories(context.Context, string, int) ([]Memory, error) {
 func (r *toolRepo) WriteMemory(_ context.Context, _ int64, requestKey string, change MemoryChange) (Memory, error) {
 	r.memoryKeys = append(r.memoryKeys, requestKey)
 	r.memoryChanges = append(r.memoryChanges, change)
+	if r.memoryErr == nil && r.memoryResult.Key != "" {
+		r.memories[r.memoryResult.Key] = r.memoryResult
+	}
 	return r.memoryResult, r.memoryErr
 }
 

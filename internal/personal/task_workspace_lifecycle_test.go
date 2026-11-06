@@ -150,8 +150,10 @@ func assertWorkspaceToolNames(t *testing.T, request map[string]any) {
 		names = append(names, raw.(map[string]any)["name"].(string))
 	}
 	slices.Sort(names)
-	if !slices.Equal(names, []string{"edit_file", "ls", "read_attachment", "read_file", "read_url", "write_attachment", "write_file"}) {
-		t.Fatalf("unexpected task tools: %v", names)
+	for _, name := range []string{"edit_file", "ls", "read_attachment", "read_file", "read_url", "write_attachment", "write_file", "read_material", "get_progress", "read_progress", "checkpoint_reading", "read_checkpoints"} {
+		if !slices.Contains(names, name) {
+			t.Fatalf("missing task tool %s: %v", name, names)
+		}
 	}
 }
 

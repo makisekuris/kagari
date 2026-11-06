@@ -18,6 +18,10 @@ func (r *Runtime) task(ctx context.Context) (worked bool, runErr error) {
 		return true, err
 	}
 	defer release()
+	run, err = r.Store.BeginScheduledRun(ctx, run.ID, time.Now().UTC())
+	if err != nil || run == nil {
+		return true, err
+	}
 	log := r.runLog(*run)
 	ctx = logging.WithLogger(ctx, log)
 	log.Info("run.started", zap.Int64("remaining_ms", run.RemainingMS), zap.Any("payload", run.Input))

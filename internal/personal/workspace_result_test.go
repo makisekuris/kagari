@@ -25,12 +25,12 @@ func TestStageCheckpointBoundsFilesWithoutChangingPaths(t *testing.T) {
 	}
 }
 
-func TestTaskOutcomeRequiresNotificationForFilesOnly(t *testing.T) {
+func TestTaskOutcomeDoesNotNotifyForFilesAlone(t *testing.T) {
 	input := TurnInput{
 		Event:      Event{Kind: EventTask, TaskID: 12},
 		CurrentRun: &Run{TaskID: 12, Result: `{"files":["draft/final.md"]}`},
 	}
-	if !taskOutcomeRequiresNotification(input) {
-		t.Fatal("saved files did not require a task callback notification")
+	if taskOutcomeRequiresNotification(input) {
+		t.Fatal("saved files alone forced a task callback notification")
 	}
 }

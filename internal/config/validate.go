@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"kagari/internal/inputbudget"
 )
 
 const (
@@ -15,6 +17,9 @@ const (
 
 // ValidatePersonal checks the single owner's service configuration.
 func (c Config) ValidatePersonal() error {
+	if c.Personal.Timezone == "" {
+		return errors.New("personal.timezone must be a valid IANA time zone")
+	}
 	if c.Personal.Channel != "" && c.Personal.Channel != "telegram" && c.Personal.Channel != "weixin" {
 		return errors.New("personal.channel must be telegram or weixin")
 	}
@@ -43,6 +48,12 @@ func (c Config) ValidatePersonal() error {
 // Validate 先校验所有命令共享的边界，再按调用方需求检查凭证。
 // 本地检查不要求凭证；启动服务时再检查模型和所选渠道。
 func (c Config) Validate(modelRequired, telegramRequired bool) error {
+	if c.Personal.Timezone == "Local" {
+		return errors.New("personal.timezone must be a valid IANA time zone")
+	}
+	if _, err := time.LoadLocation(c.Personal.Timezone); c.Personal.Timezone != "" && err != nil {
+		return errors.New("personal.timezone must be a valid IANA time zone")
+	}
 	for _, cidr := range c.Reader.AllowedNonPublicCIDRs {
 		prefix, err := netip.ParsePrefix(cidr)
 		if err != nil || prefix.Addr().Zone() != "" || prefix.Addr().Is4In6() {
@@ -75,6 +86,12 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 		return errors.New("invalid agent reading limits")
 	}
 	if modelRequired {
+		if c.Model.ContextWindow <= 0 {
+			return errors.New("model.context_window must be a positive input-plus-output token capacity")
+		}
+		if _, err := inputbudget.NewLimits(c.Model.ContextWindow, int64(c.Model.MaxOutputTokens)); err != nil {
+			return err
+		}
 		if c.Model.Name == "" || c.Model.APIKey == "" || c.Model.BaseURL == "" {
 			return errors.New("model.base_url, model.name and model.api_key are required")
 		}

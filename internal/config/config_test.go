@@ -101,6 +101,17 @@ func TestLocalValidationDoesNotRequireServiceLoggingConfig(t *testing.T) {
 	}
 }
 
+func TestContextWindowRequiredOnlyForModelCalls(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.Model.ContextWindow = 0
+	if err := cfg.Validate(false, false); err != nil {
+		t.Fatalf("local validation requires a model context window: %v", err)
+	}
+	if err := cfg.Validate(true, false); err == nil || !strings.Contains(err.Error(), "model.context_window") {
+		t.Fatalf("model validation did not identify missing context window: %v", err)
+	}
+}
+
 func TestDotEnvPrecedenceAndIsolation(t *testing.T) {
 	t.Chdir(t.TempDir())
 	unsetBrowserFallbackEnv(t)
@@ -108,7 +119,7 @@ func TestDotEnvPrecedenceAndIsolation(t *testing.T) {
 	t.Setenv("KAGARI_MODEL_API_KEY", "")
 	t.Setenv("KAGARI_TELEGRAM_TOKEN", "system-token")
 	// 其余变量应由 .env 读取，避免本机的测试环境干扰优先级检查。
-	for _, key := range []string{"KAGARI_MODEL_BASE_URL", "KAGARI_TELEGRAM_ALLOWED_USER_IDS", "KAGARI_LOG_LEVEL"} {
+	for _, key := range []string{"KAGARI_MODEL_BASE_URL", "KAGARI_MODEL_CONTEXT_WINDOW", "KAGARI_TELEGRAM_ALLOWED_USER_IDS", "KAGARI_LOG_LEVEL"} {
 		value, present := os.LookupEnv(key)
 		if err := os.Unsetenv(key); err != nil {
 			t.Fatal(err)
@@ -124,7 +135,7 @@ func TestDotEnvPrecedenceAndIsolation(t *testing.T) {
 	if err := os.WriteFile("config.yaml", []byte("model:\n  name: yaml-model\n  base_url: https://yaml.example/v1\nlog_level: debug\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	dotenv := "KAGARI_MODEL_NAME=dotenv-model\nKAGARI_MODEL_BASE_URL=https://dotenv.example/v1\nKAGARI_MODEL_API_KEY='dotenv-secret'\nKAGARI_TELEGRAM_TOKEN='dotenv-token'\nKAGARI_TELEGRAM_ALLOWED_USER_IDS=123,456\n"
+	dotenv := "KAGARI_MODEL_NAME=dotenv-model\nKAGARI_MODEL_BASE_URL=https://dotenv.example/v1\nKAGARI_MODEL_CONTEXT_WINDOW=32768\nKAGARI_MODEL_API_KEY='dotenv-secret'\nKAGARI_TELEGRAM_TOKEN='dotenv-token'\nKAGARI_TELEGRAM_ALLOWED_USER_IDS=123,456\n"
 	if err := os.WriteFile(".env", []byte(dotenv), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +143,7 @@ func TestDotEnvPrecedenceAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Model.Name != "system-model" || c.Model.BaseURL != "https://dotenv.example/v1" || c.Model.APIKey != "" || c.Telegram.Token != "system-token" {
+	if c.Model.Name != "system-model" || c.Model.BaseURL != "https://dotenv.example/v1" || c.Model.ContextWindow != 32768 || c.Model.APIKey != "" || c.Telegram.Token != "system-token" {
 		t.Fatal("system/.env/YAML precedence is incorrect")
 	}
 	if len(c.Telegram.AllowedUserIDs) != 2 || c.Telegram.AllowedUserIDs[1] != 456 || c.LogLevel != "debug" {
@@ -148,7 +159,7 @@ func TestDotEnvPrecedenceAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Model.BaseURL != "https://yaml.example/v1" {
+	if c.Model.BaseURL != "https://yaml.example/v1" || c.Model.ContextWindow != 0 {
 		t.Fatal("dotenv value leaked into a later config load")
 	}
 	if err := os.WriteFile(".env", []byte("not-valid secret-value\n"), 0600); err != nil {
@@ -234,6 +245,8 @@ func TestAllowedNonPublicCIDRsEnvironmentAndValidation(t *testing.T) {
 func unsetBrowserFallbackEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
+		"KAGARI_MODEL_CONTEXT_WINDOW",
+		"KAGARI_PERSONAL_TIMEZONE",
 		"KAGARI_READER_ALLOWED_NON_PUBLIC_CIDRS",
 		"KAGARI_READER_BROWSER_FALLBACK_ENABLED",
 		"KAGARI_READER_BROWSER_FALLBACK_ENGINE",
@@ -277,9 +290,11 @@ func unsetLoggingEnv(t *testing.T) {
 
 func validConfigForTest() Config {
 	var c Config
-	c.Storage.Path = "data/kagari.db"
+	c.Storage.Path = "data/kagari-context.db"
+	c.Personal.Timezone = "Asia/Shanghai"
 	c.Model.Timeout = time.Minute
 	c.Model.MaxOutputTokens = 5000
+	c.Model.ContextWindow = 32768
 	c.Reader.Timeout = 20 * time.Second
 	c.Reader.MaxBytes = 4 << 20
 	c.Reader.MaxContentChars = 20_000

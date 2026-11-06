@@ -21,12 +21,14 @@ type Model struct {
 	BaseURL         string        `mapstructure:"base_url"`
 	APIKey          string        `mapstructure:"api_key"`
 	Name            string        `mapstructure:"name"`
+	ContextWindow   int64         `mapstructure:"context_window"`
 	Timeout         time.Duration `mapstructure:"timeout"`
 	MaxOutputTokens int           `mapstructure:"max_output_tokens"`
 }
 
 type Personal struct {
 	Channel         string        `mapstructure:"channel"`
+	Timezone        string        `mapstructure:"timezone"`
 	TaskConcurrency int           `mapstructure:"task_concurrency"`
 	TaskBudget      time.Duration `mapstructure:"task_budget"`
 }

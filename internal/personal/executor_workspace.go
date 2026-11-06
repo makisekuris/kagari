@@ -11,6 +11,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 
 	"kagari/internal/agent"
+	"kagari/internal/textpage"
 	"kagari/internal/workspace"
 )
 
@@ -48,10 +49,14 @@ func TaskExecutor(engine *agent.Engine, store Repository, directory string) Exec
 		if err != nil {
 			return StageResult{Summary: "Task stage could not prepare its workspace tools."}, fmt.Errorf("personal: prepare task workspace tools: %w", err)
 		}
+		ledger := newReadLedger()
+		ws.ObserveReads = func(path string, page textpage.Page) {
+			ledger.observe("file", path, page)
+		}
 		stageEngine := *engine
 		stageEngine.AdditionalTools = append(append([]tool.BaseTool(nil), engine.AdditionalTools...), workspaceTools...)
 		stageEngine.AdditionalInstruction = strings.TrimSpace(engine.AdditionalInstruction + "\n\n" + workspace.Instruction)
-		result, err = readingExecutor(&stageEngine, store)(ctx, run, progress)
+		result, err = readingExecutor(&stageEngine, store, &executorContext{ledger: ledger, readFile: ws.ReadFilePage})(ctx, run, progress)
 		return result, err
 	}
 }

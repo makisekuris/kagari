@@ -45,7 +45,7 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 			return true, r.Store.CompleteEvent(ctx, event.ID, TurnOutput{}, nil)
 		}
 		if task.Status == TaskWaitingBudget {
-			return true, r.publish(ctx, *event, TurnOutput{TaskID: task.ID, Text: fmt.Sprintf("任务 #%d「%s」已用完本轮执行预算，等待你选择是否继续。\n\n%s", task.ID, task.Title, clip(task.Summary, 6000))})
+			return true, r.publish(ctx, *event, TurnOutput{TaskID: task.ID, Text: taskBudgetText(task)})
 		}
 	}
 	if event.Interrupted {
@@ -95,16 +95,29 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 	if ctx.Err() != nil {
 		return true, ctx.Err()
 	}
-	if thinkErr != nil || (!output.Silent && strings.TrimSpace(output.Text) == "" && len(output.Attachments) == 0) || (event.Kind == EventUser && output.Silent) {
+	if thinkErr == nil && event.Kind == EventUser && output.Silent {
+		deferred, err := r.Store.CanDeferReply(ctx, event.ID)
+		if err != nil {
+			return true, err
+		}
+		if !deferred {
+			if strings.TrimSpace(output.Text) != "" {
+				output.Silent = false
+			} else {
+				thinkErr = errors.New("silent user response has no committed continuation")
+			}
+		}
+	}
+	if thinkErr != nil || (!output.Silent && strings.TrimSpace(output.Text) == "" && len(output.Attachments) == 0) {
 		outcome = "fallback_reply"
 		log.Warn("conversation.model.failed", logging.ErrorFields(thinkErr)...)
-		fallback := "这轮回复未能完成。已提交的任务和记忆操作仍保留，可以继续查询。"
+		fallback := "这轮回复未能完成。已提交的任务、计划和记忆操作仍保留，可以继续查询。"
 		if errors.Is(thinkErr, ErrAttachmentUnavailable) {
 			fallback = "要发送的附件已删除或不可用，未发送。请重新上传或重新生成文件。"
 		}
-		output = TurnOutput{Text: fallback, TaskID: event.TaskID}
+		output = TurnOutput{Text: fallback, TaskID: event.TaskID, ScheduleID: event.ScheduleID}
 		if event.Kind == EventTask {
-			output.Text = fmt.Sprintf("后台结果（执行 #%d）：\n%s", event.RunID, clip(event.Text, 6000))
+			output.Text = fmt.Sprintf("「%s」的阶段结果：\n%s", task.Title, clip(event.Text, 6000))
 		}
 	}
 	if task != nil {
@@ -113,14 +126,28 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 			return true, err
 		}
 		if current != nil && current.Status == TaskAwaitingReview {
-			// An incomplete planning turn must not strand work without a visible state.
-			_, err = r.Store.SettleTask(ctx, event.ID, task.ID, current.Revision, TaskWaitingInput, current.Summary)
+			pending, err := r.Store.PendingTaskInputs(ctx, task.ID)
 			if err != nil {
 				return true, err
 			}
-			output = TurnOutput{TaskID: task.ID, Text: fmt.Sprintf("任务 #%d 已保存阶段成果，尚未确定下一步。请补充要求或让我继续。\n\n%s", task.ID, clip(current.Summary, 6000))}
+			if len(pending) > 0 {
+				_, _, err = r.Store.ContinueTask(ctx, event.ID, "pending-inputs", task.ID, current.Revision, "Read the owner's additional material within the existing goal; build on the previous findings and report additions or corrections.", false)
+				if err != nil {
+					return true, err
+				}
+				output = TurnOutput{TaskID: task.ID, Silent: true}
+			} else {
+				// An incomplete planning turn must not strand work without a visible state.
+				_, err = r.Store.SettleTask(ctx, event.ID, task.ID, current.Revision, TaskWaitingInput, current.Summary)
+				if err != nil {
+					return true, err
+				}
+				output = TurnOutput{TaskID: task.ID, Text: fmt.Sprintf("「%s」的阶段成果已保存，后续安排未能完成。你可以让我继续。\n\n%s", task.Title, clip(current.Summary, 6000))}
+			}
 		} else if current != nil && current.Status == TaskWaitingBudget {
-			output = TurnOutput{TaskID: task.ID, Text: fmt.Sprintf("任务 #%d 已用完本轮执行预算，等待你选择是否继续。\n\n%s", task.ID, clip(current.Summary, 6000))}
+			output = TurnOutput{TaskID: task.ID, Text: taskBudgetText(current)}
+		} else if current != nil && (output.Silent || outcome == "fallback_reply") && (current.Status == TaskCompleted || current.Status == TaskFailed || current.Status == TaskWaitingInput) {
+			output = TurnOutput{TaskID: task.ID, Text: taskClosingText(current)}
 		}
 	}
 	if errors.Is(thinkErr, ErrAttachmentUnavailable) && !strings.Contains(output.Text, "要发送的附件已删除或不可用") {
@@ -138,18 +165,18 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 
 // A restarted model could paraphrase an already committed tool call and create a second task.
 func (r *Runtime) recoverTurn(ctx context.Context, event Event, task *Task) error {
-	output := TurnOutput{Text: "处理上一条消息时服务中断了。已提交的任务和记忆操作仍保留，可以查询；尚未提交的部分请重新告诉我。"}
+	output := TurnOutput{ScheduleID: event.ScheduleID, Text: "处理上一条消息时服务中断了。已提交的任务、计划和记忆操作仍保留，可以查询；尚未提交的部分请重新告诉我。"}
 	if task != nil {
 		if task.Status == TaskQueued {
-			return r.publish(ctx, event, TurnOutput{TaskID: task.ID, Silent: true})
+			return r.publish(ctx, event, TurnOutput{TaskID: task.ID, ScheduleID: event.ScheduleID, Silent: true})
 		}
 		if task.Status == TaskAwaitingReview {
 			if _, err := r.Store.SettleTask(ctx, event.ID, task.ID, task.Revision, TaskWaitingInput, task.Summary); err != nil {
 				return err
 			}
-			output.Text = fmt.Sprintf("任务 #%d 已保存阶段成果，但后续规划被中断。请告诉我是否继续。\n\n%s", task.ID, clip(task.Summary, 6000))
+			output.Text = fmt.Sprintf("「%s」的阶段成果已保存，但后续安排被中断。请告诉我是否继续。\n\n%s", task.Title, clip(task.Summary, 6000))
 		} else {
-			output.Text = fmt.Sprintf("任务 #%d 的状态已保存（%s），此前的回复被中断。\n\n%s", task.ID, task.Status, clip(task.Summary, 6000))
+			output.Text = fmt.Sprintf("「%s」此前的回复被中断，已保存的结果如下。\n\n%s", task.Title, clip(task.Summary, 6000))
 		}
 		output.TaskID = task.ID
 	}
@@ -157,8 +184,29 @@ func (r *Runtime) recoverTurn(ctx context.Context, event Event, task *Task) erro
 }
 
 func (r *Runtime) publish(ctx context.Context, event Event, output TurnOutput) error {
+	prefix := ""
+	if event.Kind == EventTask && event.TaskID > 0 && event.ScheduleID > 0 && !output.Silent {
+		info, err := r.Store.ScheduleForTask(ctx, event.TaskID)
+		if err != nil {
+			return err
+		}
+		if info != nil {
+			label := fmt.Sprintf("计划 #%d · Task #%d", info.Schedule.ID, event.TaskID)
+			if w := info.Occurrence.Window; w != nil {
+				if !info.Occurrence.CoverageEligible {
+					label += fmt.Sprintf("\n原检查区间 [%s, %s)，本次目标已修改，不计入计划检查进度", w.Start.Format(time.RFC3339), w.End.Format(time.RFC3339))
+				} else {
+					complete := info.Occurrence.CheckResult != nil && info.Occurrence.CheckResult.Complete && len(info.Occurrence.CheckResult.Limitations) == 0
+					label += fmt.Sprintf("\n检查区间 [%s, %s)，完整检查：%t", w.Start.Format(time.RFC3339), w.End.Format(time.RFC3339), complete)
+				}
+			}
+			prefix = label + "\n\n"
+			output.Text = prefix + output.Text
+			output.ScheduleID = event.ScheduleID
+		}
+	}
 	if output.Silent {
-		return r.Store.CompleteEvent(ctx, event.ID, TurnOutput{TaskID: output.TaskID, Silent: true}, nil)
+		return r.Store.CompleteEvent(ctx, event.ID, TurnOutput{TaskID: output.TaskID, ScheduleID: output.ScheduleID, Silent: true}, nil)
 	}
 	var chunks []string
 	if output.Text != "" {
@@ -175,7 +223,7 @@ func (r *Runtime) publish(ctx context.Context, event Event, output TurnOutput) e
 		if !errors.Is(err, ErrAttachmentUnavailable) || len(output.Attachments) == 0 {
 			return err
 		}
-		fallback := TurnOutput{TaskID: output.TaskID, Text: "要发送的附件已删除或不可用，未发送。请重新上传或重新生成文件。"}
+		fallback := TurnOutput{TaskID: output.TaskID, ScheduleID: output.ScheduleID, Text: prefix + "要发送的附件已删除或不可用，未发送。请重新上传或重新生成文件。"}
 		fallbackChunks, prepareErr := r.Prepare(fallback.Text)
 		if prepareErr != nil {
 			return prepareErr
@@ -188,6 +236,18 @@ func (r *Runtime) publish(ctx context.Context, event Event, output TurnOutput) e
 func (r *Runtime) context(ctx context.Context, event Event) (TurnInput, error) {
 	input := TurnInput{Event: event}
 	var err error
+	if event.Kind == EventUser {
+		input.PendingInputs, err = r.Store.PendingInputs(ctx, event.ID)
+		if err != nil {
+			return input, err
+		}
+	}
+	if event.Kind == EventTask {
+		input.PendingTaskInputs, err = r.Store.PendingTaskInputs(ctx, event.TaskID)
+		if err != nil {
+			return input, err
+		}
+	}
 	input.History, err = r.Store.History(ctx, event.ID, 20)
 	if err != nil {
 		return input, err
@@ -195,6 +255,25 @@ func (r *Runtime) context(ctx context.Context, event Event) (TurnInput, error) {
 	input.Tasks, err = r.Store.Tasks(ctx, 10)
 	if err != nil {
 		return input, err
+	}
+	if event.TaskID == 0 && event.ReplyToID != "" {
+		referenced, err := r.Store.ReferencedTasks(ctx, event.ID)
+		if err != nil {
+			return input, err
+		}
+		for _, task := range referenced {
+			input.ReferencedTaskIDs = append(input.ReferencedTaskIDs, task.ID)
+			found := false
+			for _, existing := range input.Tasks {
+				if existing.ID == task.ID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				input.Tasks = append(input.Tasks, task)
+			}
+		}
 	}
 	if event.RunID != 0 {
 		input.CurrentRun, err = r.Store.Run(ctx, event.RunID)
@@ -219,20 +298,37 @@ func (r *Runtime) context(ctx context.Context, event Event) (TurnInput, error) {
 			}
 		}
 	}
+	if event.TaskID > 0 {
+		input.Schedule, err = r.Store.ScheduleForTask(ctx, event.TaskID)
+		if err != nil {
+			return input, err
+		}
+	}
+	if input.Schedule != nil {
+		input.Suggestions, err = r.Store.ScheduleSuggestions(ctx, input.Schedule.Schedule.ID)
+		if err != nil {
+			return input, err
+		}
+	} else if event.ScheduleID > 0 {
+		input.Suggestions, err = r.Store.ScheduleSuggestions(ctx, event.ScheduleID)
+		if err != nil {
+			return input, err
+		}
+	}
+	if event.ReplyOutboxID > 0 {
+		input.RepliedMessage, err = r.Store.RepliedMessage(ctx, event.ReplyOutboxID)
+		if err != nil {
+			return input, err
+		}
+		replied, err := r.Store.ReplyScheduleSuggestions(ctx, event.ReplyOutboxID)
+		if err != nil {
+			return input, err
+		}
+		input.ReplySuggestions = replied
+	}
 	input.Memories, err = r.Store.Memories(ctx, "", 20)
 	if err != nil {
 		return input, err
-	}
-	for i := range input.History {
-		input.History[i].Text = clip(input.History[i].Text, 2000)
-	}
-	for i := range input.Tasks {
-		input.Tasks[i].Goal = clip(input.Tasks[i].Goal, 2000)
-		input.Tasks[i].Summary = clip(input.Tasks[i].Summary, 3000)
-		input.Tasks[i].Context = clip(input.Tasks[i].Context, 2000)
-	}
-	for i := range input.Memories {
-		input.Memories[i].Value = clip(input.Memories[i].Value, 800)
 	}
 	return input, nil
 }

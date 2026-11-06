@@ -17,14 +17,14 @@ type unwindingTaskStore struct {
 	calls   atomic.Int64
 }
 
-func (s *unwindingTaskStore) Memories(ctx context.Context, query string, limit int) ([]Memory, error) {
+func (s *unwindingTaskStore) ReadCheckpoints(ctx context.Context, runID int64) ([]ReadCheckpoint, error) {
 	if s.calls.Add(1) == 1 {
 		close(s.entered)
 		<-ctx.Done()
 		<-s.release // The cancelled stage still owns its workspace while unwinding.
 		return nil, ctx.Err()
 	}
-	return s.Repository.Memories(ctx, query, limit)
+	return s.Repository.ReadCheckpoints(ctx, runID)
 }
 
 func TestRuntimeWorkspaceWaitDoesNotChargeBudget(t *testing.T) {

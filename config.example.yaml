@@ -1,12 +1,13 @@
 model:
   base_url: "" # Your Responses-compatible base URL, including /v1 when needed.
   name: "" # Model ID provided by your endpoint.
+  context_window: 0 # Required: set the endpoint's total input + output token capacity.
   # Use KAGARI_MODEL_API_KEY for the credential.
   timeout: 60s
   max_output_tokens: 5000
 
 storage:
-  path: data/kagari.db
+  path: data/kagari-context.db
 
 telegram:
   # Use KAGARI_TELEGRAM_TOKEN for the credential.
@@ -14,6 +15,7 @@ telegram:
 
 personal:
   channel: telegram # telegram or weixin; switching requires a restart.
+  timezone: Asia/Shanghai # IANA time zone used by schedules.
   task_concurrency: 4
   task_budget: 30m # Cumulative execution time per Task, including automatic planning; waiting is excluded.
 
@@ -34,12 +36,12 @@ reader:
   allowed_non_public_cidrs: [] # e.g. [198.18.0.0/16] for a TUN fake-IP range.
 
 browser:
-  enabled: false # Exposes browse_url to the model when enabled.
+  enabled: false # Exposes interactive browse_url; one isolated session per task stage.
   command: npx # Playwright MCP executable; no shell is used.
   args: [-y, "@playwright/mcp@0.0.82", --headless, --isolated, --codegen, none]
 
 agent:
-  max_sources: 6
+  max_sources: 6 # Shared budget for HTTP reads and valid browser actions per task stage.
   max_iterations: 10
   timeout: 3m
   streaming: false # Enables Responses SSE for task stages; per-chunk SSE logs are disabled.

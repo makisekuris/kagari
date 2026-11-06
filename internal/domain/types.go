@@ -37,6 +37,18 @@ type Source struct {
 	Truncated    bool       `json:"truncated"`
 }
 
+// SourceRef identifies a persisted source without carrying its body.
+type SourceRef struct {
+	ID              string    `json:"id"`
+	RunID           int64     `json:"run_id"`
+	URL             string    `json:"url"`
+	Title           string    `json:"title,omitempty"`
+	Status          string    `json:"status"`
+	FetchedAt       time.Time `json:"fetched_at"`
+	SourceTruncated bool      `json:"source_truncated"`
+	TotalRunes      int       `json:"total_runes"`
+}
+
 // Reading 记录一次实际读取尝试；同一 URL 可通过不同后端重试。
 type Reading struct {
 	SourceID string `json:"source_id"`
@@ -52,10 +64,11 @@ type Usage struct {
 
 // Result 保存阶段摘要与读取记录；失败时仍可包含已取得的材料。
 type Result struct {
-	Body          string    `json:"body,omitempty"`
-	Sources       []Source  `json:"sources"`
-	Readings      []Reading `json:"readings"`
-	Usage         Usage     `json:"usage"`
-	UsageReported bool      `json:"usage_reported"`
-	CreatedAt     time.Time `json:"created_at"`
+	Body          string      `json:"body,omitempty"`
+	Sources       []Source    `json:"sources"`
+	SourceRefs    []SourceRef `json:"source_refs,omitempty"`
+	Readings      []Reading   `json:"readings"`
+	Usage         Usage       `json:"usage"`
+	UsageReported bool        `json:"usage_reported"`
+	CreatedAt     time.Time   `json:"created_at"`
 }

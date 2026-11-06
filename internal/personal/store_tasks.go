@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,18 +19,24 @@ import (
 const maxTaskChars = 32_000
 const maxTitleChars = 200
 
-const taskColumns = `id,title,goal,context,attachments,revision,status,summary,budget_ms,used_ms,updated_at`
-const runColumns = `id,task_id,revision,event_id,kind,input,status,result,error,elapsed_ms`
+const taskColumns = `id,title,goal,context,attachments,revision,status,summary,budget_ms,used_ms,updated_at,source_run_ids,memory_refs`
+const runColumns = `id,task_id,revision,event_id,kind,input,status,result,error,elapsed_ms,context_manifest`
 
 func scanTask(row scanner) (*Task, error) {
 	var task Task
-	var updated, attachments string
+	var updated, attachments, sourceRuns, memoryRefs string
 	if err := row.Scan(&task.ID, &task.Title, &task.Goal, &task.Context, &attachments, &task.Revision, &task.Status,
-		&task.Summary, &task.BudgetMS, &task.UsedMS, &updated); err != nil {
+		&task.Summary, &task.BudgetMS, &task.UsedMS, &updated, &sourceRuns, &memoryRefs); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(attachments), &task.Attachments); err != nil {
 		return nil, fmt.Errorf("personal: decode task attachments: %w", err)
+	}
+	if err := json.Unmarshal([]byte(sourceRuns), &task.SourceRunIDs); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(memoryRefs), &task.MemoryRefs); err != nil {
+		return nil, err
 	}
 	if task.Attachments == nil {
 		task.Attachments = []channel.Attachment{}
@@ -43,7 +50,7 @@ func scanRun(row scanner) (*Run, error) {
 	var run Run
 	var taskID sql.NullInt64
 	if err := row.Scan(&run.ID, &taskID, &run.Revision, &run.EventID, &run.Kind, &run.Input, &run.Status,
-		&run.Result, &run.Error, &run.ElapsedMS); err != nil {
+		&run.Result, &run.Error, &run.ElapsedMS, &run.ContextManifest); err != nil {
 		return nil, err
 	}
 	run.TaskID = taskID.Int64
@@ -230,7 +237,18 @@ func insertRequest(ctx context.Context, tx *sql.Tx, eventID int64, key, operatio
 	return err
 }
 
-func taskRun(ctx context.Context, tx *sql.Tx, task Task, eventID int64, input TaskInput, now time.Time) (Run, error) {
+func (s *Store) taskRun(ctx context.Context, tx *sql.Tx, task *Task, eventID int64, input TaskInput, now time.Time) (Run, error) {
+	if err := bindTaskReferences(ctx, tx, task, eventID, &input); err != nil {
+		return Run{}, err
+	}
+	trigger, err := scheduledTaskTrigger(ctx, tx, task.ID)
+	if err != nil {
+		return Run{}, err
+	}
+	input.Trigger = trigger
+	if err := s.withTaskInputsTx(ctx, tx, task.ID, &input); err != nil {
+		return Run{}, err
+	}
 	encoded, err := encodeTaskInput(input)
 	if err != nil {
 		return Run{}, err
@@ -244,13 +262,49 @@ func taskRun(ctx context.Context, tx *sql.Tx, task Task, eventID int64, input Ta
 	if err != nil {
 		return Run{}, err
 	}
+	if err := markTaskInputsRunTx(ctx, tx, task.ID, id); err != nil {
+		return Run{}, err
+	}
 	return Run{ID: id, TaskID: task.ID, Revision: task.Revision, EventID: eventID, Kind: RunTask,
 		Input: encoded, Status: RunQueued}, nil
 }
 
+// createTaskRunTx leaves authorization and transaction ownership with its caller.
+func (s *Store) createTaskRunTx(ctx context.Context, tx *sql.Tx, eventID int64, title string, input TaskInput, budgetMS int64, now time.Time) (Task, Run, error) {
+	if err := validateTaskInput(title, input); err != nil {
+		return Task{}, Run{}, err
+	}
+	attachments, err := json.Marshal(input.Attachments)
+	if err != nil {
+		return Task{}, Run{}, err
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO personal_tasks(title,goal,context,attachments,revision,status,budget_ms,updated_at)
+		VALUES(?,?,?,?,1,'queued',?,?)`, title, input.Goal, input.Context, string(attachments), budgetMS, timestamp(now))
+	if err != nil {
+		return Task{}, Run{}, err
+	}
+	taskID, err := res.LastInsertId()
+	if err != nil {
+		return Task{}, Run{}, err
+	}
+	task := Task{ID: taskID, Title: title, Goal: input.Goal, Context: input.Context, Attachments: input.Attachments, Revision: 1,
+		Status: TaskQueued, BudgetMS: budgetMS, UpdatedAt: now}
+	run, err := s.taskRun(ctx, tx, &task, eventID, input, now)
+	if err != nil {
+		return Task{}, Run{}, err
+	}
+	return task, run, nil
+}
+
 func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string, input TaskInput) (Task, Run, error) {
+	if len(input.InputEvents) > 0 {
+		return Task{}, Run{}, errors.New("personal: task input event references are runtime-owned")
+	}
 	if !requestKeyValid(key) {
 		return Task{}, Run{}, errors.New("personal: request key is required")
+	}
+	if input.Trigger != nil {
+		return Task{}, Run{}, errors.New("personal: task trigger is set by the scheduler")
 	}
 	if err := validateTaskInput(title, input); err != nil {
 		return Task{}, Run{}, err
@@ -295,25 +349,11 @@ func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string
 		return Task{}, Run{}, err
 	}
 	now := time.Now().UTC()
-	attachments, err := json.Marshal(input.Attachments)
+	task, run, err := s.createTaskRunTx(ctx, tx, eventID, title, input, s.taskBudgetMS, now)
 	if err != nil {
 		return Task{}, Run{}, err
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO personal_tasks(title,goal,context,attachments,revision,status,budget_ms,updated_at)
-		VALUES(?,?,?,?,1,'queued',?,?)`, title, input.Goal, input.Context, string(attachments), s.taskBudgetMS, timestamp(now))
-	if err != nil {
-		return Task{}, Run{}, err
-	}
-	taskID, err = res.LastInsertId()
-	if err != nil {
-		return Task{}, Run{}, err
-	}
-	task := Task{ID: taskID, Title: title, Goal: input.Goal, Context: input.Context, Attachments: input.Attachments, Revision: 1,
-		Status: TaskQueued, BudgetMS: s.taskBudgetMS, UpdatedAt: now}
-	run, err := taskRun(ctx, tx, task, eventID, input, now)
-	if err != nil {
-		return Task{}, Run{}, err
-	}
+	taskID = task.ID
 	if err := insertRequest(ctx, tx, eventID, key, "create_task", payload, taskID, run.ID, 0); err != nil {
 		return Task{}, Run{}, err
 	}
@@ -326,6 +366,12 @@ func (s *Store) CreateTask(ctx context.Context, eventID int64, key, title string
 }
 
 func (s *Store) ReviseTask(ctx context.Context, eventID int64, key string, taskID, expectedRevision int64, input TaskInput) (Task, Run, error) {
+	if len(input.InputEvents) > 0 {
+		return Task{}, Run{}, errors.New("personal: task input event references are runtime-owned")
+	}
+	if input.Trigger != nil {
+		return Task{}, Run{}, errors.New("personal: task trigger is set by the scheduler")
+	}
 	if !requestKeyValid(key) || taskID <= 0 || expectedRevision <= 0 {
 		return Task{}, Run{}, errors.New("personal: request key, task ID and positive revision are required")
 	}
@@ -404,8 +450,16 @@ func (s *Store) ReviseTask(ctx context.Context, eventID int64, key string, taskI
 		input.Goal, input.Context, string(attachments), newRevision, newStatus, timestamp(now), taskID, expectedRevision); err != nil {
 		return Task{}, Run{}, err
 	}
+	if task.Goal != input.Goal || task.Context != input.Context || !slices.EqualFunc(task.Attachments, input.Attachments, func(a, b channel.Attachment) bool { return a.ID == b.ID }) {
+		if _, err := tx.ExecContext(ctx, `UPDATE personal_schedule_occurrences SET coverage_eligible=0 WHERE task_id=?`, taskID); err != nil {
+			return Task{}, Run{}, err
+		}
+	}
 	task.Goal, task.Context, task.Attachments, task.Revision, task.Status, task.UpdatedAt = input.Goal, input.Context, input.Attachments, newRevision, newStatus, now
-	run, err := taskRun(ctx, tx, *task, eventID, input, now)
+	if err := rebaseTaskInputsRevisionTx(ctx, tx, taskID, newRevision); err != nil {
+		return Task{}, Run{}, err
+	}
+	run, err := s.taskRun(ctx, tx, task, eventID, input, now)
 	if err != nil {
 		return Task{}, Run{}, err
 	}
@@ -460,6 +514,15 @@ func (s *Store) CancelTask(ctx context.Context, eventID, taskID, expectedRevisio
 		return Task{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET status='cancelled',updated_at=? WHERE id=? AND revision=?`, timestamp(now), taskID, expectedRevision); err != nil {
+		return Task{}, err
+	}
+	if err := releaseTerminalTaskInputsTx(ctx, tx); err != nil {
+		return Task{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE personal_reply_groups SET closed=1
+		WHERE id IN (SELECT group_id FROM personal_reply_tasks WHERE task_id=?) AND NOT EXISTS(
+			SELECT 1 FROM personal_reply_tasks rt JOIN personal_tasks t ON t.id=rt.task_id
+			WHERE rt.group_id=personal_reply_groups.id AND t.status IN ('queued','running','awaiting_review'))`, taskID); err != nil {
 		return Task{}, err
 	}
 	task.Status, task.UpdatedAt = TaskCancelled, now
@@ -541,7 +604,7 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 		return Task{}, Run{}, errors.New("personal: task callback cannot revive a cancelled or budget-waiting task")
 	}
 	if extendBudget {
-		if task.BudgetMS > math.MaxInt64-s.taskBudgetMS {
+		if task.BudgetMS > math.MaxInt64/int64(time.Millisecond)-s.taskBudgetMS {
 			return Task{}, Run{}, errors.New("personal: task budget overflow")
 		}
 		task.BudgetMS += s.taskBudgetMS
@@ -574,7 +637,7 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 		return Task{}, Run{}, err
 	}
 	task.Attachments, task.Status, task.UpdatedAt = input.Attachments, TaskQueued, now
-	run, err := taskRun(ctx, tx, *task, eventID, input, now)
+	run, err := s.taskRun(ctx, tx, task, eventID, input, now)
 	if err != nil {
 		return Task{}, Run{}, err
 	}
@@ -589,7 +652,7 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 	return *task, run, nil
 }
 
-func (s *Store) SettleTask(ctx context.Context, eventID, taskID, expectedRevision int64, status TaskStatus, summary string) (Task, error) {
+func (s *Store) SettleTask(ctx context.Context, eventID, taskID, expectedRevision int64, status TaskStatus, summary string, assessment ...*CheckAssessment) (Task, error) {
 	if taskID <= 0 || expectedRevision <= 0 || runeLen(summary) > maxTaskChars {
 		return Task{}, errors.New("personal: task ID, revision and bounded summary are required")
 	}
@@ -633,10 +696,28 @@ func (s *Store) SettleTask(ctx context.Context, eventID, taskID, expectedRevisio
 		return Task{}, errors.New("personal: callback cannot settle an active task run")
 	}
 	now := time.Now().UTC()
+	if len(assessment) > 1 {
+		return Task{}, errors.New("personal: at most one check assessment is allowed")
+	}
+	var check *CheckAssessment
+	if len(assessment) == 1 {
+		check = assessment[0]
+	}
+	if status == TaskCompleted {
+		if err := validateTaskInputsSettledTx(ctx, tx, taskID); err != nil {
+			return Task{}, err
+		}
+	}
+	if err := settleScheduledTask(ctx, tx, *task, status, check, now); err != nil {
+		return Task{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='cancelled' WHERE task_id=? AND status IN ('queued','running')`, taskID); err != nil {
 		return Task{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET status=?,summary=?,updated_at=? WHERE id=? AND revision=?`, status, summary, timestamp(now), taskID, expectedRevision); err != nil {
+		return Task{}, err
+	}
+	if err := releaseTerminalTaskInputsTx(ctx, tx); err != nil {
 		return Task{}, err
 	}
 	task.Status, task.Summary, task.UpdatedAt = status, summary, now
@@ -804,6 +885,9 @@ func (s *Store) ClaimRun(ctx context.Context, kind RunKind) (*Run, error) {
 		if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET status='running',updated_at=? WHERE id=? AND revision=? AND status='queued'`, timestamp(time.Now()), taskID, revision); err != nil {
 			return nil, err
 		}
+		if err := claimTaskInputsTx(ctx, tx, id); err != nil {
+			return nil, err
+		}
 	}
 	run, err := scanRun(tx.QueryRowContext(ctx, `SELECT `+runColumns+` FROM personal_runs WHERE id=?`, id))
 	if err != nil {
@@ -858,6 +942,9 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 	if runeLen(result.Summary) > maxTaskChars || runeLen(failure) > maxTaskChars {
 		return errors.New("personal: stage result exceeds its size limit")
 	}
+	if failure != "" {
+		result.AppliedInputIDs = nil
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -902,11 +989,28 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 		if err != nil {
 			return err
 		}
+		if err = releaseTerminalTaskInputsTx(ctx, tx); err != nil {
+			return err
+		}
 		return commitStoreOutcome(ctx, tx, "task.stage.finish", "discarded_stale", nil,
 			zap.Int64("task_id", taskID), zap.Int64("run_id", runID), zap.Int64("revision", revision),
 			zap.String("run_status", string(RunCancelled)), zap.String("task_status", string(task.Status)))
 	}
 	status := RunCompleted
+	for i, ref := range result.Sources {
+		material, err := scanMaterial(tx.QueryRowContext(ctx, `SELECT `+materialColumns+` FROM personal_materials WHERE id=? AND kind='source'`, ref.ID))
+		if err != nil {
+			return err
+		}
+		if err = authorizeRead(ctx, tx, ReadScope{RunID: runID}, material.RunID, false); err != nil {
+			return err
+		}
+		result.Sources[i] = *material.Source
+	}
+	raw, err = json.Marshal(result)
+	if err != nil {
+		return err
+	}
 	if failure != "" {
 		status = RunFailed
 	}
@@ -918,6 +1022,19 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 		taskStatus = TaskWaitingBudget
 	}
 	now := timestamp(time.Now())
+	allowed := map[string]bool{}
+	for _, a := range task.Attachments {
+		allowed[a.ID] = true
+	}
+	for _, a := range result.Attachments {
+		allowed[a.ID] = true
+	}
+	if err := applyProgressTx(ctx, tx, Run{ID: runID, TaskID: taskID, Revision: revision}, 0, -1, result.Progress, allowed); err != nil {
+		return err
+	}
+	if err := finishTaskInputsTx(ctx, tx, runID, revision, result.AppliedInputIDs, failure); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status=?,result=?,error=? WHERE id=? AND status='running'`,
 		status, string(raw), failure, runID); err != nil {
 		return err
@@ -934,8 +1051,8 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 	if failure != "" {
 		callbackText = failure
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,run_id,status,created_at)
-		VALUES('task',?,?,?,'queued',?)`, callbackText, taskID, runID, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,run_id,schedule_id,status,created_at)
+		VALUES('task',?,?,?,(SELECT schedule_id FROM personal_schedule_occurrences WHERE task_id=?),'queued',?)`, callbackText, taskID, runID, taskID, now); err != nil {
 		return err
 	}
 	return commitStoreOutcome(ctx, tx, "task.stage.finish", string(status), stageOutcomePayload{Result: result, Failure: failure},
@@ -943,17 +1060,20 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 		zap.String("run_status", string(status)), zap.String("task_status", string(taskStatus)))
 }
 
-// Full evidence stays in Run.Result; subsequent stages receive a bounded, valid summary.
+// Run.Result retains full stage data and material references; the handoff is bounded.
 func stageCheckpoint(runID int64, result StageResult) string {
 	result.Attachments = nil
+	// Progress and input processing have their own durable handoff; do not duplicate them here.
+	result.Progress = nil
+	result.AppliedInputIDs = nil
 	checkpoint := struct {
 		RunID int64 `json:"run_id"`
 		StageResult
 	}{RunID: runID, StageResult: result}
 	checkpoint.Summary = clip(result.Summary, 12000)
-	checkpoint.Sources = make([]domain.Source, 0, len(result.Sources))
+	checkpoint.Sources = make([]domain.SourceRef, 0, len(result.Sources))
 	for _, source := range result.Sources {
-		checkpoint.Sources = append(checkpoint.Sources, domain.Source{ID: clip(source.ID, 128), URL: clip(source.URL, 512), Title: clip(source.Title, 200), Status: source.Status})
+		checkpoint.Sources = append(checkpoint.Sources, source)
 	}
 	for {
 		raw, _ := json.Marshal(checkpoint)
@@ -1077,6 +1197,9 @@ func (s *Store) AccountEvent(ctx context.Context, eventID int64, elapsed time.Du
 	if taskStatus != TaskCompleted && task.UsedMS >= task.BudgetMS {
 		newTaskStatus = TaskWaitingBudget
 		if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='cancelled' WHERE task_id=? AND revision=? AND status='queued'`, taskID, revision); err != nil {
+			return err
+		}
+		if err := releaseTerminalTaskInputsTx(ctx, tx); err != nil {
 			return err
 		}
 	}

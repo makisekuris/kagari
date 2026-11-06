@@ -924,8 +924,8 @@ func TestCancelTaskIdempotenceAndLateStageNoop(t *testing.T) {
 func TestPersonalSchemaKeepsChannelTablesWithoutDerivedColumns(t *testing.T) {
 	s := testStore(t, ":memory:", time.Minute)
 	var tables int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'personal_%'`).Scan(&tables); err != nil || tables != 13 {
-		t.Fatalf("personal tables = (%d,%v), want 13", tables, err)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'personal_%'`).Scan(&tables); err != nil || tables != 24 {
+		t.Fatalf("personal tables = (%d,%v), want 24", tables, err)
 	}
 	for _, field := range []struct{ table, column string }{
 		{"personal_runs", "remaining_ms"},

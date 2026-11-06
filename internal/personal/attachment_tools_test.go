@@ -4,12 +4,52 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/components/tool"
 	"kagari/internal/channel"
+	"kagari/internal/inputbudget"
+	"kagari/internal/textpage"
 )
+
+func invokeAttachmentTool(t *testing.T, tools []tool.BaseTool, args any) (attachmentReply, string) {
+	return invokeAttachmentToolContext(t, context.Background(), tools, args)
+}
+
+func invokeAttachmentToolContext(t *testing.T, ctx context.Context, tools []tool.BaseTool, args any) (attachmentReply, string) {
+	t.Helper()
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range tools {
+		info, err := candidate.Info(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Name != "read_attachment" {
+			continue
+		}
+		invokable, ok := candidate.(tool.InvokableTool)
+		if !ok {
+			t.Fatal("read_attachment is not invokable")
+		}
+		output, err := invokable.InvokableRun(ctx, string(encoded))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reply attachmentReply
+		if err := json.Unmarshal([]byte(output), &reply); err != nil {
+			t.Fatalf("decode read_attachment reply %q: %v", output, err)
+		}
+		return reply, output
+	}
+	t.Fatal("read_attachment tool not found")
+	return attachmentReply{}, ""
+}
 
 func TestTaskReadsSelectedFileAndProducesCandidate(t *testing.T) {
 	ctx := context.Background()
@@ -40,10 +80,17 @@ func TestTaskReadsSelectedFileAndProducesCandidate(t *testing.T) {
 		t.Fatal("file text did not reach the task")
 	}
 	raw, _ := json.Marshal(StageResult{Summary: strings.Repeat("summary", 1000), Attachments: result.Attachments})
-	bounded := boundedTurnInput(TurnInput{CurrentRun: &Run{Kind: RunTask, Result: string(raw)}})
-	var decoded StageResult
-	if err := json.Unmarshal([]byte(bounded.CurrentRun.Result), &decoded); err != nil || len(decoded.Attachments) != 1 || decoded.Attachments[0].ID != result.Attachments[0].ID {
-		t.Fatalf("attachment lost during context truncation: %v", err)
+	limits, err := inputbudget.NewLimits(20_000, 1_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assembled, err := assembleTurn(ctx, TurnInput{Event: Event{ID: run.EventID, Kind: EventTask, TaskID: run.TaskID}, CurrentRun: &Run{ID: run.ID, Kind: RunTask, TaskID: run.TaskID, Revision: run.Revision, Result: string(raw)}}, "instruction", nil, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded runResultCard
+	if err := json.Unmarshal([]byte(assembled.CurrentRun.Result), &decoded); err != nil || len(decoded.AttachmentIDs) != 1 || decoded.AttachmentIDs[0] != result.Attachments[0].ID {
+		t.Fatalf("attachment reference lost during context assembly: %v", err)
 	}
 	if err := s.DeleteAttachment(ctx, file.ID); err != nil {
 		t.Fatal(err)
@@ -76,6 +123,55 @@ func TestAttachmentToolsRejectUnselectedAndBinaryFiles(t *testing.T) {
 	}
 	if !strings.Contains(requestInput(fixture.requests[1]), "not part of this task") {
 		t.Fatal("task accessed unselected file")
+	}
+}
+
+func TestReadAttachmentPagesStayBoundedAndRecheckDeletion(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t, filepath.Join(t.TempDir(), "agent.db"), time.Minute)
+	content := strings.Repeat("<", 8000)
+	file, err := s.SaveAttachment(ctx, "large.txt", "text/plain", strings.NewReader(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := []textpage.Page{}
+	tools, err := attachmentTools(s, map[string]bool{file.ID: true}, nil, nil, func(id string, page textpage.Page) {
+		if id != file.ID {
+			t.Fatalf("observed attachment id = %s", id)
+		}
+		observed = append(observed, page)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := textpage.WithMaxBytes(ctx, 1024)
+	first, raw := invokeAttachmentToolContext(t, budget, tools, map[string]any{"id": file.ID, "limit": 8000})
+	if len(raw) > textpage.MaxBytes(budget) || first.Error != "" || first.Page == nil || first.Page.TotalRunes != 8000 || first.Page.End != len([]rune(first.Page.Text)) || !first.Page.HasMore {
+		t.Fatalf("first attachment page bytes=%d reply=%+v", len(raw), first)
+	}
+	if len(observed) != 1 || !reflect.DeepEqual(observed[0], *first.Page) {
+		t.Fatalf("observed page = %+v, reply = %+v", observed, first.Page)
+	}
+	page := *first.Page
+	var got strings.Builder
+	got.WriteString(page.Text)
+	for page.HasMore {
+		next, raw := invokeAttachmentToolContext(t, budget, tools, map[string]any{"id": file.ID, "offset": page.End, "limit": 4000, "version": page.Version})
+		if len(raw) > textpage.MaxBytes(budget) || next.Error != "" || next.Page == nil || next.Page.Offset != page.End || next.Page.End <= page.End {
+			t.Fatalf("attachment page bytes=%d reply=%+v", len(raw), next)
+		}
+		page = *next.Page
+		got.WriteString(page.Text)
+	}
+	if got.String() != content {
+		t.Fatal("bounded attachment pages did not preserve the complete text")
+	}
+	if err := s.DeleteAttachment(ctx, file.ID); err != nil {
+		t.Fatal(err)
+	}
+	deleted, _ := invokeAttachmentToolContext(t, budget, tools, map[string]any{"id": file.ID, "offset": first.Page.End, "version": first.Page.Version})
+	if deleted.Error == "" {
+		t.Fatal("later page read succeeded after deletion")
 	}
 }
 

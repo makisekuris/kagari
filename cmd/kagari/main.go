@@ -30,7 +30,7 @@ func run() error {
 	}
 	args := root.Args()
 	if len(args) == 0 {
-		return errors.New("commands: run, weixin, channel, attachments, events, trace, tasks, runs, memories, memory-history")
+		return errors.New("commands: run, weixin, channel, attachments, events, trace, tasks, runs, memories, memory-history, schedules, schedule-history")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -54,6 +54,10 @@ func run() error {
 		return inspectEvents(ctx, cfg, args[1:], os.Stdout)
 	case "trace":
 		return inspectTrace(ctx, cfg, args[1:], os.Stdout)
+	case "schedules":
+		return inspectSchedules(ctx, cfg, args[1:], os.Stdout)
+	case "schedule-history":
+		return inspectScheduleHistory(ctx, cfg, args[1:], os.Stdout)
 	case "tasks", "runs", "memories", "memory-history":
 		return inspectPersonal(ctx, cfg, args, os.Stdout)
 	case "run":

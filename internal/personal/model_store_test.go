@@ -136,7 +136,7 @@ func TestMainAgentMemoryCommitSurvivesReplyFailure(t *testing.T) {
 	}
 }
 
-func TestMainAgentReportsSilentMemoryFailureWhenUserQueriesRun(t *testing.T) {
+func TestRuntimeReportsSilentMemoryFailureWhenUserQueriesRun(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Minute)
 	source := openUserEvent(t, s, 1, 1, "I prefer concise answers.")
@@ -148,15 +148,20 @@ func TestMainAgentReportsSilentMemoryFailureWhenUserQueriesRun(t *testing.T) {
 	if err := s.FinishMemoryReview(ctx, run.ID, MemoryReview{}, "memory review unavailable"); err != nil {
 		t.Fatal(err)
 	}
-	event := openUserEvent(t, s, 2, 2, "Show the memory run result.")
+	acceptInput(t, s, "2", sourceInput("2", "Show the memory run result."))
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseTool("get_run", runArgs{RunID: run.ID}, "get-memory-run"),
 		responseText(`{"text":"记忆整理失败，尚未更新。","notify":false,"attachments":[]}`),
 	}}
 	main := MainAgent{Store: s, Model: fixture.model(t), Timeout: time.Second, MaxIterations: 3}
-	output, err := main.Think(ctx, TurnInput{Event: event})
-	if err != nil || output.Silent || output.Text == "" {
-		t.Fatalf("memory query must reply: %+v, %v", output, err)
+	runtime := testRuntime(s)
+	runtime.Think = main.Think
+	if _, err := runtime.turn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	message, err := s.ClaimDelivery(ctx)
+	if err != nil || message == nil || message.Text != "记忆整理失败，尚未更新。" {
+		t.Fatalf("memory query must reply: %+v, %v", message, err)
 	}
 	if len(fixture.requests) != 2 || !strings.Contains(requestInput(fixture.requests[1]), "memory review unavailable") {
 		t.Fatal("stored memory failure was not returned by get_run")

@@ -124,7 +124,7 @@ func (s *Store) AcceptBatch(ctx context.Context, channelName, account, cursor st
 		if input.Material {
 			kind, role = EventMaterial, "material"
 		}
-		taskID, err := replyTaskID(ctx, tx, input)
+		taskID, scheduleID, replyOutboxID, err := replyAssociation(ctx, tx, input)
 		if err != nil {
 			return nil, err
 		}
@@ -132,8 +132,8 @@ func (s *Store) AcceptBatch(ctx context.Context, channelName, account, cursor st
 		if err != nil {
 			return nil, err
 		}
-		res, err := tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,channel,account,sender,message_id,reply_to_id,attachments,status,created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,'queued',?)`, kind, input.Text, nullableID(taskID), channelName, account, input.Sender,
+		res, err := tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,schedule_id,reply_outbox_id,channel,account,sender,message_id,reply_to_id,attachments,status,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?)`, kind, input.Text, nullableID(taskID), nullableID(scheduleID), nullableID(replyOutboxID), channelName, account, input.Sender,
 			input.MessageID, input.ReplyToID, string(attachmentJSON), timestamp(time.Now()))
 		if err != nil {
 			return nil, err
@@ -142,7 +142,10 @@ func (s *Store) AcceptBatch(ctx context.Context, channelName, account, cursor st
 		if err != nil {
 			return nil, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text,attachments) VALUES(?,?,?,?)`, ids[i], role, input.Text, string(attachmentJSON)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text,attachments,schedule_id) VALUES(?,?,?,?,?)`, ids[i], role, input.Text, string(attachmentJSON), nullableID(scheduleID)); err != nil {
+			return nil, err
+		}
+		if err := startReplyTx(ctx, tx, ids[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -184,31 +187,27 @@ func (s *Store) canonicalInputAttachments(ctx context.Context, tx *sql.Tx, input
 	return attachments, nil
 }
 
-func replyTaskID(ctx context.Context, tx *sql.Tx, input channel.Input) (int64, error) {
+func replyAssociation(ctx context.Context, tx *sql.Tx, input channel.Input) (int64, int64, int64, error) {
 	if input.ReplyToID == "" {
-		return 0, nil
+		return 0, 0, 0, nil
 	}
-	var id sql.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT e.task_id FROM personal_outbox d JOIN personal_events e ON e.id=d.event_id
+	var taskID, scheduleID sql.NullInt64
+	var outboxID int64
+	err := tx.QueryRowContext(ctx, `SELECT e.task_id,e.schedule_id,d.id FROM personal_outbox d JOIN personal_events e ON e.id=d.event_id
 		WHERE d.receipt_channel=? AND d.receipt_account=? AND d.receipt_conversation=? AND d.receipt_message_id=?
-		AND d.status='sent' AND e.task_id IS NOT NULL ORDER BY d.id DESC LIMIT 1`,
-		input.Channel, input.Account, input.Sender, input.ReplyToID).Scan(&id)
-	if err == nil && id.Valid {
-		return id.Int64, nil
+		AND d.status='sent' ORDER BY d.id DESC LIMIT 1`, input.Channel, input.Account, input.Sender, input.ReplyToID).Scan(&taskID, &scheduleID, &outboxID)
+	if err == nil {
+		return taskID.Int64, scheduleID.Int64, outboxID, nil
 	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, err
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, 0, err
 	}
-	err = tx.QueryRowContext(ctx, `SELECT task_id FROM personal_events WHERE channel=? AND account=? AND sender=? AND message_id=?
-		AND kind IN ('user','material') AND task_id IS NOT NULL ORDER BY id DESC LIMIT 1`,
-		input.Channel, input.Account, input.Sender, input.ReplyToID).Scan(&id)
+	err = tx.QueryRowContext(ctx, `SELECT task_id,schedule_id FROM personal_events WHERE channel=? AND account=? AND sender=? AND message_id=?
+		AND kind IN ('user','material') ORDER BY id DESC LIMIT 1`, input.Channel, input.Account, input.Sender, input.ReplyToID).Scan(&taskID, &scheduleID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		return 0, 0, 0, nil
 	}
-	if err != nil {
-		return 0, err
-	}
-	return id.Int64, nil
+	return taskID.Int64, scheduleID.Int64, 0, err
 }
 
 func (s *Store) ClaimEvent(ctx context.Context) (*Event, error) {
@@ -252,13 +251,14 @@ type scanner interface{ Scan(...any) error }
 
 func scanEvent(row scanner) (*Event, error) {
 	var event Event
-	var taskID, runID sql.NullInt64
+	var taskID, runID, scheduleID, replyOutboxID sql.NullInt64
 	var attachments, created string
 	if err := row.Scan(&event.ID, &event.Kind, &event.Text, &taskID, &runID, &event.Channel, &event.Account, &event.Sender,
-		&event.MessageID, &event.ReplyToID, &attachments, &event.Interrupted, &created); err != nil {
+		&event.MessageID, &event.ReplyToID, &attachments, &event.Interrupted, &created, &scheduleID, &replyOutboxID); err != nil {
 		return nil, err
 	}
 	event.TaskID, event.RunID = taskID.Int64, runID.Int64
+	event.ScheduleID, event.ReplyOutboxID = scheduleID.Int64, replyOutboxID.Int64
 	if err := json.Unmarshal([]byte(attachments), &event.Attachments); err != nil {
 		return nil, fmt.Errorf("personal: decode event attachments: %w", err)
 	}
@@ -270,7 +270,7 @@ func scanEvent(row scanner) (*Event, error) {
 	return &event, err
 }
 
-const eventColumns = `id,kind,text,task_id,run_id,channel,account,sender,message_id,reply_to_id,attachments,interrupted,created_at`
+const eventColumns = `id,kind,text,task_id,run_id,channel,account,sender,message_id,reply_to_id,attachments,interrupted,created_at,schedule_id,reply_outbox_id`
 
 func (s *Store) History(ctx context.Context, eventID int64, limit int) ([]Message, error) {
 	if eventID <= 0 || limit <= 0 {
@@ -279,7 +279,7 @@ func (s *Store) History(ctx context.Context, eventID int64, limit int) ([]Messag
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT h.event_id,h.role,h.text,e.task_id,e.channel,e.account,e.sender,e.message_id,e.reply_to_id,h.attachments
+	rows, err := s.db.QueryContext(ctx, `SELECT h.id,h.event_id,h.role,h.text,e.task_id,e.channel,e.account,e.sender,e.message_id,e.reply_to_id,h.attachments,h.schedule_id
 		FROM personal_history h JOIN personal_events e ON e.id=h.event_id
 		WHERE h.event_id<? ORDER BY h.event_id DESC,h.id DESC LIMIT ?`, eventID, limit)
 	if err != nil {
@@ -289,12 +289,12 @@ func (s *Store) History(ctx context.Context, eventID int64, limit int) ([]Messag
 	messages := make([]Message, 0, limit)
 	for rows.Next() {
 		var m Message
-		var taskID sql.NullInt64
+		var taskID, scheduleID sql.NullInt64
 		var attachments string
-		if err := rows.Scan(&m.EventID, &m.Role, &m.Text, &taskID, &m.Channel, &m.Account, &m.Sender, &m.MessageID, &m.ReplyToID, &attachments); err != nil {
+		if err := rows.Scan(&m.HistoryID, &m.EventID, &m.Role, &m.Text, &taskID, &m.Channel, &m.Account, &m.Sender, &m.MessageID, &m.ReplyToID, &attachments, &scheduleID); err != nil {
 			return nil, err
 		}
-		m.TaskID = taskID.Int64
+		m.TaskID, m.ScheduleID = taskID.Int64, scheduleID.Int64
 		if err := json.Unmarshal([]byte(attachments), &m.Attachments); err != nil {
 			return nil, fmt.Errorf("personal: decode history attachments: %w", err)
 		}
@@ -367,38 +367,55 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output TurnOut
 			return fmt.Errorf("personal: event task %d: %w", taskID, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_events SET status='completed',task_id=? WHERE id=? AND status='running'`, nullableID(taskID), eventID); err != nil {
+	scheduleID := output.ScheduleID
+	if taskID > 0 {
+		var linked sql.NullInt64
+		err := tx.QueryRowContext(ctx, `SELECT schedule_id FROM personal_schedule_occurrences WHERE task_id=?`, taskID).Scan(&linked)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if scheduleID != 0 && scheduleID != linked.Int64 {
+			return errors.New("personal: reply schedule does not match its task")
+		}
+		scheduleID = linked.Int64
+	}
+	if kind == EventTask && scheduleID == 0 {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(schedule_id,0) FROM personal_events WHERE id=?`, eventID).Scan(&scheduleID); err != nil {
+			return err
+		}
+	}
+	if !discardedStaleCallback {
+		if err := recordReplyTx(ctx, tx, eventID, output); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE personal_events SET status='completed',task_id=?,schedule_id=? WHERE id=? AND status='running'`, nullableID(taskID), nullableID(scheduleID), eventID); err != nil {
 		return err
 	}
-	if output.Text != "" || len(attachments) > 0 {
-		attachmentJSON, err := json.Marshal(attachments)
+	if _, err := tx.ExecContext(ctx, `UPDATE personal_history SET schedule_id=? WHERE event_id=?`, nullableID(scheduleID), eventID); err != nil {
+		return err
+	}
+	var notices []scheduleNotice
+	if (kind == EventTask || kind == EventUser) && !output.Silent {
+		notices, err = scheduleNotices(ctx, tx, eventID, kind)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text,attachments) VALUES(?,'assistant',?,?)`, eventID, output.Text, string(attachmentJSON)); err != nil {
-			return err
+		for _, notice := range notices {
+			output.Text += "\n\n" + notice.text
 		}
 	}
 	replyParts := 0
 	if !output.Silent {
-		now := timestamp(time.Now())
-		part := 0
-		for _, chunk := range chunks {
-			if strings.TrimSpace(chunk) == "" {
-				continue
-			}
-			part++
-			if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,status,next_attempt_at) VALUES(?,?,?,'pending',?)`, eventID, part, chunk, now); err != nil {
-				return err
-			}
-			replyParts = part
+		replyParts, err = appendReplyPartsTx(ctx, tx, eventID, output.Text, attachments, chunks, scheduleID)
+		if err != nil {
+			return err
 		}
-		for _, attachment := range attachments {
-			part++
-			if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,attachment_id,status,next_attempt_at) VALUES(?,?,? ,?,'pending',?)`, eventID, part, "", attachment.ID, now); err != nil {
-				return err
-			}
-			replyParts = part
+	}
+	if !output.Silent && len(notices) > 0 {
+		replyParts, err = enqueueScheduleNotices(ctx, tx, eventID, replyParts, notices, timestamp(time.Now()))
+		if err != nil {
+			return err
 		}
 	}
 	if kind == EventUser {
@@ -454,6 +471,9 @@ func (s *Store) Recover(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := recoverTaskInputsTx(ctx, tx); err != nil {
+		return err
+	}
 	var summary recoveryOutcomePayload
 	res, err := tx.ExecContext(ctx, `UPDATE personal_events SET status='queued',elapsed_ms=0,interrupted=1 WHERE status='running'`)
 	if err != nil {
@@ -462,8 +482,8 @@ func (s *Store) Recover(ctx context.Context) error {
 	if summary.RequeuedEvents, err = changedRows(res); err != nil {
 		return err
 	}
-	res, err = tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,run_id,status,created_at)
-		SELECT 'task','任务预算在中断前已用完；已有阶段成果已保留。',r.task_id,r.id,'queued',?
+	res, err = tx.ExecContext(ctx, `INSERT INTO personal_events(kind,text,task_id,run_id,schedule_id,status,created_at)
+		SELECT 'task','任务预算在中断前已用完；已有阶段成果已保留。',r.task_id,r.id,(SELECT schedule_id FROM personal_schedule_occurrences WHERE task_id=r.task_id),'queued',?
 		FROM personal_runs r JOIN personal_tasks t ON t.id=r.task_id
 		WHERE r.kind='task' AND r.status='running' AND t.status='running' AND r.revision=t.revision AND t.used_ms>=t.budget_ms
 		AND NOT EXISTS(SELECT 1 FROM personal_events e WHERE e.run_id=r.id)`, timestamp(time.Now()))

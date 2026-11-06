@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"kagari/internal/channel"
+	"kagari/internal/domain"
 )
 
 // OpenExisting is deliberately separate from NewStore: diagnostic commands may
@@ -50,6 +51,37 @@ type EventRecord struct {
 	Status EventStatus `json:"status"`
 }
 
+type RunExport struct {
+	Run
+	Sources []domain.Source `json:"expanded_sources,omitempty"`
+}
+
+func (s *Store) ExportRuns(ctx context.Context, taskID int64, limit int) ([]RunExport, error) {
+	runs, err := s.Runs(ctx, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RunExport, 0, len(runs))
+	for _, run := range runs {
+		export := RunExport{Run: run}
+		if run.Result != "" {
+			var result StageResult
+			if err = json.Unmarshal([]byte(run.Result), &result); err != nil {
+				return nil, err
+			}
+			for _, ref := range result.Sources {
+				source, err := s.ExpandSource(ctx, ref.ID)
+				if err != nil {
+					return nil, err
+				}
+				export.Sources = append(export.Sources, source)
+			}
+		}
+		out = append(out, export)
+	}
+	return out, nil
+}
+
 type DeliveryRecord struct {
 	ID           int64            `json:"id"`
 	EventID      int64            `json:"event_id"`
@@ -73,14 +105,15 @@ type DiagnosticSnapshot struct {
 
 func scanEventRecord(row scanner) (EventRecord, error) {
 	var record EventRecord
-	var task, run sql.NullInt64
+	var task, run, scheduleID, replyOutboxID sql.NullInt64
 	var attachments, created string
 	err := row.Scan(&record.ID, &record.Kind, &record.Text, &task, &run, &record.Channel, &record.Account, &record.Sender,
-		&record.MessageID, &record.ReplyToID, &attachments, &record.Interrupted, &created, &record.Status)
+		&record.MessageID, &record.ReplyToID, &attachments, &record.Interrupted, &created, &scheduleID, &replyOutboxID, &record.Status)
 	if err != nil {
 		return record, err
 	}
 	record.TaskID, record.RunID = task.Int64, run.Int64
+	record.ScheduleID, record.ReplyOutboxID = scheduleID.Int64, replyOutboxID.Int64
 	if err := json.Unmarshal([]byte(attachments), &record.Attachments); err != nil {
 		return record, err
 	}
