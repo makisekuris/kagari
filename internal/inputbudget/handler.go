@@ -401,6 +401,10 @@ func (h *AgenticHandler) reduceToolRounds(ctx context.Context, state *adk.TypedC
 		if proposedEstimate.TotalBytes >= current.TotalBytes {
 			continue
 		}
+		// The shortened round is already a durable reference, not another result to archive.
+		rs.mu.Lock()
+		rs.seenRounds[roundKey(replacement)] = struct{}{}
+		rs.mu.Unlock()
 		working.Messages, current = proposed, proposedEstimate
 	}
 	return working, current, nil
@@ -577,6 +581,10 @@ func findToolRounds(messages []*schema.AgenticMessage) []ToolRound {
 						nameByID[""] = call.Name
 					}
 					continue
+				}
+				if pending[call.CallID] {
+					// A result cannot identify which call completed when IDs are reused.
+					unpairable = true
 				}
 				pending[call.CallID] = true
 				nameByID[call.CallID] = call.Name

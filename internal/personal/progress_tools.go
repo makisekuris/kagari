@@ -15,7 +15,7 @@ type progressSubmissionReply struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func progressTools(store Repository, scope ReadScope, delta *[]ProgressUpdate) ([]tool.BaseTool, error) {
+func progressTools(store Repository, scope ReadScope, delta *[]ProgressUpdate, allowedAttachments map[string]bool) ([]tool.BaseTool, error) {
 	get, err := utils.InferTool("get_progress", "按页查看累计进展；reported 是模型报告，非独立核实。保留旧 revision 的历史，不能当作新目标已完成。history=true 返回各版本记录。", func(ctx context.Context, a struct {
 		TaskID int64 `json:"task_id"`
 		ProgressQuery
@@ -60,6 +60,7 @@ func progressTools(store Repository, scope ReadScope, delta *[]ProgressUpdate) (
 			}
 
 			deltaMu.Lock()
+			defer deltaMu.Unlock()
 			merged := append([]ProgressUpdate(nil), (*delta)...)
 			indices := make(map[string]int, len(merged)+len(a.Updates))
 			for i, update := range merged {
@@ -74,11 +75,15 @@ func progressTools(store Repository, scope ReadScope, delta *[]ProgressUpdate) (
 				merged = append(merged, update)
 			}
 			if len(merged) > 50 {
-				deltaMu.Unlock()
-				return progressSubmissionReply{Error: "invalid_progress: at most 50 entries per stage"}, nil
+				return progressSubmissionReply{Error: invalidProgressInput("at most 50 entries per stage").Error()}, nil
+			}
+			if err := store.ValidateProgressSubmission(ctx, *r, merged, allowedAttachments); err != nil {
+				if errors.Is(err, errInvalidProgress) {
+					return progressSubmissionReply{Error: err.Error()}, nil
+				}
+				return progressSubmissionReply{}, err
 			}
 			*delta = merged
-			deltaMu.Unlock()
 			return progressSubmissionReply{Submitted: len(a.Updates)}, nil
 		})
 		if err != nil {

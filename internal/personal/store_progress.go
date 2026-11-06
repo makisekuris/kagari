@@ -16,12 +16,110 @@ func progressVersion(ctx context.Context, q attachmentQuery, taskID int64) (int6
 	err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM personal_progress WHERE task_id=?`, taskID).Scan(&v)
 	return v, err
 }
+
+func (s *Store) ValidateProgressSubmission(ctx context.Context, run Run, updates []ProgressUpdate, allowedAttachments map[string]bool) error {
+	if err := validateProgressUpdates(updates); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	activeRun, err := activeRunTx(ctx, tx, run.ID)
+	if err != nil {
+		return err
+	}
+	if activeRun.TaskID != run.TaskID || activeRun.Revision != run.Revision {
+		return errors.New("personal: stale task run")
+	}
+	seen := map[string]bool{}
+	for _, update := range updates {
+		if err := validateProgressUpdateTx(ctx, tx, run, update, allowedAttachments, seen); err != nil {
+			return err
+		}
+		seen[update.ID] = true
+	}
+	return nil
+}
+
+func validateProgressUpdateTx(ctx context.Context, q attachmentQuery, run Run, update ProgressUpdate, attachments map[string]bool, earlierIDs map[string]bool) error {
+	for _, ref := range update.Evidence {
+		switch ref.Kind {
+		case "material":
+			var sourceRun sql.NullInt64
+			var kind string
+			err := q.QueryRowContext(ctx, `SELECT run_id,kind FROM personal_materials WHERE id=?`, ref.ID).Scan(&sourceRun, &kind)
+			if errors.Is(err, sql.ErrNoRows) {
+				return invalidProgressInput("material evidence does not exist")
+			}
+			if err != nil {
+				return err
+			}
+			if kind != "source" || !sourceRun.Valid {
+				return invalidProgressInput("only source materials can be used as evidence")
+			}
+			if err = progressRunAuthorized(ctx, q, run, sourceRun.Int64); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return invalidProgressInput("material evidence run does not exist")
+				}
+				return err
+			}
+		case "attachment":
+			if !attachments[ref.ID] {
+				return invalidProgressInput("attachment evidence is not associated with this run")
+			}
+			var status string
+			err := q.QueryRowContext(ctx, `SELECT status FROM personal_attachments WHERE id=?`, ref.ID).Scan(&status)
+			if errors.Is(err, sql.ErrNoRows) {
+				return invalidProgressInput("attachment evidence does not exist")
+			}
+			if err != nil {
+				return err
+			}
+			if status != "available" {
+				return fmt.Errorf("%w: %w: %s", errInvalidProgress, ErrAttachmentUnavailable, ref.ID)
+			}
+		case "run_result":
+			id, parseErr := strconv.ParseInt(ref.ID, 10, 64)
+			if parseErr != nil || id <= 0 {
+				return invalidProgressInput("run_result evidence needs a positive run ID")
+			}
+			if err := progressRunAuthorized(ctx, q, run, id); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return invalidProgressInput("evidence run does not exist")
+				}
+				return err
+			}
+		}
+	}
+	if update.Supersedes != "" && !earlierIDs[update.Supersedes] {
+		var exists bool
+		if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM personal_progress WHERE task_id=? AND task_revision=? AND entry_id=?)`, run.TaskID, run.Revision, update.Supersedes).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return invalidProgressInput("superseded progress does not exist yet")
+		}
+	}
+	return nil
+}
+
 func applyProgressTx(ctx context.Context, tx *sql.Tx, run Run, eventID, expected int64, updates []ProgressUpdate, attachments map[string]bool) error {
 	if len(updates) == 0 {
 		return nil
 	}
 	if err := validateProgressUpdates(updates); err != nil {
 		return err
+	}
+	if eventID == 0 {
+		activeRun, err := activeRunTx(ctx, tx, run.ID)
+		if err != nil {
+			return err
+		}
+		if activeRun.TaskID != run.TaskID || activeRun.Revision != run.Revision {
+			return errors.New("personal: stale task run")
+		}
 	}
 	v, err := progressVersion(ctx, tx, run.TaskID)
 	if err != nil {
@@ -30,58 +128,10 @@ func applyProgressTx(ctx context.Context, tx *sql.Tx, run Run, eventID, expected
 	if expected >= 0 && v != expected {
 		return fmt.Errorf("progress_conflict: current version is %d", v)
 	}
+	seen := map[string]bool{}
 	for _, u := range updates {
-		for _, ref := range u.Evidence {
-			switch ref.Kind {
-			case "material":
-				var sourceRun int64
-				var kind string
-				if err := tx.QueryRowContext(ctx, `SELECT run_id,kind FROM personal_materials WHERE id=?`, ref.ID).Scan(&sourceRun, &kind); err != nil {
-					return err
-				}
-				if kind != "source" {
-					return errors.New("personal: tool records are not source evidence")
-				}
-				if eventID == 0 {
-					if err := authorizeRead(ctx, tx, ReadScope{RunID: run.ID}, sourceRun, false); err != nil {
-						return err
-					}
-				} else {
-					if err := progressRunAuthorized(ctx, tx, run, sourceRun); err != nil {
-						return err
-					}
-				}
-			case "attachment":
-				if !attachments[ref.ID] {
-					return errors.New("personal: progress attachment is not associated with this run")
-				}
-				var status string
-				if err := tx.QueryRowContext(ctx, `SELECT status FROM personal_attachments WHERE id=?`, ref.ID).Scan(&status); err != nil {
-					return err
-				}
-				if status != "available" {
-					return fmt.Errorf("%w: %s", ErrAttachmentUnavailable, ref.ID)
-				}
-			case "run_result":
-				id, err := strconv.ParseInt(ref.ID, 10, 64)
-				if err != nil {
-					return err
-				}
-				if err = progressRunAuthorized(ctx, tx, run, id); err != nil {
-					return err
-				}
-			default:
-				return errors.New("personal: unsupported progress evidence")
-			}
-		}
-		if u.Supersedes != "" {
-			var n int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_progress WHERE task_id=? AND task_revision=? AND entry_id=?`, run.TaskID, run.Revision, u.Supersedes).Scan(&n); err != nil {
-				return err
-			}
-			if n == 0 {
-				return errors.New("personal: superseded progress does not exist")
-			}
+		if err := validateProgressUpdateTx(ctx, tx, run, u, attachments, seen); err != nil {
+			return err
 		}
 		raw, err := json.Marshal(u)
 		if err != nil {
@@ -90,15 +140,19 @@ func applyProgressTx(ctx context.Context, tx *sql.Tx, run Run, eventID, expected
 		if _, err = tx.ExecContext(ctx, `INSERT INTO personal_progress(task_id,task_revision,version,entry_id,run_id,event_id,update_json) VALUES(?,?,?,?,?,?,?)`, run.TaskID, run.Revision, v+1, u.ID, run.ID, nullableID(eventID), string(raw)); err != nil {
 			return err
 		}
+		seen[u.ID] = true
 	}
 	return nil
 }
 func progressRunAuthorized(ctx context.Context, q attachmentQuery, run Run, id int64) error {
-	var owner int64
+	var owner sql.NullInt64
 	if err := q.QueryRowContext(ctx, `SELECT task_id FROM personal_runs WHERE id=?`, id).Scan(&owner); err != nil {
 		return err
 	}
-	if owner == run.TaskID {
+	if !owner.Valid {
+		return invalidProgressInput("evidence run is not a task run")
+	}
+	if owner.Int64 == run.TaskID {
 		return nil
 	}
 	var n int
@@ -106,7 +160,7 @@ func progressRunAuthorized(ctx context.Context, q attachmentQuery, run Run, id i
 		return err
 	}
 	if n == 0 {
-		return errors.New("personal: evidence run is not associated")
+		return invalidProgressInput("evidence run is not associated")
 	}
 	return nil
 }

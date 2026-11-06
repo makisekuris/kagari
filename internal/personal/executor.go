@@ -113,7 +113,7 @@ func readingExecutor(engine *agent.Engine, store Repository, execution ...*execu
 			return StageResult{}, err
 		}
 		stageEngine.AdditionalTools = append(stageEngine.AdditionalTools, inputTools...)
-		progressTools, err := progressTools(store, ReadScope{RunID: run.ID}, &progressDelta)
+		progressTools, err := progressTools(store, ReadScope{RunID: run.ID}, &progressDelta, allowed)
 		if err != nil {
 			return StageResult{}, err
 		}

@@ -950,14 +950,6 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 		return err
 	}
 	defer tx.Rollback()
-	result.Attachments, err = s.canonicalTaskAttachments(ctx, tx, result.Attachments)
-	if err != nil {
-		return err
-	}
-	raw, err := json.Marshal(result)
-	if err != nil {
-		return err
-	}
 	var taskID, revision int64
 	var runStatus RunStatus
 	var kind RunKind
@@ -996,6 +988,10 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 			zap.Int64("task_id", taskID), zap.Int64("run_id", runID), zap.Int64("revision", revision),
 			zap.String("run_status", string(RunCancelled)), zap.String("task_status", string(task.Status)))
 	}
+	result.Attachments, err = s.canonicalTaskAttachments(ctx, tx, result.Attachments)
+	if err != nil {
+		return err
+	}
 	status := RunCompleted
 	for i, ref := range result.Sources {
 		material, err := scanMaterial(tx.QueryRowContext(ctx, `SELECT `+materialColumns+` FROM personal_materials WHERE id=? AND kind='source'`, ref.ID))
@@ -1007,7 +1003,7 @@ func (s *Store) FinishStage(ctx context.Context, runID int64, result StageResult
 		}
 		result.Sources[i] = *material.Source
 	}
-	raw, err = json.Marshal(result)
+	raw, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}

@@ -88,7 +88,7 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 		return TurnOutput{}, err
 	}
 	registeredTools = append(registeredTools, contextTools...)
-	progressTools, err := progressTools(a.Store, ReadScope{EventID: input.Event.ID}, nil)
+	progressTools, err := progressTools(a.Store, ReadScope{EventID: input.Event.ID}, nil, nil)
 	if err != nil {
 		return TurnOutput{}, err
 	}

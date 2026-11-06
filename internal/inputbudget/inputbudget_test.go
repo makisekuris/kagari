@@ -180,6 +180,90 @@ func TestAgenticHandlerReducesOnlyOlderCompleteToolRounds(t *testing.T) {
 	}
 }
 
+func TestAgenticHandlerDoesNotArchiveItsReplacementAgain(t *testing.T) {
+	limits, err := NewLimits(12000, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted int
+	handler, err := NewAgenticHandler(context.Background(), HandlerConfig{
+		Limits: limits,
+		PersistAndReplace: func(_ context.Context, round ToolRound) ([]*schema.AgenticMessage, error) {
+			persisted++
+			return []*schema.AgenticMessage{round.Messages[0], toolResult("old", "lookup", "saved evidence reference")}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{
+		schema.SystemAgenticMessage("system"), schema.UserAgenticMessage("initial request"),
+		toolCall("old", "lookup"), toolResult("old", "lookup", strings.Repeat("result ", 400)),
+		schema.UserAgenticMessage(strings.Repeat("history ", 650)),
+		toolCall("latest", "lookup"), toolResult("latest", "lookup", "latest result"),
+		schema.UserAgenticMessage("latest request"),
+	}}
+	ctx, _, err := handler.BeforeAgent(context.Background(), &adk.ChatModelAgentContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	estimate, err := handler.estimate(state.Messages, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reduced, after, err := handler.reduceToolRounds(ctx, state, estimate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.TotalBytes <= limits.Target {
+		t.Fatal("fixture must still exceed the reduction target after saving the first result")
+	}
+	if persisted != 1 {
+		t.Fatalf("archived a reference again: persistence calls=%d", persisted)
+	}
+	if _, _, err := handler.reduceToolRounds(ctx, &reduced, after); err != nil || persisted != 1 {
+		t.Fatalf("later pass re-archived the same reference: calls=%d err=%v", persisted, err)
+	}
+}
+
+func TestAgenticHandlerDoesNotReduceDuplicateToolCallIDs(t *testing.T) {
+	limits, err := NewLimits(10000, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted int
+	handler, err := NewAgenticHandler(context.Background(), HandlerConfig{
+		Limits: limits,
+		PersistAndReplace: func(context.Context, ToolRound) ([]*schema.AgenticMessage, error) {
+			persisted++
+			return []*schema.AgenticMessage{schema.UserAgenticMessage("saved")}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateCalls := &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant, ContentBlocks: []*schema.ContentBlock{
+		schema.NewContentBlock(&schema.FunctionToolCall{CallID: "duplicate", Name: "first", Arguments: `{}`}),
+		schema.NewContentBlock(&schema.FunctionToolCall{CallID: "duplicate", Name: "second", Arguments: `{}`}),
+	}}
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{
+		schema.SystemAgenticMessage("system"), schema.UserAgenticMessage("initial request"), duplicateCalls,
+		toolResult("duplicate", "first", strings.Repeat("large result ", 500)),
+		toolCall("latest", "lookup"), toolResult("latest", "lookup", "latest result"), schema.UserAgenticMessage("latest request"),
+	}}
+	ctx, _, err := handler.BeforeAgent(context.Background(), &adk.ChatModelAgentContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reduced, _, err := handler.reduceToolRounds(ctx, state, Estimate{TotalBytes: limits.Target + 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted != 0 || !sameMessages(reduced.Messages, state.Messages) {
+		t.Fatalf("duplicate call IDs were reduced: persisted=%d", persisted)
+	}
+}
+
 func TestAgenticHandlerBoundsEinoSummaryAndKeepsMemoryAndInitialInput(t *testing.T) {
 	limits, _ := NewLimits(10000, 2000)
 	summaryModel := &fakeAgenticModel{response: assistantMessage("short, supported summary", nil)}

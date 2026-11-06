@@ -365,3 +365,83 @@ trace 增加 `context.assembled`、`context.reduced`、`context.limit`，记录�
 该样本未触发摘要（0 次）；摘要成功、失败、无效引用及超限行为由模拟模型测试覆盖，未做真实端点压缩前后性能比较。验收期间真实模型曾提交非法进展状态；现已在工具 schema 声明枚举，并在 submit_progress 阶段给出校验反馈，FinishStage 复用同一规则。测试同时覆盖非法状态修正后成功保存。
 
 运行真实用例时设置 `KAGARI_LIVE_EVAL=1`、`KAGARI_EVAL_CONFIG_DIR`，执行 `go test ./internal/personal -run '^TestLivePersonalTaskInputPagingAndAcknowledgment$' -count=1 -v`。该测试在进程内设置上述窗口容量，不改用户配置。未执行旧库迁移、真实渠道发送或长期运行压测。
+
+## 8. 分批复核与业务衔接（2026-11-07）
+
+本轮开始时五个迭代已由 `15187b4` 合入，后续 `764c4c3` 调整了回复依据、迟到材料与活动 Run 快照。以这两个提交为基线复核实现，沿用已建好的 Store、读取工具和 inputbudget；不重复执行原建库改造。保留既有注释及第 7 节验收记录，以下单独记录本轮改动。
+
+主 Agent 负责共享契约与业务衔接，两个独立编码任务分别负责材料读取和输入容量；采用 `gpt-6-luna`、`max`，各自修改不同文件。开始和集成时检查工作树及最新提交；已有未跟踪的 `te.js` 未改动、暂存或删除。这次分批复核结束时尚未提交代码；提交前总审见第 10 节。
+
+| 批次 | 核对与处理 | 本轮证据 |
+| --- | --- | --- |
+| 材料存储、查询与续读 | `SaveToolRecord` 原先漏掉 metadata 的 64 KiB 上限；在写入事务前拒绝超限，来源与工具记录共用上限常量。诊断展开已通过 scanMaterial 校验格式版本，继续复用。分页、授权、续读及工作区保持原接口 | `TestToolRecordRejectsOversizedMetadata`，材料保存/权限/分页/checkpoint 用例，textpage 与 workspace 测试 |
+| 输入容量与运行内压缩 | 同一消息的重复工具调用 ID 原先会在 pending map 中合并，可能把未能明确配对的轮次当成完整轮次。现走已有 unpairable 分支，保留原消息，最终仍由输入硬检查决定能否发送 | `TestAgenticHandlerDoesNotReduceDuplicateToolCallIDs`，inputbudget 全包测试 |
+| 累计交接、记忆与新输入 | 新增真实 Store、TaskExecutor 与本地模拟模型组合用例，覆盖恢复后固定版本、证据回查、累计进展及迟到输入交接 | `TestRecoveredContextDefersLateInputsAndRefreshesMemoryOnNextRun` |
+
+新增集成用例连续验证：同一 Run 恢复后保留原 Input 和已选记忆版本；已保存来源仍可通过工具读取；新登记的迟到输入不能被该 Run 吸收，也不能绕过 completed 检查；下一 Run 加入迟到输入、采用更正后的记忆并读到上一阶段持久进展；只有输入处理报告随阶段结果保存后才允许结束。它连接上下文规划与 `764c4c3` 的活动 Run 快照规则，不依赖真实网络采集或渠道发送。
+
+定时任务仍先经 BeginScheduledRun 冻结区间，再组装上下文；CheckAssessment 和根据已提交结果生成回复的规则保留。本轮不变更公共接口、配置或数据库版本，现有 schema 4 库继续可用。相关调度、回复和 CLI 回归随全量检查运行。
+
+使用 `GOCACHE=/tmp/kagari-go-cache` 完成以下检查，均通过：
+
+- `go test ./... -count=1`，最终差异复核后再运行 `make check`（全量测试和 go vet）。
+- `go test -race ./internal/personal ./internal/inputbudget ./cmd/kagari`。
+- `go build -o /tmp/kagari-context-verified ./cmd/kagari`。
+- `git diff --check` 和本轮 Go 文件的 gofmt 检查。
+
+集成结束时 HEAD 仍为 `764c4c3`，期间没有新增业务提交需要再次衔接。未重跑真实模型、真实渠道发送或长期压测。真实端点的历史结果仍仅代表第 7 节所述样本，不作为本轮新增修改的实测结果。
+
+## 9. 真实摘要对照验收（2026-11-07）
+
+五个功能迭代已落地，本轮补齐第 7 节未覆盖的真实模型摘要对照。采用相同的虚构历史与已保存材料，分别生成未经压缩和经过生产 contextBudgetHandler 压缩的回答；两路独立使用消息副本。摘要由实际配置的模型通过 Eino 执行，材料保存在临时 SQLite，Profile 为空。
+
+验收要求两路均保留正确结论、随机校验码与来源引用；压缩路径须实际成功应用摘要，来源引用仍能读取原文。记录最终回答与整个路径的调用数、估算输入量、实际 input/output tokens 和耗时，摘要调用计入总成本，不预设节省比例。该测试是模型请求与压缩组件的对照，不替代完整任务运行或长期负载测试。
+
+测试入口为 `TestLivePersonalContextCompressionComparison`，普通测试默认跳过真实端点调用。运行命令：
+
+```sh
+KAGARI_LIVE_EVAL=1 KAGARI_EVAL_CONFIG_DIR=/path/to/config GOCACHE=/tmp/kagari-go-cache go test ./internal/personal -run '^TestLivePersonalContextCompressionComparison$' -count=1 -v
+```
+
+测试进程固定使用本地窗口预算 32,768、输出预算 2,500，得 H=28,629、S=22,903；这只是实验设置，不声明端点的标称容量，也不写入本地配置文件。原始历史估算 26,424 字节，先缩减早期工具结果后为 23,903，仍超过 S，因而实际触发摘要。当前本地配置缺少 model.context_window，部署服务仍须按实际端点填写。
+
+验收过程保留以下记录：
+
+1. 首次启动被缺失的窗口配置阻止，未发出模型请求。随后与已有 live-eval 一样，在测试进程内提供固定实验预算。
+2. 首次真实对照保住了校验码和来源 ID，但摘要把 APPROVE 改写为 APPROVED，暴露出测试输出枚举未写明确。补充最终请求的枚举要求后，仍严格检查决策、校验码和来源 ID。
+3. 下一次对照通过时，轨迹显示原来源引用又被存成 tool_record。原因是 reduceToolRounds 只记录缩减前的轮次哈希，替换后的引用仍会成为下一次缩减候选。修复为同时记录已采用的替换轮次哈希；既有引用不会再次归档。
+4. 新增 `TestAgenticHandlerDoesNotArchiveItsReplacementAgain`，覆盖同一次缩减循环和下一次调用；真实对照再检查材料列表中只保留原来源。本次最终复验通过，实际摘要 1 次，结论、随机校验码、来源 ID、正文和采集元数据均保持正确。
+
+以下是最终代码的一次成功对照；此前两个真实运行用于排查上述问题，不混入本表。每个对照运行最多发出 3 次模型请求，没有模型自动重试。
+
+| 路径 | 模型调用 | 估算输入字节合计 | 实际 input tokens | 实际 output tokens | 耗时 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 不压缩，直接回答 | 1 | 26,424 | 3,826 | 44 | 1.243 秒 |
+| 压缩后的最终回答 | 1 | 3,637 | 816 | 44 | 未单独计时 |
+| 压缩路径合计，含摘要 | 2 | 25,711 | 3,652 | 303 | 7.216 秒 |
+
+两路模型均未执行材料工具循环；摘要引用校验读取元数据 1 次，测试末另行读取正文和元数据各 1 次确认内容未变。前面准备历史的读操作不计作模型读取。该样本使用容易压缩的虚构填充文本，说明了窗口缩减及引用保留机制有效；总输入下降较少，摘要增加了输出和延迟，不能替代复杂任务或长期运行的质量、费用评估。
+
+最终 make check、inputbudget/personal race 检查、CLI 构建和差异/格式检查均通过；本轮保留上一轮尚未提交的修复和注释，schema、业务完成规则及本地配置文件保持原样。真实渠道发送和长期负载测试不在本轮执行范围。
+
+## 10. 提交前总审（2026-11-07）
+
+审查以 `15187b4` 的五个上下文迭代和 `764c4c3` 的回复、迟到输入规则为基线，包含本轮未提交差异及调用方。按单用户、单服务实例、最多 4 个并发 Task 的使用方式核对；主 Agent 负责状态事务及业务衔接，独立任务分别审查材料读取、容量与记忆，并按文件边界修复已确认的问题。
+
+新增发现集中在阶段交付边界：
+
+| 问题 | 处理与契约 |
+| --- | --- |
+| submit_progress 只检查字段形状；不存在、未授权的证据或不存在的 supersedes 会在 FinishStage 才报错，错误沿 worker 传播并停止服务 | 接收完整合并增量前校验证据和 supersedes，参数错误返回模型且不修改已有增量；与落库共用规则，SQL 故障仍向上传播。当前 Task 输入附件和本阶段新建附件均保持可引用 |
+| 附件在进展提交后、阶段保存前被 CLI 删除，事务拒绝结果后导致服务退出 | Store 保持拒绝无效引用和事务回滚；Runtime 仅针对 ErrAttachmentUnavailable 明确保存失败结果，保留分析文字、来源引用及工作区文件，不应用本阶段的附件选择、进展增量和输入处理报告。原历史不变，未处理输入回到 pending，下一任务可执行 |
+| 已取消或旧 revision 的 Run 带着已删除产物迟到返回，附件校验发生在忽略结果之前 | 先判断 terminal/stale，再校验当前有效 Run 的结果附件；迟到结果不会改写新状态 |
+
+材料权限复核包括显式跨 Task 关联、非传递授权、保存后返回引用、分页版本及删除后的续读；容量与记忆复核包括全部生产模型入口、schema 计数、工具配对、摘要失败、直接记忆块遗忘和恢复时固定版本，未发现其他可复现缺陷。第 8、9 节的 metadata 上限、重复工具调用 ID、缩减引用重复归档修复及真实摘要记录保留。
+
+业务衔接继续遵守：未处理输入在完成事务中阻止 completed；活动 Run 不吸收迟到输入；定时 Run 先冻结区间再组装上下文，保留专用 CheckAssessment；最终回复依据已提交的任务结果。没有增加通用逐项验收、修改 schema 或填写本地模型容量。
+
+新增回归 `TestSubmitProgressReferencesAreCorrectableAndSupersedeEarlierBatchItems` 验证无效引用反馈、增量不被污染、同批 supersedes 及修正后成功保存；`TestRuntimeUnavailableStageAttachmentFailsAndContinuesWithNextTask` 分别覆盖进展证据和结果附件被删除、失败落库、输入归还与下一任务执行；`TestRuntimeIgnoresLateCancelledRunBeforeValidatingAttachment` 同时验证 Runtime 和 Store 忽略取消后的迟到结果。
+
+集成后使用 `GOCACHE=/tmp/kagari-go-cache` 运行 `make check`（全量测试与 go vet）、`go test -race ./internal/personal ./internal/inputbudget ./internal/agent ./internal/workspace ./internal/textpage ./cmd/kagari`，以及 `go build -o /tmp/kagari-context-reviewed ./cmd/kagari`，均通过；改动文件的 gofmt 和 `git diff --check` 通过。提交前 HEAD 仍为 `764c4c3`，没有新增业务提交需要衔接；本次只提交上下文修复、回归测试与两份设计文档，排除已有的 `te.js`。
+
+本次总审没有重跑真实模型、真实渠道发送或长期压测；第 9 节真实摘要实验仍是对应版本的一次样本，不扩展为本次失败路径的实测结论。本地 `model.context_window` 仍须在部署时按实际端点配置。

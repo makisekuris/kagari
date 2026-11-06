@@ -2,6 +2,7 @@ package personal
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -86,5 +87,18 @@ func (r *Runtime) task(ctx context.Context) (worked bool, runErr error) {
 	if executeErr != nil {
 		reason = logging.ErrorReason(executeErr)
 	}
+	finishErr := r.Store.FinishStage(ctx, run.ID, result, reason)
+	if !errors.Is(finishErr, ErrAttachmentUnavailable) {
+		return true, finishErr
+	}
+	// Deletion can race stage saving; the rejected transaction applied none of these reports.
+	result.Attachments = nil
+	result.Progress = nil
+	result.AppliedInputIDs = nil
+	const unavailableAttachmentFailure = "an attachment became unavailable before stage results were saved; this stage's progress and task input reports were not applied"
+	if reason != "" {
+		reason += "; "
+	}
+	reason += unavailableAttachmentFailure
 	return true, r.Store.FinishStage(ctx, run.ID, result, reason)
 }

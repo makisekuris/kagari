@@ -16,6 +16,8 @@ import (
 	"kagari/internal/textpage"
 )
 
+const maxMaterialMetadataBytes = 64 << 10
+
 type sourceMetadata struct {
 	FormatVersion int           `json:"format_version"`
 	RequestedURL  string        `json:"requested_url"`
@@ -66,6 +68,9 @@ func (s *Store) SaveToolRecord(ctx context.Context, scope ReadScope, key, body s
 	}{1, "tool_round", names, callIDs})
 	if err != nil {
 		return "", err
+	}
+	if len(raw) > maxMaterialMetadataBytes {
+		return "", errors.New("material_too_large: metadata exceeds 64 KiB")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -180,7 +185,7 @@ func (s *Store) SaveSource(ctx context.Context, runID int64, key string, src dom
 	if err != nil {
 		return domain.SourceRef{}, err
 	}
-	if len(raw) > 64<<10 || src.Status == "" || src.FetchedAt.IsZero() {
+	if len(raw) > maxMaterialMetadataBytes || src.Status == "" || src.FetchedAt.IsZero() {
 		return domain.SourceRef{}, errors.New("personal: source metadata is invalid or too large")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

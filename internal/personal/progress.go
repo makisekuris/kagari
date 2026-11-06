@@ -24,25 +24,29 @@ type ProgressUpdate struct {
 
 var errInvalidProgress = errors.New("invalid_progress")
 
+func invalidProgressInput(message string) error {
+	return fmt.Errorf("%w: %s", errInvalidProgress, message)
+}
+
 func validateProgressUpdates(updates []ProgressUpdate) error {
 	if len(updates) > 50 {
-		return fmt.Errorf("%w: at most 50 entries per stage", errInvalidProgress)
+		return invalidProgressInput("at most 50 entries per stage")
 	}
 	seen := map[string]bool{}
 	for _, u := range updates {
 		if u.ID == "" || runeLen(u.ID) > 128 || seen[u.ID] || strings.TrimSpace(u.Description) == "" || runeLen(u.Description) > 2000 || runeLen(u.Reason) > 2000 || len(u.Evidence) > 50 {
-			return fmt.Errorf("%w: unique nonempty ID (max 128), description (max 2000), reason (max 2000), and at most 50 evidence references required", errInvalidProgress)
+			return invalidProgressInput("unique nonempty ID (max 128), description (max 2000), reason (max 2000), and at most 50 evidence references required")
 		}
 		seen[u.ID] = true
 		if u.Status != "reported" && u.Status != "unresolved" && u.Status != "failed" && u.Status != "superseded" {
-			return fmt.Errorf("%w: status must be reported, unresolved, failed, or superseded", errInvalidProgress)
+			return invalidProgressInput("status must be reported, unresolved, failed, or superseded")
 		}
 		if (u.Status == "failed" || u.Status == "superseded") && strings.TrimSpace(u.Reason) == "" {
-			return fmt.Errorf("%w: failed or superseded entries require a reason", errInvalidProgress)
+			return invalidProgressInput("failed or superseded entries require a reason")
 		}
 		for _, ref := range u.Evidence {
 			if ref.ID == "" || runeLen(ref.ID) > 128 || (ref.Kind != "material" && ref.Kind != "attachment" && ref.Kind != "run_result") {
-				return fmt.Errorf("%w: evidence needs a valid kind and nonempty ID (max 128)", errInvalidProgress)
+				return invalidProgressInput("evidence needs a valid kind and nonempty ID (max 128)")
 			}
 		}
 	}
@@ -81,6 +85,7 @@ type ProgressRepository interface {
 	TaskProgress(context.Context, ReadScope, int64, ProgressQuery) (TaskProgress, error)
 	ReadProgress(context.Context, ReadScope, int64, int64, textpage.Request) (ProgressText, error)
 	CorrectProgress(context.Context, int64, int64, int64, int64, []ProgressUpdate) (TaskProgress, error)
+	ValidateProgressSubmission(context.Context, Run, []ProgressUpdate, map[string]bool) error
 }
 
 const progressSchema = `

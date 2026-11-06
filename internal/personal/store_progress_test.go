@@ -14,6 +14,7 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"kagari/internal/channel"
+	"kagari/internal/domain"
 	"kagari/internal/textpage"
 )
 
@@ -193,7 +194,7 @@ func TestSubmitProgressMergesConcurrentCallsAndOverwritesByID(t *testing.T) {
 	s := testStore(t, ":memory:", time.Minute)
 	run := createRunningTask(t, s, "progress-submit", TaskInput{Goal: "Accumulate progress"})
 	delta := []ProgressUpdate{}
-	tools, err := progressTools(s, ReadScope{RunID: run.ID}, &delta)
+	tools, err := progressTools(s, ReadScope{RunID: run.ID}, &delta, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +254,7 @@ func TestSubmitProgressRejectsInvalidStatusBeforeStageFinishes(t *testing.T) {
 	s := testStore(t, ":memory:", time.Minute)
 	run := createRunningTask(t, s, "invalid-progress", TaskInput{Goal: "Report progress"})
 	var updates []ProgressUpdate
-	tools, err := progressTools(s, ReadScope{RunID: run.ID}, &updates)
+	tools, err := progressTools(s, ReadScope{RunID: run.ID}, &updates, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,6 +269,91 @@ func TestSubmitProgressRejectsInvalidStatusBeforeStageFinishes(t *testing.T) {
 	}
 	if err = s.FinishStage(ctx, run.ID, StageResult{Summary: "Found evidence", Progress: updates}, ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSubmitProgressReferencesAreCorrectableAndSupersedeEarlierBatchItems(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t, ":memory:", time.Minute)
+	seq := int64(700)
+	_, externalSource := acceptanceCompletedSource(t, s, &seq, "external-progress-evidence")
+	run := acceptanceRunningTask(t, s, &seq, "progress-reference-validation", TaskInput{Goal: "Validate progress references"})
+	toolRecord, err := s.SaveToolRecord(ctx, ReadScope{RunID: run.ID}, "progress-record", "[]", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := s.SaveAttachment(ctx, "progress-evidence.txt", "text/plain", strings.NewReader("evidence"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowedAttachments := map[string]bool{file.ID: true}
+	var delta []ProgressUpdate
+	tools, err := progressTools(s, ReadScope{RunID: run.ID}, &delta, allowedAttachments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit := findProgressTool(t, tools, "submit_progress")
+	submitUpdates := func(updates ...ProgressUpdate) (progressSubmissionReply, error) {
+		t.Helper()
+		args, err := json.Marshal(struct {
+			Updates []ProgressUpdate `json:"updates"`
+		}{Updates: updates})
+		if err != nil {
+			return progressSubmissionReply{}, err
+		}
+		raw, err := submit.InvokableRun(ctx, string(args))
+		if err != nil {
+			return progressSubmissionReply{}, err
+		}
+		var reply progressSubmissionReply
+		if err := json.Unmarshal([]byte(raw), &reply); err != nil {
+			return progressSubmissionReply{}, err
+		}
+		return reply, nil
+	}
+	base := ProgressUpdate{ID: "base", Description: "Initial finding", Status: "reported"}
+	if reply, err := submitUpdates(base); err != nil || reply.Error != "" || reply.Submitted != 1 {
+		t.Fatalf("initial progress submission=%+v err=%v", reply, err)
+	}
+	var memoryRunID int64
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM personal_runs WHERE task_id IS NULL AND kind='memory_review' LIMIT 1`).Scan(&memoryRunID); err != nil {
+		t.Fatal(err)
+	}
+	invalid := []ProgressUpdate{
+		{ID: "missing-material", Description: "Missing source", Status: "reported", Evidence: []EvidenceRef{{Kind: "material", ID: "m_missing-source"}}},
+		{ID: "tool-record", Description: "Tool output is not source evidence", Status: "reported", Evidence: []EvidenceRef{{Kind: "material", ID: toolRecord}}},
+		{ID: "unassociated-material", Description: "External source is not selected", Status: "reported", Evidence: []EvidenceRef{{Kind: "material", ID: externalSource.ID}}},
+		{ID: "malformed-run", Description: "Malformed run reference", Status: "reported", Evidence: []EvidenceRef{{Kind: "run_result", ID: "not-a-run"}}},
+		{ID: "memory-run", Description: "Memory runs are not task evidence", Status: "reported", Evidence: []EvidenceRef{{Kind: "run_result", ID: strconv.FormatInt(memoryRunID, 10)}}},
+		{ID: "missing-supersedes", Description: "References no existing finding", Status: "reported", Supersedes: "does-not-exist"},
+	}
+	for _, update := range invalid {
+		before := append([]ProgressUpdate(nil), delta...)
+		reply, err := submitUpdates(update)
+		if err != nil || !strings.Contains(reply.Error, "invalid_progress") {
+			t.Fatalf("invalid submission %q reply=%+v err=%v", update.ID, reply, err)
+		}
+		if !reflect.DeepEqual(delta, before) {
+			t.Fatalf("invalid submission %q changed staged delta: before=%+v after=%+v", update.ID, before, delta)
+		}
+	}
+	validSource, err := s.SaveSource(ctx, run.ID, "valid-progress-source", domain.Source{Content: "selected source", Status: "ok", FetchedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := ProgressUpdate{
+		ID: "completed", Description: "Finding backed by current evidence", Status: "reported", Supersedes: "base",
+		Evidence: []EvidenceRef{{Kind: "material", ID: validSource.ID}, {Kind: "attachment", ID: file.ID}, {Kind: "run_result", ID: strconv.FormatInt(run.ID, 10)}},
+	}
+	if reply, err := submitUpdates(completed); err != nil || reply.Error != "" || reply.Submitted != 1 {
+		t.Fatalf("corrected progress submission=%+v err=%v", reply, err)
+	}
+	if err := s.FinishStage(ctx, run.ID, StageResult{Summary: "Progress references validated", Progress: delta, Attachments: []channel.Attachment{file}}, ""); err != nil {
+		t.Fatalf("FinishStage rejected corrected progress: %v", err)
+	}
+	var saved int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_progress WHERE task_id=?`, run.TaskID).Scan(&saved); err != nil || saved != 2 {
+		t.Fatalf("saved progress rows=%d err=%v", saved, err)
 	}
 }
 
@@ -314,7 +400,7 @@ func TestProgressCardsFitBudgetAndFullEntryCanBeReadBySequence(t *testing.T) {
 		t.Fatalf("full progress=%+v err=%v", fullPage, err)
 	}
 
-	tools, err := progressTools(s, ReadScope{EventID: callback.ID}, nil)
+	tools, err := progressTools(s, ReadScope{EventID: callback.ID}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

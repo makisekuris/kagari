@@ -176,3 +176,13 @@ func TestMaterialSearchOverlapAndCheckpointCAS(t *testing.T) {
 		t.Fatal("stale checkpoint overwrote state")
 	}
 }
+
+func TestToolRecordRejectsOversizedMetadata(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t, ":memory:", time.Minute)
+	run := createRunningTask(t, s, "large tool metadata", TaskInput{Goal: "Read evidence"})
+	_, err := s.SaveToolRecord(ctx, ReadScope{RunID: run.ID}, "round", "[]", []string{strings.Repeat("x", 64<<10)})
+	if err == nil || !strings.Contains(err.Error(), "material_too_large") {
+		t.Fatalf("oversized metadata error = %v", err)
+	}
+}
