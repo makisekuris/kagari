@@ -7,13 +7,17 @@
 
 # Runtime data and build output
 /data/
+*.channels/
+attachments-*/
 /bin/
 /kagari
 *.db
 *.db-shm
 *.db-wal
 *.db-journal
+*.workspaces/
 *.log
+kagari-*.jsonl
 
 # macOS
 .DS_Store

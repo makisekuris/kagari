@@ -9,8 +9,11 @@ require (
 	github.com/go-telegram/bot v1.27.0
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/openai/openai-go/v3 v3.44.0
+	github.com/robfig/cron/v3 v3.0.1
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/spf13/viper v1.21.0
 	github.com/subosito/gotenv v1.6.0
+	github.com/yuin/goldmark v1.8.6
 	go.uber.org/zap v1.28.0
 	golang.org/x/net v0.41.0
 	modernc.org/sqlite v1.60.1

@@ -1,104 +1,14 @@
 package telegram
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
+	"sort"
 	"strings"
-	"time"
 	"unicode/utf16"
 
-	"kagari/internal/domain"
 	"kagari/internal/reader"
 
 	"github.com/go-telegram/bot/models"
-	"go.uber.org/zap"
 )
-
-func (c *Client) acceptUpdate(ctx context.Context, update *models.Update) error {
-	if update == nil || update.ID <= 0 {
-		return errors.New("Telegram returned an unreadable update")
-	}
-	kind, key, payload, ackChatID, err := c.jobForUpdate(update)
-	if err != nil {
-		return errors.New("Telegram update could not be prepared")
-	}
-	var targets []domain.DeliveryTarget
-	if kind == "analyze" {
-		targets = Targets(c.config.ChatIDs(ackChatID))
-	} else if ackChatID != 0 {
-		targets = Targets([]int64{ackChatID})
-	}
-	jobID, created, err := c.store.AcceptUpdate(ctx, update.ID, kind, key, payload, targets)
-	if err != nil {
-		return errors.New("Telegram update could not be saved")
-	}
-	if created && kind == "analyze" && ackChatID != 0 {
-		if _, err := c.Send(ctx, ackChatID, domain.Content{Text: c.replies.AskChatID(jobID)}); err != nil {
-			c.log.Warn("Telegram acknowledgement failed", zap.String("reason", err.Error()))
-		}
-	}
-	return nil
-}
-
-func (c *Client) jobForUpdate(update *models.Update) (kind, key string, payload []byte, ackChatID int64, err error) {
-	if update == nil || update.Message == nil {
-		return "", "", nil, 0, nil
-	}
-	message := update.Message
-	if message.Chat.Type != models.ChatTypePrivate || message.From == nil {
-		return "", "", nil, 0, nil
-	}
-	if _, allowed := c.allowed[message.From.ID]; !allowed {
-		return "", "", nil, 0, nil
-	}
-	text, entities := message.Text, message.Entities
-	if text == "" {
-		text, entities = message.Caption, message.CaptionEntities
-	}
-	key = fmt.Sprintf("tg:%d", update.ID)
-	if isCommand(text) {
-		payload, err = json.Marshal(domain.Command{UserID: message.From.ID, ChatID: message.Chat.ID, Text: text})
-		return "command", key, payload, message.Chat.ID, err
-	}
-	submission := domain.Submission{
-		UserID:     message.From.ID,
-		ChatID:     message.Chat.ID,
-		Text:       text,
-		URLs:       messageURLs(text, entities),
-		ReceivedAt: time.Unix(int64(message.Date), 0).UTC(),
-	}
-	forwarded := message.ForwardOrigin != nil
-	if origin := message.ForwardOrigin; origin != nil && origin.Type == models.MessageOriginTypeUser && origin.MessageOriginUser != nil && origin.MessageOriginUser.SenderUser.ID == message.From.ID {
-		forwarded = false
-	}
-	if forwarded {
-		submission.ForwardedText = text
-		submission.Text = ""
-	}
-	prepared, prepareErr := c.prepare(submission)
-	if prepareErr != nil || (len(prepared.URLs) == 0 && strings.TrimSpace(prepared.Text+prepared.ForwardedText) == "") {
-		payload, err = json.Marshal(domain.Command{UserID: message.From.ID, ChatID: message.Chat.ID, Text: "请发送问题、转发内容或材料链接。"})
-		return "notice", key, payload, message.Chat.ID, err
-	}
-	payload, err = json.Marshal(prepared)
-	return "analyze", key, payload, message.Chat.ID, err
-}
-
-func isCommand(text string) bool {
-	fields := strings.Fields(text)
-	if len(fields) == 0 || !strings.HasPrefix(fields[0], "/") {
-		return false
-	}
-	command := strings.SplitN(fields[0], "@", 2)[0]
-	switch command {
-	case "/start", "/help", "/status", "/retry", "/retry_delivery", "/weekly", "/archive", "/archive_show", "/archive_delete":
-		return true
-	default:
-		return false
-	}
-}
 
 func messageURLs(text string, entities []models.MessageEntity) []string {
 	seen := make(map[string]struct{})
@@ -121,7 +31,9 @@ func messageURLs(text string, entities []models.MessageEntity) []string {
 		switch entity.Type {
 		case models.MessageEntityTypeURL:
 			if link, ok := utf16Substring(text, entity.Offset, entity.Length); ok {
-				add(link)
+				for _, found := range reader.ExtractURLs(link) {
+					add(found)
+				}
 			}
 		case models.MessageEntityTypeTextLink:
 			add(entity.URL)
@@ -143,6 +55,74 @@ func utf16Substring(text string, offset, length int) (string, bool) {
 		return "", false
 	}
 	return string(utf16.Decode(units[offset:end])), true
+}
+
+// preserveCodeEntities wraps Telegram's literal Code and Pre spans so later
+// Markdown rendering does not interpret their contents as formatting.
+func preserveCodeEntities(text string, entities []models.MessageEntity) string {
+	type codeSpan struct {
+		start, end int
+		text       string
+	}
+	units := utf16.Encode([]rune(text))
+	spans := make([]codeSpan, 0)
+	for _, entity := range entities {
+		if entity.Type != models.MessageEntityTypeCode && entity.Type != models.MessageEntityTypePre {
+			continue
+		}
+		content, ok := utf16Substring(text, entity.Offset, entity.Length)
+		if !ok {
+			continue
+		}
+		spans = append(spans, codeSpan{start: entity.Offset, end: entity.Offset + entity.Length, text: content})
+	}
+	if len(spans) == 0 {
+		return text
+	}
+	sort.SliceStable(spans, func(i, j int) bool {
+		if spans[i].start != spans[j].start {
+			return spans[i].start < spans[j].start
+		}
+		return spans[i].end > spans[j].end
+	})
+	var out strings.Builder
+	cursor := 0
+	for _, span := range spans {
+		if span.start < cursor {
+			continue
+		}
+		out.WriteString(string(utf16.Decode(units[cursor:span.start])))
+		fence := codeFence(span.text)
+		out.WriteString("\n\n")
+		out.WriteString(fence)
+		out.WriteByte('\n')
+		out.WriteString(span.text)
+		out.WriteByte('\n')
+		out.WriteString(fence)
+		out.WriteString("\n\n")
+		cursor = span.end
+	}
+	out.WriteString(string(utf16.Decode(units[cursor:])))
+	return out.String()
+}
+
+func codeFence(content string) string {
+	longest, current := 0, 0
+	for _, r := range content {
+		if r == '`' {
+			current++
+			if current > longest {
+				longest = current
+			}
+		} else {
+			current = 0
+		}
+	}
+	length := longest + 1
+	if length < 3 {
+		length = 3
+	}
+	return strings.Repeat("`", length)
 }
 
 func splitSurrogate(units []uint16, at int) bool {

@@ -12,7 +12,9 @@ import (
 	"kagari/internal/domain"
 )
 
-// consumeEvents is shared by single-shot digest generation and tool-using analysis.
+var errModelResponseRefused = errors.New("model response refused")
+
+// consumeEvents gathers task-stage text and usage while preserving partial output on errors.
 func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]], iterations int) (output string, usage domain.Usage, usageReported bool, err error) {
 	turn := 0
 	statusSeen := false
@@ -71,9 +73,6 @@ func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schem
 				return output, usage, usageReported, errModelResponseRefused
 			}
 		}
-		if !variant.IsStreaming {
-			e.logMessage(msg, false, turn)
-		}
 		var b strings.Builder
 		toolCall := false
 		for _, block := range msg.ContentBlocks {
@@ -82,9 +81,6 @@ func (e *Engine) consumeEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schem
 			}
 			if block.FunctionToolCall != nil {
 				toolCall = true
-				if variant.IsStreaming {
-					e.logToolCall(block.FunctionToolCall, turn)
-				}
 			}
 			if block.AssistantGenText != nil {
 				b.WriteString(block.AssistantGenText.Text)

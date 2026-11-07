@@ -1,12 +1,16 @@
 # Kagari
 
-Kagari 是一个 Go 个人阅读助手。它从 CLI 或 Telegram 接收问题、转发文本和链接，由 Agent 自主读取页面、追读相关链接，并选择生成 Markdown 分析或普通对话回复。来源和读取记录保存到 SQLite。周报基于归档分析正文回顾。
+Kagari 是一个 Go 个人 Agent。`kagari run` 启动面向单一使用者的 Telegram 或微信私聊服务，持续推进后台任务并维护长期记忆。
 
-Kagari is a personal reading assistant written in Go. It accepts questions, forwarded text and links from the CLI or Telegram. An agent reads relevant pages and follows links, choosing between a Markdown analysis and a conversational reply. Sources and read records are saved to SQLite. Digests review archived analyses.
+Kagari is a personal agent written in Go. `kagari run` starts a Telegram or Weixin private-chat service for one owner, continuing background tasks and maintaining long-term memory.
 
-运行需要 Go 1.27；进程锁使用 `flock`，支持 macOS 和 Linux。模型 endpoint、Telegram bot 和频道权限由部署者配置。
+运行需要 Go 1.27；进程锁使用 `flock`，支持 macOS 和 Linux。部署者提供模型 endpoint，并配置 Telegram bot 或扫码绑定微信；服务只向绑定的使用者私聊回复。
 
-Requires Go 1.27. The process lock uses `flock` and supports macOS and Linux. You provide the model endpoint, Telegram bot, and any channel permissions.
+Requires Go 1.27. The process lock uses `flock` and supports macOS and Linux. You provide the model endpoint and configure Telegram or sign in to Weixin; the service replies only to the bound owner in private chat.
+
+任务材料在采集后即保存，模型按页回查，并在后续阶段继承累计进展与未处理输入。请按端点实际容量设置必填的 `model.context_window`；超过容量的请求会明确失败，不会删掉当前任务要求后继续。数据与恢复规则见[上下文管理实现方案](docs/CONTEXT-MANAGEMENT-IMPLEMENTATION.md)。
+
+Collected task material is saved immediately and read in pages. Later stages retain cumulative progress and unprocessed inputs. Set the required `model.context_window` to the endpoint's actual capacity. Requests that exceed it fail explicitly without dropping current task requirements. See the [context management implementation](docs/CONTEXT-MANAGEMENT-IMPLEMENTATION.md) for persistence and recovery rules.
 
 ## 日常操作 / Everyday commands
 
@@ -20,7 +24,7 @@ Run `make` or `make help` from the project root to list commands. Requires Go an
 | `make build` | 为当前平台构建 `bin/kagari` / Build `bin/kagari` for the current platform |
 | `make build-mac` | 构建 macOS arm64 产物 / Build for macOS arm64 |
 | `make build-linux` | 构建 Linux amd64 产物 / Build for Linux amd64 |
-| `make run` | 构建并启动 Telegram 服务 / Build and start the Telegram service |
+| `make run` | 构建并启动所选 personal 渠道 / Build and start the selected personal channel |
 | `make cli ARGS='...'` | 构建并执行任意 CLI 子命令 / Build and execute any CLI subcommand |
 | `make check` | 运行全部测试和 `go vet` / Run all tests and `go vet` |
 | `make test` / `make vet` | 单独运行测试或静态检查 / Run tests or static checks separately |
@@ -31,18 +35,17 @@ GitHub Actions 在每次 push 和 PR 上运行 `make check`，Go 版本取自 `g
 GitHub Actions runs `make check` on pushes and pull requests, using the Go version in `go.mod`.
 
 ```sh
-make cli ARGS='read https://example.com/article'
-make cli ARGS='analyze -note "关注系统设计" -user 123456 https://example.com/article'
-make cli ARGS='analyze -question "这项设计有哪些取舍？" -user 123456'
-make cli ARGS='digest -user 123456'
-make cli ARGS='status 17'
-make cli ARGS='db info'
+make cli ARGS='tasks'
+make cli ARGS='tasks 1'
+make cli ARGS='runs 1'
+make cli ARGS='memories "answer style"'
+make cli ARGS='memory-history answer_style'
 make run CONFIG=path/to/config.yaml
 ```
 
-`run` 和 `cli` 每次先构建，构建失败则停止。`CONFIG` 默认是 `config.yaml`，可在这两个目标上覆盖；`.env` 仍从当前工作目录读取。`ARGS` 按 shell 参数解析，包含空格的单个参数需像上面的 `-note` 一样加引号。其他子命令与数据库清理要求见下文。
+`run` 和 `cli` 每次先构建，构建失败则停止。`CONFIG` 默认是 `config.yaml`，可在这两个目标上覆盖；`.env` 仍从当前工作目录读取。`ARGS` 按 shell 参数解析，包含空格的单个参数需像上面的 `memories` 查询一样加引号。检查命令输出 JSON。
 
-`run` and `cli` build first on every invocation and stop if the build fails. `CONFIG` defaults to `config.yaml` and can be overridden for either target; `.env` is still loaded from the current working directory. `ARGS` is parsed as shell arguments; quote individual arguments containing spaces as shown with `-note`. See below for other subcommands and database clearing requirements.
+`run` and `cli` build first on every invocation and stop if the build fails. `CONFIG` defaults to `config.yaml` and can be overridden for either target; `.env` is still loaded from the current working directory. `ARGS` is parsed as shell arguments; quote individual arguments containing spaces as shown with the `memories` query. Inspection commands print JSON.
 
 跨平台构建关闭 CGO，产物名称包含平台和架构。macOS 默认使用 Apple Silicon 的 `arm64`，Intel Mac 使用 `MAC_ARCH=amd64`；Linux 默认使用 `amd64`，ARM 服务器使用 `LINUX_ARCH=arm64`：
 
@@ -71,31 +74,67 @@ Copy the examples, leaving existing local files unchanged:
 make init
 ```
 
-在 `.env` 中填写 `KAGARI_MODEL_BASE_URL`、`KAGARI_MODEL_NAME` 和 `KAGARI_MODEL_API_KEY`。使用 Telegram 时填写 `KAGARI_TELEGRAM_TOKEN`，并在 `config.yaml` 的 `telegram.allowed_user_ids` 中加入允许使用 bot 的用户 ID。
+在 `.env` 中填写 `KAGARI_MODEL_BASE_URL`、`KAGARI_MODEL_NAME`、`KAGARI_MODEL_API_KEY` 和 `KAGARI_TELEGRAM_TOKEN`。在 `config.yaml` 中填入唯一一个正数 `telegram.allowed_user_ids`；`run` 不支持多个 owner 或群聊目标。
 
-Set `KAGARI_MODEL_BASE_URL`, `KAGARI_MODEL_NAME`, and `KAGARI_MODEL_API_KEY` in `.env`. For Telegram, also set `KAGARI_TELEGRAM_TOKEN` and add permitted user IDs to `telegram.allowed_user_ids` in `config.yaml`.
+Set `KAGARI_MODEL_BASE_URL`, `KAGARI_MODEL_NAME`, `KAGARI_MODEL_API_KEY`, and `KAGARI_TELEGRAM_TOKEN` in `.env`. In `config.yaml`, set exactly one positive `telegram.allowed_user_ids` entry; `run` does not support multiple owners or group destinations.
 
-### 2. 构建并试读 / Build and read
+```yaml
+telegram:
+  allowed_user_ids: [123456789]
 
-```sh
-make cli ARGS='read https://example.com/article'
+personal:
+  task_concurrency: 4
+  task_budget: 30m
 ```
 
-`read` 不需要模型凭证。配置好模型后，可分析链接：
+### 微信与附件 / Weixin and attachments
 
-`read` does not require model credentials. Configure a model endpoint to analyze a link:
+将 `personal.channel` 设为 `weixin`，使用新的 `storage.path`，然后构建、扫码并运行。微信模式不要求 Telegram token 或用户 ID。`login` 不调用模型；`run` 仍需要模型配置。
+
+Set `personal.channel: weixin` and choose a new `storage.path`. Weixin does not require Telegram credentials. Login does not call the model; the service still needs model configuration.
 
 ```sh
-make cli ARGS='analyze -user 123456 https://example.com/article'
+make build
+./bin/kagari -config config.yaml weixin login -qr /tmp/kagari-login.png
+./bin/kagari -config config.yaml channel status
+./bin/kagari -config config.yaml run
 ```
 
-启动 Telegram 服务：
+二维码在终端显示；`-qr` 可选，图片路径须不存在。二维码过期后该图片会更新。同一微信用户重新 `login` 后，运行中的服务自动重载凭证；更换用户须先停止服务，再执行 `weixin rebind`。登录 token 更新后，请向 Bot 发一条新消息以恢复待发送结果。凭证保存在 `<storage.path>.channels/weixin.json`。状态命令展示本地配置与已保存账号，不代表平台当前可用。
 
-Start the Telegram service:
+The terminal displays the QR code. Optional `-qr` saves and refreshes a PNG at a previously unused path. Repeating `login` for the same user reloads credentials in the running service; changing users requires stopping the service and running `weixin rebind`. After a login token changes, send a new message to the bot to resume pending deliveries. Credentials are stored at `<storage.path>.channels/weixin.json`. Status reports saved configuration, not live platform availability.
+
+两渠道支持文字和普通文件，单文件双向上限 20,000,000 字节；请将图片作为文件发送。Agent 收到正文与附件 ID，可读取最多 1 MiB 的 UTF-8 文本、生成文本成果并选择发送；本次未增加 PDF、Office、音视频解析器。附件保留至显式删除：
+
+Both channels support text and ordinary files up to 20,000,000 bytes each; send images as files. The Agent receives text and attachment IDs, reads UTF-8 text up to 1 MiB, and selects generated text files for delivery. PDF, Office, audio and video parsing are not included. Files remain until explicitly deleted:
+
+```sh
+./bin/kagari attachments list
+./bin/kagari attachments delete ATTACHMENT_ID
+```
+
+切换渠道需停止服务、修改 `personal.channel` 并使用同一新结构数据库重启。对话、任务、记忆和 persona 共享，待发送结果走当前渠道；成功或结果不确定的投递不会自动重发。旧 personal 数据库不迁移也不自动删除。删除附件保留既有分析与记忆，也不撤回已发送文件。更多细节见[渠道设计](docs/CHANNEL-DESIGN.md)。
+
+Stop the service, change `personal.channel`, and restart with the same new-schema database to switch channels. Conversations, tasks, memory and persona are shared. Pending results use the active channel; sent or uncertain deliveries are not replayed automatically. Older personal databases are neither migrated nor deleted. Deleting a file preserves analysis and memory and does not recall remote copies. See the [channel design](docs/CHANNEL-DESIGN.md).
+
+### 2. 启动服务 / Start the service
+
+启动所选渠道后，在已绑定账号的私聊中直接发送任务或偏好：
+
+Start the selected channel, then send a task or preference in the bound owner's private chat:
 
 ```sh
 make run
 ```
+
+```text
+调查 https://example.com 的方案和主要风险。
+以后回答请简洁一些，但保留关键依据。
+```
+
+只发送网页链接时，Agent 会先做范围有限的初步阅读，再回复简短理解、判断和依据。成功入队本身不发确认消息；约 30 秒仍无实质回应时补一次等待提示。相关的连续链接可以合并阅读，后补材料沿用当前任务；需要补充信息、执行失败和最终结果仍会通知。普通阅读回复默认不显示 Task/Run 编号，可引用消息或用任务内容继续追问。
+
+Sending a bare link starts a bounded first read, followed by a concise interpretation and supporting evidence. Queuing alone produces no receipt; after about 30 seconds without a substantive reply, the service adds one waiting notice. Related links can be read together, and later material can join the existing task. Required input, failures, and final results still receive replies. Ordinary reading replies omit Task/Run IDs; quote a message or describe the work to follow up.
 
 ## 配置 / Configuration
 
@@ -105,12 +144,13 @@ Commands load `.env` from the current working directory; no `source` command is 
 
 | 设置 / Setting | 默认值 / Default | 说明 / Description |
 | --- | --- | --- |
-| `storage.path` | `data/kagari.db` | SQLite 数据库 / SQLite database |
-| `profile_path` | `profile.md` | 阅读偏好和表达示例 / Reading preferences and style examples |
-| `max_attempts` | `6` | 包含首次尝试 / Includes the first attempt |
+| `model.context_window` | 必填 / required | 端点输入加输出总 token 容量，不从模型别名推断 / endpoint input plus output token capacity |
+| `storage.path` | `data/kagari-context.db` | SQLite 数据库 / SQLite database |
+| `profile_path` | `profile.md` | V2 Agent 的 owner 背景与表达偏好 / Owner context and style for the V2 agent |
 | `agent.streaming` | `false` | 启用 Responses SSE / Enables Responses SSE |
-| `weekly.enabled` | `false` | 周报定时调度 / Scheduled weekly digests |
-| `weekly.max_input_chars` | `120000` | 周报完整模型输入字符上限 / Maximum serialized digest input size |
+| `personal.task_concurrency` | `4` | 并行 Task worker 数，必须为正数 / Concurrent task workers; must be positive |
+| `personal.task_budget` | `30m` | 每个 Task 的累计执行时长上限 / Total execution time limit per Task |
+| `personal.timezone` | `Asia/Shanghai` | 新计划的默认 IANA 时区 / Default IANA timezone for new schedules |
 
 `.env`、`config.yaml` 和 `profile.md` 已被 Git 忽略。不要将真实凭证写入示例文件或提交到仓库。
 
@@ -118,31 +158,19 @@ Commands load `.env` from the current working directory; no `source` command is 
 
 ### 人格替换 / Persona injection
 
-调用方统一通过 `persona.Default()` 获取 `persona.PersonaRole` 接口，再分别注入 Agent 和 Telegram，不直接依赖具体人格类型。角色选择集中在 `internal/persona/main.go`；替换实现只需在这里切换，调用方不变。人格实现提供 `Prompt() string`（人格与语言风格）和 `AskChatID(int64) string`（带任务编号的收件回执），放在 `internal/persona/taffy/` 等子包中；通用任务规则与 Markdown 文风要求保持独立。
+V2 `run` 通过 `persona.Default()` 读取人格提示词，并在启动时载入 `profile.md`。角色选择集中在 `internal/persona/main.go`；替换实现后重新构建并重启服务，修改 `profile.md` 后重启服务。
 
-Callers obtain the `persona.PersonaRole` interface through `persona.Default()` and inject it into the Agent and Telegram without depending on a concrete persona type. Selection lives in `internal/persona/main.go`; switch implementations there without changing callers. Implementations provide `Prompt() string` for persona and language style, and `AskChatID(int64) string` for job acknowledgements, and live in subpackages such as `internal/persona/taffy/`. Common task rules and Markdown style instructions remain independent.
+V2 `run` reads the persona prompt through `persona.Default()` and loads `profile.md` at startup. Persona selection lives in `internal/persona/main.go`; rebuild and restart after changing the implementation, and restart after changing `profile.md`.
 
 内置永雏塔菲（默认）和明前奶绿。使用奶绿时，将 `internal/persona/main.go` 的导入改为 `nailv "kagari/internal/persona/nailv"`，并在 `Default()` 中返回 `nailv.Nailv{}`。奶绿人格参考[公开角色资料](https://laplace.live/about)，采用花店店员的背景和亲切、慵懒、偶尔吐槽的语气。
 
 Built-in personas are Taffy (default) and Mingqian Nailv. To use Nailv, change the import in `internal/persona/main.go` to `nailv "kagari/internal/persona/nailv"` and return `nailv.Nailv{}` from `Default()`. Nailv draws on the [public character profile](https://laplace.live/about), using a flower shop assistant background and a friendly, laid-back tone with occasional teasing.
 
-Engine 构造时读取 `profile.md` 并冻结人格提示词；分析缓存键包含完整分析提示词，周报重试使用任务保存的提示词快照。修改 `profile.md` 后，长期运行的 `run` 服务需重启；单次 `analyze` 和 `digest` 命令会在执行时读取当前文件。修改人格实现后需重新构建程序；运行中的服务还需重启。暂不支持运行时切换角色。
+### 模型输出 / Model output
 
-The Engine reads `profile.md` and freezes persona text when constructed. Analysis cache keys include the complete analysis prompt, and digest retries reuse the saved instruction snapshot. Restart a long-running `run` service after changing `profile.md`; one-shot `analyze` and `digest` commands read the current file when executed. Rebuild after changing persona code, then restart a running service to use the new binary. Runtime persona switching is not supported.
+主对话和读取阶段在调用工具时不附加 JSON Schema 输出约束，最终结果由程序校验。主对话格式不合格时，只额外进行一次无工具的严格格式整理，不重做操作；自动记忆提取也使用严格 JSON Schema，因此模型端点仍需支持该能力。Task 执行器直接返回文字摘要。
 
-### 最终输出 / Final output
-
-分析调用要求模型服务支持 Responses API 的严格 JSON Schema 输出。最终结果只包含 `kind` 和 `body`：`analysis` 的正文是 Markdown 分析，`chat` 的正文是普通对话或澄清问题。程序校验字段、类型和非空正文；无效结果进入任务重试，不发布。正文以外的来源、读取记录和用量由程序保存，周报生成继续直接返回成稿。
-
-Analysis calls require a model endpoint that supports strict JSON Schema output in the Responses API. The final output contains only `kind` and `body`: `analysis` contains a Markdown analysis, while `chat` contains a conversational reply or clarification. The application validates the fields, types, and nonempty body; invalid results enter task retry without publication. Sources, read records, and usage are saved by the application. Digest generation continues to return prose directly.
-
-`analysis` 使用任务入队时保存的分析投递目标；`chat` 只回复提交者私聊，不进入阅读归档或新生成的周报。CLI 没有私聊目标时只展示正文。程序向渠道声明正文为 Markdown 或普通文本，Telegram 适配器负责选择发送接口和分段。
-
-An `analysis` uses the delivery targets saved when the task was queued. A `chat` reply goes only to the submitting private chat and is excluded from the reading archive and newly generated digests. CLI submissions without a private chat target only display the body. The application declares Markdown or plain text; the Telegram adapter selects the send method and handles splitting.
-
-Telegram 适配器通过 SDK 自带的 `sendRichMessage` 发送分析与周报的原始 Markdown，由 Telegram 渲染。聊天、命令、通知和收件回执通过 `sendMessage` 按普通文本发送，关闭链接预览。普通文本按最多 3500 个 UTF-16 单元分段；Markdown 整条发送，长度和结构由 Telegram 校验。归档与 outbox 保留原始正文，outbox 仅增加格式标记；不保存格式实体或带版本的发送 payload，也不提供旧数据库迁移。
-
-The Telegram adapter sends original analysis and digest Markdown through the SDK's `sendRichMessage`, with rendering handled by Telegram. Chats, commands, notices, and acknowledgements use plain-text `sendMessage` with link previews disabled. Plain text is split at up to 3500 UTF-16 units; Markdown is sent as one message and validated by Telegram. Archives and the outbox retain the original text; the outbox only adds a format marker. There are no saved formatting entities, versioned send payloads, or old-database migrations.
+Conversation and reading tool loops omit wire-level JSON Schema and validate the final result locally. A malformed conversation reply gets one tool-free formatting attempt without replaying actions. Automatic memory extraction also uses strict JSON Schema, so the endpoint must still support it. The Task executor returns a text summary directly.
 
 ## CLI 命令 / CLI commands
 
@@ -151,139 +179,135 @@ The Telegram adapter sends original analysis and digest Markdown through the SDK
 Place the global `-config` flag before the subcommand. These examples use the locally built `bin/kagari`:
 
 ```sh
-./bin/kagari -config config.yaml read https://example.com/article
-./bin/kagari -config config.yaml analyze -note '关注系统设计' -user 123456 https://example.com/article
-./bin/kagari -config config.yaml run
-./bin/kagari -config config.yaml digest -user 123456
-./bin/kagari -config config.yaml digest -user 123456 -cutoff 2026-10-02T09:00:00+08:00
-./bin/kagari -config config.yaml digest -user 123456 -start 2026-09-01 -end 2026-09-08
-./bin/kagari -config config.yaml status 17
-./bin/kagari -config config.yaml export 17
-./bin/kagari -config config.yaml retry 17
-./bin/kagari -config config.yaml retry-delivery 17
+./bin/kagari -config config.yaml tasks
+./bin/kagari -config config.yaml tasks 1
+./bin/kagari -config config.yaml runs 1
+./bin/kagari -config config.yaml memories 'answer style'
+./bin/kagari -config config.yaml memory-history answer_style
 ```
 
-- `read URL` 读取单个 URL，不调用模型，也不创建任务。 / Reads one URL without calling the model or creating a job.
-- `analyze [-question TEXT] [-note TEXT] [-user ID] [URL...]` 探索问题或分析链接并归档正文。至少提供问题或链接。 / Explores a question or supplied URLs and archives the prose. Supply a question or a URL.
-- `run` 启动 Telegram long polling、任务处理、投递和启用后的周报调度。 / Starts Telegram polling, job processing, delivery, and enabled digest scheduling.
-- `digest [-user ID] [-cutoff RFC3339]` 默认回顾截止时间前七个日历日，包含开始时间、不包含截止时间。`-start` 与 `-end` 可指定日期范围，包含开始日期、不包含结束日期；必须同时提供且不能与 `-cutoff` 混用。 / By default, reviews the seven calendar days before the cutoff, including the start and excluding the cutoff. Use `-start` and `-end` together for a date range that includes the start date and excludes the end date; they cannot be combined with `-cutoff`.
-- `status ID` 查看任务和投递状态；`export ID` 输出任务 JSON。 / Shows job and delivery status; `export ID` prints the job JSON.
-- `retry ID` 重新排队失败任务；`retry-delivery ID` 手动重发失败或结果不确定的投递。 / Requeues a failed job; manually retries a failed or uncertain delivery.
+- V2 `tasks [TASK_ID]` 输出最近 Task 或单个 Task 的 JSON；`runs TASK_ID` 输出该 Task 的 Run 记录。
+- V2 `memories [QUERY]` 以不区分大小写的子串搜索当前有效的记忆；省略查询时列出最近记忆。`memory-history [KEY]` 输出最近记忆变更；传入 KEY 时精确筛选该键，历史中可能包含已遗忘前的值。这些命令只读 personal 表，不恢复或修改服务状态。
 
-未指定 `-cutoff`、`-start` 和 `-end` 时，周报使用执行命令时的当前时间作为截止时间。同一用户、版本和精确时间范围可复用已保存结果。空周报无需调用模型。默认总共最多尝试 6 次，包含首次尝试；中间失败不会向 Telegram 发送最终失败通知。
+V2 `tasks [TASK_ID]` prints recent Tasks or one Task as JSON; `runs TASK_ID` prints that Task's Run records. `memories [QUERY]` performs a case-insensitive substring search over active memory keys and values; omitting QUERY lists recent memories. `memory-history [KEY]` prints recent memory changes, optionally filtered by an exact key. History can include values from before a memory was forgotten. These commands read personal tables without recovering or changing service state.
 
-Without `-cutoff`, `-start`, or `-end`, a digest uses the current time when the command runs as its cutoff. The same user, version, and exact time range can reuse a saved result. Empty digests need no model call. The default maximum is six attempts, including the first; intermediate failures do not send a final Telegram notice.
+V2 通过 Telegram owner 私聊接收任务、取消或继续任务，也可自然表达稳定偏好、纠正和遗忘请求。例如：
 
-周报首次冻结材料前，会等待同一用户、同一时间范围内尚未完成的分析，每分钟重新检查，等待不计入尝试次数。最终失败的分析数量会附在周报末尾。材料冻结后，重试继续复用快照。CLI 遇到等待时保留周报任务并退出，提示运行 `kagari run` 处理排队任务，或稍后使用相同时间范围重试。
-
-Before freezing its input, a digest waits for unfinished analyses belonging to the same user and time range, checking again after one minute without consuming an attempt. The rendered digest notes the number of analyses that ultimately failed. Retries reuse the frozen snapshot. When blocked by unfinished analyses, the CLI preserves the digest job and exits with instructions to run `kagari run` or retry the same time range later.
-
-CLI 的 `analyze` 和 `digest` 会启动任务处理器，不能与 `run` 或另一个处理型 CLI 命令同时运行。状态、导出和重试命令可以在服务运行时使用。
-
-CLI `analyze` and `digest` start a processor and must not run alongside `run` or another processing CLI command. Status, export, and retry commands can run while the service is active.
-
-Telegram 只接收允许列表中用户的私聊消息。确认、命令回复和处理失败通知发回提交私聊。分析与周报结果默认发回提交私聊；配置非空的 `telegram.target_chat_ids` 后，同一结果会分发到列表中的所有聊天或频道，bot 需要相应发言权限。列表为空时仍回发提交私聊。支持 `/help`、`/status ID`、`/retry ID`、`/retry_delivery ID`、`/weekly`、`/weekly START END` 和下述归档命令。
-
-Telegram accepts private messages from users on the allowlist. Acknowledgements, command replies, and processing failure notices go to the submitting private chat. Analysis and digest results default to the submitting chat; a nonempty `telegram.target_chat_ids` list sends each result to every listed chat or channel, where the bot needs posting permission. An empty list keeps results in the submitting private chat. Supported commands include `/help`, `/status ID`, `/retry ID`, `/retry_delivery ID`, `/weekly`, `/weekly START END`, and the archive commands below.
-
-私聊 bot 可分页查看自己的归档、读取详情并确认删除。用户身份取自 Telegram 发送者，不接受用户 ID 参数。
-
-In a private bot chat, browse your archives, read details, and confirm deletion. Ownership comes from the Telegram sender; commands do not accept a user ID.
+V2 accepts tasks and requests to cancel or continue them in the owner's Telegram private chat. Stable preferences, corrections, and forgetting can also be phrased naturally. For example:
 
 ```text
-/archive
-/archive 2
-/archive_show 17
-/archive_delete 17
-/archive_delete 17 confirm
+调查 https://example.com 的方案和主要风险。
+这个任务进展如何？
+取消任务 #1。
+继续任务 #1，补查兼容性；我授权按当前配置延长一次执行时间。
+以后回答请简洁一些，但保留关键依据。
+更正：我现在主要使用 Rust。
+忘记我偏好简洁回答这件事。
 ```
 
-`/archive [页码]` 默认第一页，每页 10 条，按任务号从大到小列出已完成分析，保留重复收录；收录日期使用 `weekly.timezone`。`/archive_show` 展示原始提交、备注、链接和完整分析报告。`/archive_delete ID` 先展示归档标题和删除范围，带 `confirm` 的命令才执行删除。正在发送消息的归档会拒绝删除，请等待投递结束后重试。删除范围与 CLI 相同：删除归档及关联投递记录，保留共享缓存和已有周报快照，也不会撤回已发送消息。
+每条直接用户消息处理后都会异步检查稳定事实和偏好。自动记忆检查始终静默，包括失败和需要澄清的情况；结果与错误保留在 Run 中，查询个人记忆可确认已生效的内容。用户明确要求保存、更正或遗忘时，主对话会同步提交记忆、变更历史和请求记录；成功后才可报告已生效，校验或版本冲突会作为工具错误返回。
 
-`/archive [PAGE]` defaults to page 1, with 10 completed analyses per page in descending job ID order, including duplicate submissions; submission dates use `weekly.timezone`. `/archive_show` displays the original submission, notes, links, and full analysis report. `/archive_delete ID` first displays the archive title and deletion scope; deletion requires the command with `confirm`. An archive with an active message send cannot be deleted; retry after delivery finishes. As with the CLI, deletion removes the archive and its deliveries while preserving shared cache and existing digest snapshots, and does not retract sent messages.
+After each direct user message, a background reviewer checks for durable facts and preferences. Automatic memory review stays silent, including failures and clarification; results and errors remain in Runs. When the user explicitly asks to save, correct, or forget a memory, the conversation synchronously commits the memory, its change history, and the request record. It can report success only after the commit; validation and version conflicts return as tool errors.
 
-归档命令使用现有任务队列和投递流程，因此分析任务执行时命令回复可能延迟。回复发回发起命令的私聊，不使用分析结果的公共投递目标。
+两个渠道的文字回复均使用普通文本，每条 outbox 分段最多 2,000 字节，按 UTF-8 字符边界切分；每段或每个文件总共最多尝试三次，包含首次尝试。发送结果未知时不会自动重发，避免重复消息。
 
-Archive commands use the existing job queue and delivery flow, so an analysis in progress may delay replies. Replies go to the private chat where the command was sent, rather than the public analysis delivery target.
+Both channels use plain text replies, split into outbox parts of at most 2,000 bytes at UTF-8 character boundaries. Each text part or file gets at most three total attempts, including the first. An unknown send outcome is not retried automatically, to avoid duplicate messages.
 
-```yaml
-telegram:
-  allowed_user_ids: [123456789]
-  target_chat_ids: [123456789, -1001234567890]
-```
+V2 的 Task 状态、阶段成果、已用执行时间与时长上限、记忆和回执保存在 `storage.path` 指向的 SQLite 文件中。Worker 领取 Task Run 时，用时长上限减去该 Task 已用的执行时间，得到本次可用的时间；这个计算结果不单独保存。服务重启后，中断的后台阶段重新排队，已用时间不会清零。中断的主对话保留已经提交的操作并说明中断，未提交的要求需要重新提出，以免重复建任务。发送中断的消息标记为结果不确定；旧 V1 表不会迁移为 personal Task。当前 V2 schema 不兼容旧 V2 personal 数据库；使用新的 `storage.path` 启动，程序不会自动迁移或删除旧数据库。
 
-用实际私聊和频道 ID 替换示例；也可设置 `KAGARI_TELEGRAM_TARGET_CHAT_IDS=123456789,-1001234567890`。目标在入队时保存，修改配置只影响新任务。每个目标分别记录投递状态和分段顺序，一个目标失败不会阻塞其他目标。`/status ID` 显示每个目标的状态；`/retry_delivery ID` 仅重新排队失败或结果不确定的投递，已发送部分保留。结果不确定的消息仍需手动重发，可能重复。
+V2 Task states, stage results, elapsed execution times and time limits, memories, and receipts are saved in the SQLite file at `storage.path`. When a worker claims a Task Run, it subtracts the Task's elapsed execution time from its time limit to find the time available for that Run. This calculated value is not stored separately. Restarting the service requeues interrupted background stages without resetting elapsed time. An interrupted conversation keeps committed actions and reports the interruption; the owner must repeat uncommitted requests, avoiding duplicate task creation. Interrupted sends are marked uncertain. V1 tables are not migrated into personal Tasks. The current V2 schema is incompatible with older V2 personal databases; start with a new `storage.path`. Kagari does not migrate or delete the old database automatically.
 
-Replace the example IDs with your private chat and channel IDs, or set `KAGARI_TELEGRAM_TARGET_CHAT_IDS=123456789,-1001234567890`. Targets are saved at enqueue time; configuration changes affect new jobs. Each target has independent delivery status and part ordering, so one target's failure does not block the others. `/status ID` shows each target's status. `/retry_delivery ID` requeues only failed or uncertain deliveries and preserves sent parts; retrying an uncertain delivery may duplicate a message.
+Task 执行器可以读取网页，也可以用 `ls`、`read_file`、`write_file`、`edit_file` 读写当前 Task 工作区内的 UTF-8 文本文件，每个文件最多 1 MiB。执行器还可用 `read_attachment` 读取选定材料、用 `write_attachment` 保存独立文本附件；不能任意写入本地路径或执行命令。浏览器工具用于读取、搜索和页面导航；提示词禁止发布、删除、购买或提交个人数据，但网站操作本身不受通用只读沙箱保护。
 
-分析与周报的投递进入失败或结果不确定状态时，会向原提交者私聊发送一条通知，附查看与重发命令。通知与终止状态在同一事务内保存；启动恢复也会补入尚未通知的记录。每条投递只通知一次，人工重发和重启不会重复通知；通知自身发送失败不会继续生成通知。发送结果不确定的原消息仍需手动重发。
+The Task executor can read web pages and use `ls`, `read_file`, `write_file`, and `edit_file` to read and write UTF-8 text files in the current Task's workspace, up to 1 MiB per file. It can also use `read_attachment` for selected materials and `write_attachment` to save independent text attachments. It cannot write arbitrary local paths or execute commands. Browser tools are intended for reading, search, and navigation. Prompts prohibit publishing, deleting, purchasing, and submitting personal data, but website actions are not protected by a general read-only sandbox.
 
-When an analysis or digest delivery fails permanently, exhausts its attempts, or has an uncertain outcome, a notice goes to the original submitter's private chat with status and resend commands. The terminal state and notice are saved in one transaction; startup recovery also queues missing notices. Each delivery gets one notice, including across manual retries and restarts. A failed notice does not generate another notice. Original messages with uncertain outcomes still require manual resending.
+每个 Task 的文件保存在 `<storage.path>.workspaces/<store_id>/tasks/<task_id>/`。继续任务或重启服务后，执行器仍使用这个目录。`edit_file` 要求待替换文本在文件中恰好出现一次。文件写入成功后就会保留，即使阶段随后失败或取消，也不会撤销修改。Run 的 `files` 列出本次成功写入或修改的文件相对路径；这些路径指向当前文件，不保存历史版本，也不表示文件已作为附件发送。选定文本成果需通过 `write_attachment` 保存，再由主 Agent 选择附件 ID 发送；工作目录文件不会自动转为附件。备份时需同时保留数据库、工作区、附件和凭证。
 
-## 数据库维护 / Database maintenance
+Each Task stores its files at `<storage.path>.workspaces/<store_id>/tasks/<task_id>/`. The executor uses the same directory when the Task continues or the service restarts. `edit_file` requires the text to replace to appear exactly once. A successful write is kept even if the stage later fails or is cancelled. A Run's `files` field lists the relative paths of files it successfully wrote or modified. These paths refer to the current files; they do not preserve older versions or indicate that the files were sent as attachments. Save selected text deliverables with `write_attachment`; the main Agent chooses attachment IDs to send. Workspace files are not automatically exported. Back up the database, workspace, attachments, and credentials together.
 
-`db` 命令只打开已存在的数据库，不创建或初始化文件。`info` 和 `list` 以只读模式运行，可在服务期间使用；`list` 的分页参数写在表名之前，默认 20 条，最多 100 条。
+同一个数据库只能由一个 `run` 进程持有锁；只读检查命令可在服务运行时使用。
 
-The `db` command only opens an existing database; it never creates or initializes one. `info` and `list` use read-only mode and can run while the service is active. Put pagination flags before the table name; the default is 20 rows, with a maximum of 100.
+Only one `run` process can hold a database's lock. Read-only inspection commands remain available while the service runs.
+
+### 定时计划 / Schedules
+
+在私聊中登记周期目标，例如“每天上海时间 9 点生成一道 Go 练习题”。普通计划每次创建独立 Task；连续检查计划只在完整检查已保存区间后推进进度。首次登记从未来的正常周期开始，不立即执行。停机错过多个周期时只创建一次任务；同计划仍有排队、执行或待决回调时跳过本次触发。稳定等待输入或执行时间用完的 Task 不阻止下一周期。
+
+Register a recurring goal in chat, such as a daily Go exercise at 09:00 in Shanghai. Each activation creates an independent Task. Continuous checks advance their saved coverage only after a complete assessment. Registration starts at a future activation. Missed periods coalesce into one task; active work or an unresolved callback prevents overlapping automatic runs. Tasks waiting for input or more execution time do not block later cycles.
+
+暂停或取消计划会取消尚未开始的 Task，已经开始的 Task 保留原输入。主动恢复从恢复时刻积累新的检查范围；固定附件或时间规则故障后的恢复保留原检查进度。回复某次结果默认只修改那一次 Task；明确说“以后每次”才修改计划。背景与当前记忆冲突时，程序附上具体建议；用户确认前不改计划，过期建议需重新确认。
+
+Pausing or cancelling removes unstarted tasks while started tasks retain their input. Manual resume begins a new coverage scope; recovery from an attachment or schedule fault preserves the previous progress. Replies affect one Task unless the owner explicitly requests changes to future cycles. Background suggestions show concrete replacements and require confirmation; stale suggestions require another confirmation.
+
+只读查询 / Read-only inspection:
 
 ```sh
-./bin/kagari -config config.yaml db info
-./bin/kagari -config config.yaml db list -limit 20 -offset 0 jobs
-./bin/kagari -config config.yaml db list deliveries
-./bin/kagari -config config.yaml db list source_cache
-./bin/kagari -config config.yaml db list meta
-./bin/kagari -config config.yaml db list update_state
+make cli ARGS="schedules -limit 20"
+make cli ARGS="schedules 1"
+make cli ARGS="schedule-history -before 100 -limit 20 1"
 ```
 
-按用户管理已归档分析。归档是已完成的 `analyze` 任务，归属依据原始提交的 `user_id`。必须显式传 `-user`；CLI 提交未指定用户时归属用户 `0`。列表按任务号从大到小分页，保留重复收录，并输出原始提交和完整分析结果（含来源正文）。分页默认 20 条，最多 100 条；所有选项写在任务号之前。
+计划详情包含待处理建议、近期 Task 摘要和投递状态。执行完成与消息送达分别记录。完整规则见[功能设计](docs/SCHEDULE-DESIGN.md)和[实现方案](docs/SCHEDULE-IMPLEMENTATION.md)。
 
-Manage archived analyses by user. Archives are completed `analyze` jobs, owned by the original submission's `user_id`. An explicit `-user` is required; CLI submissions without a user belong to user `0`. Lists are paginated by descending job ID, preserve duplicate submissions, and include the original submission and complete analysis result with source text. The default page size is 20, with a maximum of 100. Place flags before the task ID.
+Schedule details include pending suggestions, recent Task summaries, and delivery states. Execution completion and delivery are recorded separately. See the [design](docs/SCHEDULE-DESIGN.md) and [implementation plan](docs/SCHEDULE-IMPLEMENTATION.md).
 
-```sh
-./bin/kagari -config config.yaml db archive list -user 123456 -limit 20 -offset 0
-./bin/kagari -config config.yaml db archive show -user 123456 17
+### 从旧版本更新 / Updating from older versions
 
-# 停止处理器后删除指定用户的一条归档 / Stop processors before deleting one archive
-./bin/kagari -config config.yaml db archive delete -user 123456 -yes 17
-```
+V1 阅读归档及其 `read`、`analyze`、`digest`、`status`、`export`、`retry`、`retry-delivery`、`db` 命令已移除。旧数据库和旧表不会自动删除，也不会导入 personal Task。上下文管理与定时计划使用 schema 4；请指定新的 `storage.path`，保留旧数据库及其工作区、附件和凭证，不执行迁移。
 
-`list` 和 `show` 使用只读连接，可在服务运行时执行。`delete` 需要 `-yes` 和处理器锁，会在同一事务中删除匹配用户及任务号的归档和关联投递记录；用户不匹配、任务未完成或任务类型不是分析时拒绝删除。删除后，新建周报的输入不再包含该记录；已有周报及其输入快照、共享来源缓存、调度元数据和 Telegram offset 会保留。删除不会撤回已发送的 Telegram 消息；任务号可能重用。
+V1 reading archives and the `read`, `analyze`, `digest`, `status`, `export`, `retry`, `retry-delivery`, and `db` commands have been removed. Old databases and tables are neither deleted automatically nor imported into personal Tasks. Context management and schedules use schema 4. Choose a new `storage.path` and retain the old database, workspace, attachments, and credentials; no migration is performed.
 
-`list` and `show` use read-only connections and can run while the service is active. `delete` requires `-yes` and the processor lock, and removes the archive matching both user and task ID along with its deliveries in one transaction. It rejects an owner mismatch, an incomplete task, or a task that is not an analysis. New digests exclude the deleted record; existing digests and input snapshots, shared source cache, scheduler metadata, and Telegram offset remain. Deletion does not retract sent Telegram messages; task IDs may be reused.
+从旧配置删除 `weekly`、`max_attempts`、`reader.cache_ttl` 和 `telegram.target_chat_ids`，以及对应的 `KAGARI_*` 环境变量。YAML 仍严格校验，保留这些旧键会报错。网页读取只在同一次 Task 阶段内复用 HTTP 结果。
 
-清理前停止 `run` 或其他处理型命令。清理需要显式传 `-yes`，会事务性删除数据但保留数据库结构：
-
-Stop `run` and other processing commands before clearing data. Clearing requires `-yes`; deletions are transactional and preserve the database schema:
-
-```sh
-# 只清来源缓存 / Clear only the source cache
-./bin/kagari -config config.yaml db clear -scope cache -yes
-
-# 默认清任务、投递和来源缓存 / Default: clear jobs, deliveries, and source cache
-./bin/kagari -config config.yaml db clear -yes
-
-# 完整重置并清调度元数据 / Full reset, including scheduler metadata
-./bin/kagari -config config.yaml db clear -scope all -yes
-```
-
-清理不会撤回已发出的 Telegram 消息；清任务后任务号可能被重用。`all` 会重置 Telegram offset，尚未确认的更新可能重新入队。
-
-Clearing does not retract Telegram messages already sent. Job IDs may be reused after jobs are deleted. `all` resets the Telegram offset, so unconfirmed updates may be enqueued again.
+Remove `weekly`, `max_attempts`, `reader.cache_ttl`, and `telegram.target_chat_ids`, plus their corresponding `KAGARI_*` environment variables. YAML validation remains strict and rejects these removed keys. HTTP results are reused only within one Task stage.
 
 ## 行为与限制 / Behavior and limits
 
 - HTTP + Readability 读取网页，限制超时、响应大小、正文长度和链接数，并默认拒绝非公网地址。只有显式配置 `reader.allowed_non_public_cidrs` 才会放行指定网段。 / HTTP + Readability fetches web pages with timeout, response-size, content-length, and link limits. Non-public IPs are blocked by default; only explicitly configured CIDRs are allowed.
 - X 通过公开 oEmbed 读取单帖，并提取正文中的裸链接与短链。Agent 自主选择追读，未读内容不能当成已核实证据；oEmbed 可能缺少长帖、线程或链接卡片。 / X oEmbed provides public post text and extracted links. The agent chooses further reads; long posts, threads and link cards may be incomplete.
-- `read_url` 通过 HTTP GET 获取网页并提取正文与链接；启用 `browser.enabled` 后，`browse_url` 同时提供 Playwright MCP 的渲染页面读取。模型可选择或混用两个工具，HTTP 返回成功但正文不足时也可改用浏览器。浏览器需要 Node.js 18+ 和本机 Google Chrome；每个任务使用独立无头会话，不继承 Codex 或个人 Chrome 的登录状态。 / `read_url` fetches pages over HTTP GET and extracts text and links. With `browser.enabled`, `browse_url` is also available through Playwright MCP. The model can choose either tool or use both, including when HTTP succeeds but returns insufficient content. Requires Node.js 18+ and local Google Chrome. Each analysis gets an isolated headless browser without personal or Codex login state.
-- 默认每次分析最多 6 次不同的 `(URL, 后端)` 读取；首次命中缓存、失败和 HTTP 改用浏览器都计数，同后端同 URL 重读复用本次结果。默认最多 10 次模型迭代、3 分钟任务时限。 / The default is six distinct `(URL, backend)` reads, including cache hits, failures and backend changes; repeated calls reuse the task's observation. Ten model iterations and a three-minute task timeout bound each analysis.
-- 周报 `weekly.max_input_chars` 默认 120000；输入超过上限时任务失败并保留完整输入快照，不通过丢弃条目缩小输入。 / `weekly.max_input_chars` defaults to 120000; oversized digest jobs fail with the full input snapshot preserved, rather than dropping entries to fit.
-- `weekly.enabled` 默认关闭；启用后按 `weekly.timezone` 和配置的星期、时间调度，默认时区为 `Asia/Shanghai`。 / `weekly.enabled` defaults to false. When enabled, digests follow `weekly.timezone` and the configured weekday and time; the default timezone is `Asia/Shanghai`.
+- `read_url` 通过 HTTP GET 获取网页并提取正文与链接；显式启用 `browser.enabled` 后，`browse_url` 可在同一 Playwright MCP 会话中导航、读取快照、点击、输入、按键、等待或返回。省略 `action` 时默认为 `navigate`，兼容只传 `url` 的旧调用。`PageDown` 可向下滚动，`Enter` 可提交搜索。浏览器需要 Node.js 18+ 和本机 Google Chrome；每次 Task 阶段使用独立无头会话，不继承 Codex 或个人 Chrome 的登录状态。每次浏览器操作都会返回新快照；快照中的 `ref` 可用于点击或输入。仅支持这些交互，不提供任意代码、文件上传下载或标签页操作。 / `read_url` fetches pages over HTTP GET and extracts text and links. When `browser.enabled` is explicitly enabled, `browse_url` can navigate, read snapshots, click, type, press keys, wait, or go back in one Playwright MCP session. Omitting `action` defaults to `navigate`, preserving URL-only calls. `PageDown` scrolls down; `Enter` can submit a search. Requires Node.js 18+ and local Google Chrome. Each Task stage gets an isolated headless session without personal or Codex login state. Every browser operation returns a fresh snapshot; use its `ref` values to click or type. Only these interactions are supported; arbitrary code, file uploads/downloads, and tab operations are unavailable.
+- `browse_url` 调用示例（每行都是一次工具调用；每次调用都会返回新快照，后续 ref 从最近一次结果中选择，以下省略快照正文） / `browse_url` examples (each line is a separate tool call; every call returns a fresh snapshot, so choose each later ref from the latest result; snapshot content is omitted below):
+
+  ```json
+  {"action":"navigate","url":"https://example.com"}
+  {"action":"click","ref":"e5"}
+  {"action":"type","ref":"e8","text":"search terms"}
+  {"action":"press_key","key":"Enter"}
+  {"action":"wait_for","seconds":2}
+  {"action":"back"}
+  ```
+
+  单独刷新快照 / To request a snapshot explicitly:
+
+  ```json
+  {"action":"snapshot"}
+  ```
+
+- 默认每次 Task 阶段共享 6 次网页操作预算；每次有效浏览器操作都计数，包括失败，浏览器观察不会通过 URL 缓存复用。首次 `read_url` 请求会计数；同一 URL 后续读取可复用本阶段的 HTTP 结果且不再计数。默认最多 10 次模型迭代、3 分钟阶段时限。 / The default shared per-stage source budget is six operations. Each valid browser operation counts, including failures, and browser observations are not reused through the URL cache. The first `read_url` request counts; later reads of the same URL reuse this stage's HTTP result and do not count again. Ten model iterations and a three-minute timeout bound each Task stage.
 
 ## 日志与隐私 / Logs and privacy
 
-启用 `agent.streaming` 后，通过 SSE 接收模型输出；逐段 SSE 日志目前关闭。info 日志记录模型轮次、完整工具参数、工具结果摘要和 token 用量；非流式模式还会记录完整模型回复。日志可能包含提交内容或提取文本。SQLite 归档也包含提交和来源正文，请妥善保管本地日志和数据库。
+V2 `make run` 在 stderr 显示阶段、关联 ID、耗时和结果摘要；应用将完整调用记录保存为 JSONL。默认 `data/kagari-context.db` 对应 `data/kagari-context.logs/`，按约 50 MiB 轮转，保留最近 7 天且总量不超过 1 GiB，先触发的限制生效。`logging` 配置可修改这些值；V2 的 `log_level` 只调整终端阈值，文件始终保留 info 及以上记录。
 
-With `agent.streaming` enabled, model output is received over SSE; per-chunk SSE logs are currently disabled. Info logs record model turns, complete tool arguments, tool result previews, and token usage. Non-streaming mode also logs the full model response. Logs may contain submitted text or extracted content. SQLite archives contain submissions and source text; protect local logs and database files.
+V2 writes concise progress to stderr and full application call records to JSONL files. For `data/kagari-context.db`, the default directory is `data/kagari-context.logs/`. Files rotate around 50 MiB and expire after 7 days or when total storage reaches 1 GiB, whichever comes first. Configure these values under `logging`; V2 `log_level` controls the terminal threshold while files retain info and above.
+
+```sh
+./bin/kagari -config config.yaml events --limit 20
+./bin/kagari -config config.yaml trace --event 42
+./bin/kagari -config config.yaml trace --task 3 --full
+```
+
+`events` 提供近期事件 ID；`trace` 将关联日志与数据库当前状态放在一起，默认隐藏正文，`--full` 显示脱敏后的调用内容。查询使用只读数据库连接，不启动服务或恢复工作。记录范围、故障边界和验证依据见[观测性说明](docs/V2-OBSERVABILITY.md)。
+
+`events` lists recent event IDs. `trace` combines related historical records with current database state; `--full` includes redacted payloads. Inspection uses a read-only connection and does not start workers or recover work. See the [observability guide](docs/V2-OBSERVABILITY.md) for coverage, failure behavior, and test rationale.
+
+SQLite 保存 owner 私聊、Task 目标与成果、个人记忆及投递记录。它可能包含敏感个人信息和消息历史；妥善保管 `storage.path` 指向的数据库与本地日志。
+
+SQLite stores owner messages, Task goals and results, personal memories, and delivery records. It can contain sensitive personal information and message history; protect the database at `storage.path` and local logs.
+
+文件日志默认保留聊天正文、模型上下文与响应、工具定义、参数和结果。已配置的模型密钥、Telegram token 和明确的凭证字段会被屏蔽；普通正文中未知的秘密仍可能保留。日志目录权限为 0700、文件为 0600；请使用专用日志目录。
+
+File logs retain message bodies, model context and responses, tool definitions, arguments, and results. Configured model and Telegram credentials and explicit credential fields are redacted; unknown secrets in ordinary prose may remain. Log directories use mode 0700 and files 0600. Use a dedicated log directory.
 
 本地测试和构建不能代替真实外部联调。模型 endpoint、X 页面和 Telegram bot 需要在目标部署环境分别验证。
 
@@ -291,6 +315,6 @@ Local tests and builds do not replace external integration checks. Validate the 
 
 ## 设计 / Design
 
-架构、数据流、可靠性和安全契约见[设计说明](docs/DESIGN.md)。
+Task、记忆、恢复边界和 CLI 见[设计说明](docs/V2-DESIGN.md)。
 
-See the [design document](docs/DESIGN.md) for architecture, data flows, and reliability and security contracts.
+See the [design](docs/V2-DESIGN.md) for Tasks, memory, recovery, and CLI behavior.

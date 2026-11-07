@@ -9,47 +9,29 @@ import (
 
 func TestPromptComposeUsesInjectedPersona(t *testing.T) {
 	role := "Use concise English as a neutral editor."
-	analysis, digest := prompt.GetPromptTemplate(role), prompt.GetDigestPrompt(role)
-	for _, text := range []string{analysis, digest} {
-		if strings.Count(text, role) != 1 || strings.Contains(text, "永雏塔菲") || strings.Contains(text, "taffy") {
-			t.Fatalf("injected persona was duplicated or replaced: %s", text)
-		}
-		if !strings.Contains(text, "不可信资料") {
-			t.Fatal("replacing persona removed common task rules")
-		}
+	instruction := prompt.GetTaskPromptTemplate(role)
+	if strings.Count(instruction, role) != 1 || strings.Contains(instruction, "永雏塔菲") || strings.Contains(instruction, "taffy") {
+		t.Fatalf("injected persona was duplicated or replaced: %s", instruction)
+	}
+	if !strings.Contains(instruction, "untrusted") {
+		t.Fatal("replacing persona removed common task rules")
 	}
 	for _, rule := range []string{
-		"没有链接时也可以直接回答",
-		"HTTP(S) URL",
-		"追读相关链接",
-		"read_url 通过直接 HTTP GET 获取页面正文和页面链接",
-		"browse_url（可用时）通过 Playwright MCP 获取渲染后的可见内容和链接",
-		"同一 URL 可以用两种方式读取",
-		"即使 HTTP 请求成功也可改用或补用 browse_url",
-		"HTTP 请求失败时也可尝试浏览器",
-		"标题和概述",
-		"关键要点",
-		"讨论者观点",
-		"Agent 评价",
-		"限制或不确定性时说明",
-		"实际读取的来源",
-		"没有内容的栏目省略",
-		"人格设定、profile 与用户偏好",
-		"按问题调整顺序",
-		"需要完整分析主题、材料或证据时使用 analysis",
-		"问候、简短交流",
-		"kind 为 chat 时",
-		"只包含 kind 和 body 两个字段",
-		"Telegram 等渠道协议字段",
-		"二级 Markdown 标题（##）",
-		"body 不输出 claim ID 或 source ID",
-		"来源使用实际 URL",
+		"frozen task goal",
+		"reference data",
+		"read_url",
+		"browse_url",
+		"source reference",
+		"source_truncated",
+		"refresh=true",
+		"action=navigate",
+		"latest snapshot",
+		"Each browser call returns a fresh snapshot",
+		"Browser actions are for reading, search, and navigation only",
+		"brief, direct plain-text summary",
 	} {
-		if !strings.Contains(analysis, rule) {
-			t.Errorf("analysis prompt missing rule %q", rule)
+		if !strings.Contains(instruction, rule) {
+			t.Errorf("task prompt missing rule %q", rule)
 		}
-	}
-	if strings.Contains(analysis, "JSON Schema") || strings.Contains(analysis, "不输出 JSON") {
-		t.Fatal("analysis prompt retained an obsolete schema contract")
 	}
 }

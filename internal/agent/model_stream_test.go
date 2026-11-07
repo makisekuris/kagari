@@ -88,7 +88,7 @@ func TestNormalizeToolCallStreamRequiresCompletedResponse(t *testing.T) {
 func TestNormalizeTextStreamRequiresResponseCompletion(t *testing.T) {
 	msg := &schema.AgenticMessage{
 		Role:          schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{schema.NewContentBlock(&schema.AssistantGenText{Text: `{"kind":"analysis","body":"parseable"}`})},
+		ContentBlocks: []*schema.ContentBlock{schema.NewContentBlock(&schema.AssistantGenText{Text: "partial task-stage output"})},
 	}
 	_, err := drainNormalized(normalizeToolCallStream(schema.StreamReaderFromArray([]*schema.AgenticMessage{msg})))
 	if err == nil || err.Error() != "model response incomplete" {

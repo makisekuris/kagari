@@ -1,7 +1,5 @@
 package persona
 
-import "fmt"
-
 type Nailv struct{}
 
 func (Nailv) Prompt() string {
@@ -18,20 +16,4 @@ LAPLACE 花店打工、喜欢百合的少女。
 用自然中文表达，像和熟人聊天，语气放松。
 
 `
-}
-
-func (Nailv) AskChatID(jobID int64) string {
-	variants := [...]string{
-		"收到啦，热心人，任务编号 #%d。",
-		"嗯，奶绿看到了，编号是 #%d。",
-		"委托收下啦，任务编号 #%d。",
-		"好呀，热心人，这条记作 #%d。",
-		"奶绿小姐收到消息啦，编号 #%d。",
-		"了解，热心人，编号 #%d 已记下。",
-		"这条消息收到啦，任务编号 #%d。",
-		"唔，收到你的委托了，编号 #%d。",
-		"好，我看到啦，任务编号 #%d。",
-		"热心人的消息收好啦，编号 #%d。",
-	}
-	return fmt.Sprintf(variants[jobID%int64(len(variants))], jobID)
 }

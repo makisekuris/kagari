@@ -52,7 +52,7 @@ func TestLiveLinkExploration(t *testing.T) {
 			var reads []string
 			read := func(_ context.Context, url string) (domain.Source, error) {
 				reads = append(reads, url)
-				s := domain.Source{ID: "s_" + hash(url)[:16], RequestedURL: url, URL: url, Status: "ok", ReadMethod: "eval", FetchedAt: time.Now().UTC()}
+				s := domain.Source{ID: "eval-source", RequestedURL: url, URL: url, Status: "ok", ReadMethod: "eval", FetchedAt: time.Now().UTC()}
 				switch url {
 				case entry:
 					s.Content = "入口只有摘要。校验码请查原文：" + article
@@ -70,7 +70,7 @@ func TestLiveLinkExploration(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			e, err := New(ctx, cfg, read, nil, persona.Default())
+			e, err := New(ctx, cfg, read, persona.Default())
 			if err != nil {
 				t.Fatal(logging.ErrorReason(err))
 			}
@@ -82,7 +82,7 @@ func TestLiveLinkExploration(t *testing.T) {
 				if prepareErr != nil {
 					t.Fatal(prepareErr)
 				}
-				result, runErr := e.Analyze(ctx, s)
+				result, runErr := e.RunTaskStage(ctx, s, memorySourceRecorder)
 				err = runErr
 				usage = result.Usage
 				output = result.Body
@@ -276,18 +276,18 @@ func TestLiveAgentUsesBrowserAfterHTTPInsufficient(t *testing.T) {
 	r := reader.New(reader.Options{Timeout: cfg.Reader.Timeout, MaxBytes: cfg.Reader.MaxBytes, MaxContentChars: cfg.Reader.MaxContentChars, MaxLinks: cfg.Reader.MaxLinks, AllowedNonPublicCIDRs: cfg.Reader.AllowedNonPublicCIDRs})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	e, err := New(ctx, cfg, r.Read, nil, persona.Default())
+	e, err := New(ctx, cfg, r.Read, persona.Default())
 	if err != nil {
 		t.Fatal(logging.ErrorReason(err))
 	}
-	e.OpenBrowser = func(ctx context.Context) (func(context.Context, string) (domain.Source, error), func(), error) {
+	e.OpenBrowser = func(ctx context.Context) (browser.Browse, func(), error) {
 		return browser.Open(ctx, cfg)
 	}
 	s, err := e.Prepare(domain.Submission{Text: "请从入口追读原文，告诉我当前实验校验码，并引用实际读到的原文。如果HTTP内容不完整，应继续使用其他可用工具。", URLs: []string{server.URL + "/start"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := e.Analyze(ctx, s)
+	result, err := e.RunTaskStage(ctx, s, memorySourceRecorder)
 	usedBrowser, readEvidence := false, false
 	for _, reading := range result.Readings {
 		if reading.Backend == "browser" {
