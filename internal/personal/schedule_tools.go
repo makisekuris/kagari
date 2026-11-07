@@ -79,7 +79,7 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return scheduleToolError(err), nil
 		}
-		p.addScheduleID(schedule.ID)
+		p.addScheduleID(schedule.ID, true)
 		return scheduleToolReply{OK: true, Replayed: replayed, Schedule: &schedule}, nil
 	})
 	if err != nil {
@@ -130,7 +130,7 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return scheduleToolError(err), nil
 		}
-		p.addScheduleID(schedule.ID)
+		p.addScheduleID(schedule.ID, false)
 		return scheduleToolReply{OK: true, Schedule: schedule, Occurrences: occurrences, Suggestions: suggestions}, nil
 	})
 	if err != nil {
@@ -153,7 +153,7 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return scheduleToolError(err), nil
 		}
-		p.addScheduleID(schedule.ID)
+		p.addScheduleID(schedule.ID, true)
 		return scheduleToolReply{OK: true, Replayed: replayed, Schedule: &schedule}, nil
 	})
 	if err != nil {
@@ -176,7 +176,7 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return scheduleToolError(err), nil
 		}
-		p.addScheduleID(schedule.ID)
+		p.addScheduleID(schedule.ID, true)
 		return scheduleToolReply{OK: true, Replayed: replayed, Schedule: &schedule}, nil
 	})
 	if err != nil {

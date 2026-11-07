@@ -12,7 +12,7 @@ func TestFormatTurnUsesOneStrictRequestWithoutTools(t *testing.T) {
 		responseText(`{"text":"记忆已保存。","reply_kind":"content","attachments":[]}`),
 	}}
 	a := &MainAgent{Model: fixture.model(t), Profile: "PRIVATE_PROFILE_MUST_NOT_BE_SENT"}
-	response, err := a.formatTurn(context.Background(), draft)
+	response, err := a.formatTurn(context.Background(), draft, nil)
 	if err != nil || response.Text != "记忆已保存。" || response.ReplyKind != replyContent {
 		t.Fatalf("format response=%+v error=%v", response, err)
 	}
@@ -37,7 +37,7 @@ func TestFormatTurnAcceptsSilentEmptyResponse(t *testing.T) {
 	fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 		responseText(`{"text":"","reply_kind":"silent","attachments":[]}`),
 	}}
-	response, err := (&MainAgent{Model: fixture.model(t)}).formatTurn(context.Background(), "Routine background task continuation is queued.")
+	response, err := (&MainAgent{Model: fixture.model(t)}).formatTurn(context.Background(), "Routine background task continuation is queued.", nil)
 	if err != nil || response.ReplyKind != replySilent || response.Text != "" || len(response.Attachments) != 0 {
 		t.Fatalf("silent format response=%+v error=%v", response, err)
 	}
@@ -57,7 +57,7 @@ func TestFormatTurnRejectsInvalidOrRefusedResultsWithoutRetry(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := &responsesFixture{t: t, responses: []fixtureResponse{tc.response}}
-			if _, err := (&MainAgent{Model: fixture.model(t)}).formatTurn(context.Background(), "Draft: operation queued."); err == nil {
+			if _, err := (&MainAgent{Model: fixture.model(t)}).formatTurn(context.Background(), "Draft: operation queued.", nil); err == nil {
 				t.Fatal("invalid formatter result was accepted")
 			}
 			if len(fixture.requests) != 1 {

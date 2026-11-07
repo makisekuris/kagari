@@ -206,6 +206,7 @@ type TurnOutput struct {
 	Attachments []string
 	TaskID      int64
 	Silent      bool
+	replyKind   personalReplyKind
 }
 
 type ThinkFunc func(context.Context, TurnInput) (TurnOutput, error)

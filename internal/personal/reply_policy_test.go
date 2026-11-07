@@ -125,7 +125,7 @@ func TestRuntimeAsksRequiredQuestionDespiteReplyKind(t *testing.T) {
 			const question = "第二个链接需要登录，请提供可公开访问的版本。"
 			fixture := &responsesFixture{t: t, responses: []fixtureResponse{
 				responseTool("create_task", createTaskArgs{Title: "第一个页面", Goal: "Read https://example.com/one"}, "first"),
-				responseTool("ask_user", askUserArgs{Question: question}, "question"),
+				responseTool("set_user_questions", setUserQuestionsArgs{Questions: &[]string{question}}, "question"),
 				policyResponse("已收到，稍后回复。", kind),
 			}}
 			r.Think = newMainAgent(t, fixture, s).Think

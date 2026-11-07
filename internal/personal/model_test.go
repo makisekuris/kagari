@@ -111,7 +111,7 @@ func assertStrictSchema(t *testing.T, request map[string]any, name string) map[s
 	return schema
 }
 
-func assertPersonalToolMode(t *testing.T, request map[string]any) {
+func assertPersonalToolMode(t *testing.T, request map[string]any, eventKind EventKind) {
 	t.Helper()
 	text, _ := request["text"].(map[string]any)
 	format, _ := text["format"].(map[string]any)
@@ -129,14 +129,20 @@ func assertPersonalToolMode(t *testing.T, request map[string]any) {
 		names[name] = true
 	}
 	for _, name := range []string{
-		"create_task", "list_tasks", "get_task", "update_task", "cancel_task", "continue_task", "settle_task", "get_run", "list_runs",
+		"create_task", "list_tasks", "get_task", "update_task", "cancel_task", "continue_task", "get_run", "list_runs",
 		"memory_search", "memory_get", "memory_put", "memory_forget", "memory_history", "read_attachment", "write_attachment",
 		"create_schedule", "list_schedules", "get_schedule", "update_schedule", "cancel_schedule",
-		"propose_schedule_context_update", "resolve_schedule_context_update", "add_task_input",
+		"propose_schedule_context_update", "resolve_schedule_context_update", "add_task_input", "set_user_questions",
 	} {
 		if !names[name] {
 			t.Errorf("personal tool loop is missing %q", name)
 		}
+	}
+	if names["settle_task"] != (eventKind == EventTask) {
+		t.Fatalf("settle_task exposure for %s event = %t", eventKind, names["settle_task"])
+	}
+	if eventKind != EventTask {
+		return
 	}
 	for _, raw := range tools {
 		definition, _ := raw.(map[string]any)
@@ -345,7 +351,7 @@ func TestThinkContinuesOnlyCallbackTaskAndCanBeSilent(t *testing.T) {
 		t.Fatalf("continuation calls=%+v", repo.continued)
 	}
 	for _, request := range fixture.requests {
-		assertPersonalToolMode(t, request)
+		assertPersonalToolMode(t, request, EventTask)
 	}
 	if inputText := requestInput(fixture.requests[0]); !strings.Contains(inputText, "Compare two documented approaches") || !strings.Contains(inputText, "One source found") {
 		t.Fatalf("callback lacked task goal or run result: %s", inputText)
@@ -369,6 +375,7 @@ func TestThinkSettlesItsOwnTaskAndNotifiesOnCompletion(t *testing.T) {
 	if output.Silent || output.TaskID != 7 || len(repo.settled) != 1 || repo.settled[0].status != TaskCompleted {
 		t.Fatalf("settlement output=%+v settled=%+v", output, repo.settled)
 	}
+	assertPersonalToolMode(t, fixture.requests[0], EventTask)
 }
 
 func TestThinkCallbackCannotMutateOtherTasksOrMemory(t *testing.T) {
@@ -434,7 +441,7 @@ func TestThinkDirectUserQueuesTaskAndCommitsEvidenceBackedMemory(t *testing.T) {
 		t.Fatalf("memory tool did not return its committed result: %s", toolResults)
 	}
 	for _, request := range fixture.requests {
-		assertPersonalToolMode(t, request)
+		assertPersonalToolMode(t, request, EventUser)
 	}
 }
 

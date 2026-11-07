@@ -248,5 +248,13 @@ func taskActionTarget(title string) string {
 }
 
 func taskActionToolError(actionID string, err error) personalToolReply {
-	return personalToolReply{ActionID: actionID, OK: false, Error: err.Error()}
+	return personalToolReply{ActionID: actionID, OK: false, Error: taskActionErrorMessage(actionID, err)}
+}
+
+func taskActionErrorMessage(actionID string, err error) string {
+	message := err.Error()
+	if actionID == "" {
+		return message
+	}
+	return fmt.Sprintf("%s; if correcting this failed action, retry with the same action_id %q. Do not omit or replace it; a different ID is a separate action and does not clear this failure.", message, actionID)
 }

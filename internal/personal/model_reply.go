@@ -5,11 +5,12 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
+	"kagari/internal/channel"
 	"kagari/internal/logging"
 )
 
 // Tool outcomes and explicit questions take precedence over the model's reply label.
-func (a *MainAgent) selectReply(ctx context.Context, input TurnInput, tools *personalTools, raw string, modelErr error) (personalTurnResponse, error) {
+func (a *MainAgent) selectReply(ctx context.Context, input TurnInput, tools *personalTools, raw string, createdAttachments []channel.Attachment, modelErr error) (personalTurnResponse, error) {
 	required := tools.requiredTaskReply()
 	if modelErr != nil {
 		if required == "" {
@@ -38,7 +39,7 @@ func (a *MainAgent) selectReply(ctx context.Context, input TurnInput, tools *per
 	response, err := decodePersonalTurnResponse(raw)
 	if err != nil {
 		// Formatting gets one tool-free attempt; committed actions are never replayed.
-		response, err = a.formatTurn(ctx, raw)
+		response, err = a.formatTurn(ctx, raw, createdAttachments)
 	}
 	if required != "" {
 		if err != nil {

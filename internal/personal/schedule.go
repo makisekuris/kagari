@@ -19,9 +19,9 @@ const (
 )
 
 type SourceRequirement struct {
-	ID    string `json:"id"`
+	ID    string `json:"id" jsonschema:"description=Stable identifier used to match source assessment results; put web page URLs in the separate url field."`
 	Label string `json:"label"`
-	URL   string `json:"url,omitempty"`
+	URL   string `json:"url,omitempty" jsonschema:"description=HTTP(S) address for web sources; may be empty for non-web sources."`
 }
 
 type ScheduleInput struct {

@@ -14,6 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
 	"kagari/internal/agent"
 	"kagari/internal/config"
 	"kagari/internal/domain"
@@ -35,8 +39,7 @@ func TestLivePersonalMemoryLifecycle(t *testing.T) {
 
 	if !t.Run("automatic_stable_preference", func(t *testing.T) {
 		event := openUserEvent(t, s, 1, 1, "我平时一贯喜欢喝无糖绿茶。刚刚结束了一段散步。")
-		output := livePersonalThink(t, ctx, a, livePersonalInput(t, ctx, s, event))
-		finishEvent(t, s, event, output, nil)
+		finishEvent(t, s, event, TurnOutput{Text: "收到。"}, nil)
 		runtime.ReviewMemory = func(ctx context.Context, input MemoryReviewInput) (MemoryReview, error) {
 			review, err := a.ReviewMemory(ctx, input)
 			stableReview = review
@@ -45,10 +48,10 @@ func TestLivePersonalMemoryLifecycle(t *testing.T) {
 		livePersonalMemoryStep(t, ctx, runtime)
 		memories, err := s.Memories(ctx, "", 20)
 		if err != nil || len(stableReview.Changes) != 1 || len(memories) != 1 || !strings.Contains(memories[0].Value, "无糖绿茶") {
-			t.Fatalf("semantic FAIL: ordinary stable preference was not persisted as one memory (active=%d error=%s)", len(memories), logging.ErrorReason(err))
+			t.Fatalf("semantic FAIL: ordinary stable preference was not persisted as one memory (changes=%+v question=%q memories=%+v error=%s)", stableReview.Changes, stableReview.Question, memories, logging.ErrorReason(err))
 		}
 		original = memories[0]
-		t.Log("mechanism PASS: Think → CompleteEvent → memory worker → real SQLite; semantic PASS: automatic stable preference")
+		t.Log("mechanism PASS: CompleteEvent → background reviewer → real SQLite; semantic PASS: automatic stable preference")
 	}) {
 		return
 	}
@@ -77,6 +80,53 @@ func TestLivePersonalMemoryLifecycle(t *testing.T) {
 			t.Fatal("semantic FAIL: explicit correction did not update the original key exactly once")
 		}
 		t.Log("mechanism PASS: versioned SQLite update; semantic PASS: correction reused original memory key")
+	})
+}
+
+func TestLivePersonalMemoryScope(t *testing.T) {
+	a := livePersonalAgent(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	runReview := func(t *testing.T, updateID, messageID int64, text string) (MemoryReview, []Memory, []Memory) {
+		t.Helper()
+		s := testStore(t, filepath.Join(t.TempDir(), "memory-scope.db"), 10*time.Minute)
+		a.Store = s
+		event := openUserEvent(t, s, updateID, messageID, text)
+		finishEvent(t, s, event, TurnOutput{Text: "收到。"}, nil)
+		var review MemoryReview
+		runtime := &Runtime{Store: s, ReviewMemory: func(ctx context.Context, input MemoryReviewInput) (MemoryReview, error) {
+			var err error
+			review, err = a.ReviewMemory(ctx, input)
+			return review, err
+		}}
+		livePersonalMemoryStep(t, ctx, runtime)
+		active, err := s.Memories(ctx, "", 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		history, err := s.MemoryHistory(ctx, "", 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return review, active, history
+	}
+
+	t.Run("task_local_schedule_conditions_are_not_preferences", func(t *testing.T) {
+		const event = "请登记临时测试计划「E2E 每日练习」：每天 09:00 UTC 生成一道 Go 练习题，每次独立生成，不持续检查新信息，不需要固定来源，不要立即执行。"
+		review, active, history := runReview(t, 13, 13, event)
+		if len(review.Changes) != 0 || len(active) != 0 || len(history) != 0 {
+			t.Fatalf("semantic FAIL: plan-local execution conditions became durable preferences: review=%+v active_memories=%+v memory_history=%+v", review, active, history)
+		}
+		t.Log("mechanism PASS: real memory review completed into isolated SQLite; semantic PASS: no plan-local conditions were persisted as preferences")
+	})
+
+	t.Run("explicit_cross_plan_preference_is_saved", func(t *testing.T) {
+		const event = "以后我的所有定时计划都默认使用 UTC 时区，这是我的长期偏好。"
+		review, active, history := runReview(t, 14, 14, event)
+		if len(review.Changes) != 1 || len(active) != 1 || len(history) != 1 || !strings.Contains(strings.ToLower(active[0].Value), "utc") {
+			t.Fatalf("semantic FAIL: explicit long-term UTC preference was not saved as one stable memory: review=%+v active_memories=%+v memory_history=%+v", review, active, history)
+		}
+		t.Logf("mechanism PASS: explicit preference written to isolated SQLite; semantic PASS: UTC preference retained under key %q", active[0].Key)
 	})
 }
 
@@ -270,7 +320,7 @@ func TestLivePersonalReadingStage(t *testing.T) {
 func livePersonalAgent(t *testing.T) *MainAgent {
 	t.Helper()
 	engine := livePersonalEngine(t)
-	return &MainAgent{Model: engine.Model, Profile: engine.Profile, MaxIterations: 5, Timeout: 2 * time.Minute}
+	return &MainAgent{Model: engine.Model, Profile: engine.Profile, MaxIterations: engine.Config.Agent.MaxIterations, Timeout: 2 * time.Minute}
 }
 
 func livePersonalEngine(t *testing.T) *agent.Engine {
@@ -298,10 +348,9 @@ func livePersonalEngine(t *testing.T) *agent.Engine {
 	if err := os.WriteFile(cfg.ProfilePath, nil, 0600); err != nil {
 		t.Fatal("cannot create isolated empty profile")
 	}
-	cfg.Model.Timeout = 45 * time.Second
-	cfg.Model.MaxOutputTokens = 2500
 	cfg.Agent.Timeout = 2 * time.Minute
 	cfg.Agent.Streaming = false
+	t.Logf("live model config max_output_tokens=%d model_timeout=%s", cfg.Model.MaxOutputTokens, cfg.Model.Timeout)
 	transport := http.DefaultTransport
 	http.DefaultTransport = &livePersonalTransport{next: transport, t: t}
 	t.Cleanup(func() { http.DefaultTransport = transport })
@@ -315,12 +364,22 @@ func livePersonalEngine(t *testing.T) *agent.Engine {
 func livePersonalThink(t *testing.T, ctx context.Context, a *MainAgent, input TurnInput) TurnOutput {
 	t.Helper()
 	started := time.Now()
+	core, observed := observer.New(zapcore.InfoLevel)
+	logger := logging.FromContext(ctx).WithOptions(zap.WrapCore(func(existing zapcore.Core) zapcore.Core {
+		return zapcore.NewTee(existing, core)
+	}))
+	ctx = logging.WithLogger(ctx, logger)
 	output, err := a.Think(ctx, input)
-	t.Logf("real-model Think duration=%s success=%v event_kind=%s event_id=%d task_id=%d memories=%d", time.Since(started).Round(time.Millisecond), err == nil, input.Event.Kind, input.Event.ID, input.Event.TaskID, len(input.Memories))
+	t.Logf("real-model Think duration=%s success=%v max_iterations=%d event_kind=%s event_id=%d task_id=%d memories=%d", time.Since(started).Round(time.Millisecond), err == nil, a.MaxIterations, input.Event.Kind, input.Event.ID, input.Event.TaskID, len(input.Memories))
 	if err == nil {
 		t.Logf("fictional evaluation response=%q", output.Text)
 	}
 	if err != nil {
+		for _, entry := range observed.FilterMessage("tool.finished").All() {
+			fields := entry.ContextMap()
+			payload, _ := json.Marshal(fields["payload"])
+			t.Logf("fictional Think tool=%v outcome=%v input/output=%s", fields["tool_name"], fields["outcome"], payload)
+		}
 		reason := logging.ErrorReason(err)
 		if strings.Contains(err.Error(), "personal response") || strings.Contains(err.Error(), "model returned blank") {
 			reason = err.Error()

@@ -32,7 +32,7 @@ func (p *personalTools) buildScheduleSuggestionTools() ([]tool.BaseTool, error) 
 		if err != nil {
 			return suggestionToolReply{Error: err.Error()}, nil
 		}
-		p.addScheduleID(s.ScheduleID)
+		p.addScheduleID(s.ScheduleID, true)
 		return suggestionToolReply{OK: true, Replayed: replayed, Suggestion: &s}, nil
 	})
 	if err != nil {
@@ -58,7 +58,7 @@ func (p *personalTools) buildScheduleSuggestionTools() ([]tool.BaseTool, error) 
 		if err != nil {
 			return suggestionToolReply{Error: err.Error()}, nil
 		}
-		p.addScheduleID(r.Suggestion.ScheduleID)
+		p.addScheduleID(r.Suggestion.ScheduleID, true)
 		return suggestionToolReply{OK: true, Replayed: replayed, Resolution: &r}, nil
 	})
 	if err != nil {

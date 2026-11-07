@@ -223,6 +223,10 @@ func validateScheduleDefinition(title, goal, contextText string, mode WindowMode
 			runeLen(source.Label) > 200 || runeLen(source.URL) > 2048 || seen[source.ID] {
 			return errors.New("personal: schedule sources require unique IDs (128 characters), labels (200 characters), and URLs (2048 characters)")
 		}
+		id := strings.ToLower(strings.TrimSpace(source.ID))
+		if strings.TrimSpace(source.URL) == "" && (strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://")) {
+			return errors.New("personal: HTTP(S) source URLs must be supplied in url, not only in id")
+		}
 		seen[source.ID] = true
 	}
 	return nil

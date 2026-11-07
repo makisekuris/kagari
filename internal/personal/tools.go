@@ -27,7 +27,7 @@ type personalToolReply struct {
 }
 
 type createTaskArgs struct {
-	ActionID     string   `json:"action_id,omitempty"`
+	ActionID     string   `json:"action_id,omitempty" jsonschema:"description=Omit for a new operation. For corrections or retries of a failed operation reuse the returned action_id. Do not omit or change it; a different ID is a separate action and does not resolve the failure."`
 	SourceRunIDs []int64  `json:"source_run_ids,omitempty"`
 	MemoryRefs   []string `json:"memory_refs,omitempty"`
 	Title        string   `json:"title"`
@@ -41,7 +41,7 @@ type taskArgs struct {
 }
 
 type reviseTaskArgs struct {
-	ActionID         string   `json:"action_id,omitempty"`
+	ActionID         string   `json:"action_id,omitempty" jsonschema:"description=Omit for a new operation. For corrections or retries of a failed operation reuse the returned action_id. Do not omit or change it; a different ID is a separate action and does not resolve the failure."`
 	SourceRunIDs     []int64  `json:"source_run_ids,omitempty"`
 	MemoryRefs       []string `json:"memory_refs,omitempty"`
 	TaskID           int64    `json:"task_id"`
@@ -57,7 +57,7 @@ type cancelTaskArgs struct {
 }
 
 type continueTaskArgs struct {
-	ActionID         string `json:"action_id,omitempty"`
+	ActionID         string `json:"action_id,omitempty" jsonschema:"description=Omit for a new operation. For corrections or retries of a failed operation reuse the returned action_id. Do not omit or change it; a different ID is a separate action and does not resolve the failure."`
 	TaskID           int64  `json:"task_id"`
 	ExpectedRevision int64  `json:"expected_revision"`
 	Step             string `json:"step"`
@@ -69,7 +69,7 @@ type settleTaskArgs struct {
 	TaskID           int64            `json:"task_id"`
 	ExpectedRevision int64            `json:"expected_revision"`
 	Status           TaskStatus       `json:"status"`
-	Summary          string           `json:"summary"`
+	Summary          string           `json:"summary" jsonschema:"description=The task closing message sent directly to the user. Write plain text with direct source URLs; do not use Markdown headings or bold or link syntax. Do not claim internal stage findings were already reported unless the chat history contains that report."`
 }
 
 type runArgs struct {
@@ -108,6 +108,7 @@ type memoryHistoryArgs struct {
 type personalTools struct {
 	timezone         string
 	scheduleIDs      map[int64]struct{}
+	scheduleChanged  bool
 	store            Repository
 	log              *zap.Logger
 	input            TurnInput
@@ -120,13 +121,20 @@ type personalTools struct {
 	nextTaskActionID uint64
 }
 
-func (p *personalTools) addScheduleID(id int64) {
-	if id > 0 {
-		if p.scheduleIDs == nil {
-			p.scheduleIDs = make(map[int64]struct{})
-		}
-		p.scheduleIDs[id] = struct{}{}
+func (p *personalTools) addScheduleID(id int64, changed bool) {
+	if id <= 0 {
+		return
 	}
+	if changed && !p.scheduleChanged {
+		p.scheduleIDs = nil
+		p.scheduleChanged = true
+	} else if !changed && p.scheduleChanged {
+		return
+	}
+	if p.scheduleIDs == nil {
+		p.scheduleIDs = make(map[int64]struct{})
+	}
+	p.scheduleIDs[id] = struct{}{}
 }
 
 func (p *personalTools) scheduleID() int64 {
@@ -351,7 +359,7 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	continueTask, err := utils.InferTool("continue_task", "在原目标内排队继续任务。任务回调只能继续自己的任务且不能扩展预算；直接用户明确授权后才可将 extend_budget 设为 true。收到失败结果后修正参数并沿用返回的 action_id 重试。", func(ctx context.Context, a continueTaskArgs) (personalToolReply, error) {
+	continueTask, err := utils.InferTool("continue_task", "仅在任务状态允许时于原目标内排队下一阶段。先检查 task.status：queued 或 running 已有阶段，不要重复继续；completed 不能继续。waiting_budget 不能从任务回调恢复。extend_budget=true 仅在直接用户明确授权后才能设置；任务回调只能继续自己的任务且不能扩展预算。收到失败结果后修正参数并沿用返回的 action_id 重试。", func(ctx context.Context, a continueTaskArgs) (personalToolReply, error) {
 		var attempt taskActionAttempt
 		tracking := false
 		replyActionID := a.ActionID
@@ -580,5 +588,10 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 	scheduled = append(scheduled, inputs...)
-	return append([]tool.BaseTool{createTask, listTasks, getTask, updateTask, cancelTask, continueTask, settleTask, getRun, listRuns, memorySearch, memoryGet, memoryPut, memoryForget, memoryHistory}, scheduled...), nil
+	taskTools := []tool.BaseTool{createTask, listTasks, getTask, updateTask, cancelTask, continueTask}
+	if p.event.Kind == EventTask {
+		taskTools = append(taskTools, settleTask)
+	}
+	taskTools = append(taskTools, getRun, listRuns, memorySearch, memoryGet, memoryPut, memoryForget, memoryHistory)
+	return append(taskTools, scheduled...), nil
 }

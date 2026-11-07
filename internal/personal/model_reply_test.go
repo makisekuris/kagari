@@ -78,7 +78,7 @@ func TestThinkReportsExplicitMutationFailure(t *testing.T) {
 }
 
 func TestThinkSuppressesBareLinkQueueReceiptUnlessActionNeedsReply(t *testing.T) {
-	for _, outcome := range []string{"queued", "failed_explicit_action", "denied_callback_action", "recovered_input_error"} {
+	for _, outcome := range []string{"queued", "failed_explicit_action", "recovered_input_error"} {
 		t.Run(outcome, func(t *testing.T) {
 			failed := outcome == "failed_explicit_action"
 			ctx := context.Background()
@@ -91,8 +91,6 @@ func TestThinkSuppressesBareLinkQueueReceiptUnlessActionNeedsReply(t *testing.T)
 				responses = append(responses,
 					responseTool("add_task_input", addTaskInputArgs{ActionID: "add-material", TaskID: 1, ExpectedRevision: 1}, "invalid-input"),
 					responseTool("add_task_input", addTaskInputArgs{ActionID: "add-material", TaskID: 1, ExpectedRevision: 1, InputEventIDs: []int64{event.ID}}, "corrected-input"))
-			} else if outcome == "denied_callback_action" {
-				responses = append(responses, responseTool("settle_task", settleTaskArgs{TaskID: 1, ExpectedRevision: 1, Status: TaskWaitingInput, Summary: "No run result exists yet."}, "premature-settle"))
 			}
 			responses = append(responses, responseText(`{"text":"已安排阅读，稍后回复。","reply_kind":"receipt","attachments":[]}`))
 			output, err := newMainAgent(t, &responsesFixture{t: t, responses: responses}, s).Think(ctx, livePersonalInput(t, ctx, s, event))
@@ -119,7 +117,7 @@ func TestThinkPreservesNecessaryReplyAfterPartialQueue(t *testing.T) {
 				responses = append(responses, responseTool("create_task", createTaskArgs{Title: "Second page", Context: "https://example.org/two"}, "second"))
 				answer = "第二个链接的任务未能创建，需要补充目标；第一个链接仍会继续阅读。"
 			} else {
-				responses = append(responses, responseTool("ask_user", askUserArgs{Question: answer}, "question"))
+				responses = append(responses, responseTool("set_user_questions", setUserQuestionsArgs{Questions: &[]string{answer}}, "question"))
 			}
 			responses = append(responses, responseText(`{"text":"`+answer+`","reply_kind":"content","attachments":[]}`))
 			output, err := newMainAgent(t, &responsesFixture{t: t, responses: responses}, s).Think(ctx, livePersonalInput(t, ctx, s, event))

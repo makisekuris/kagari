@@ -110,7 +110,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 	workspaceDirectory := filepath.Join(cfg.Storage.Path+".workspaces", storeID)
 	main.WorkspaceDirectory = workspaceDirectory
 	runtime := &personal.Runtime{
-		Store: s, Think: main.Think, Execute: personal.TaskExecutor(engine, s, workspaceDirectory), ReviewMemory: main.ReviewMemory,
+		Store: s, Think: main.Think, Execute: personal.TaskExecutor(engine, s, workspaceDirectory), ReviewMemory: main.ReviewMemory, PresentReply: main.PresentReply,
 		TaskConcurrency: cfg.Personal.TaskConcurrency, Poll: client.Poll, Log: log,
 		Prepare: channel.PrepareText, Send: client.Send, Ready: client.Ready,
 	}

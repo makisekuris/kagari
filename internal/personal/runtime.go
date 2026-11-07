@@ -18,6 +18,7 @@ type Runtime struct {
 	Think           ThinkFunc
 	Execute         ExecuteFunc
 	ReviewMemory    ReviewMemoryFunc
+	PresentReply    func(context.Context, Event, string) (string, error)
 	TaskConcurrency int
 	Poll            func(context.Context) error
 	Ready           func(context.Context) error
@@ -31,8 +32,8 @@ type Runtime struct {
 
 // Run requires the caller to hold the instance lock before startup recovery.
 func (r *Runtime) Run(ctx context.Context) error {
-	if r.Store == nil || r.Think == nil || r.Execute == nil || r.ReviewMemory == nil || r.Prepare == nil || r.Send == nil {
-		return errors.New("personal runtime requires store, thinker, task executor, memory reviewer and delivery")
+	if r.Store == nil || r.Think == nil || r.Execute == nil || r.ReviewMemory == nil || r.PresentReply == nil || r.Prepare == nil || r.Send == nil {
+		return errors.New("personal runtime requires store, thinker, task executor, memory reviewer, reply presenter and delivery")
 	}
 	if r.TaskConcurrency == 0 {
 		r.TaskConcurrency = 4

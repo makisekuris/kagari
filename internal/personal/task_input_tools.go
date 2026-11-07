@@ -26,7 +26,7 @@ type TaskInputReference struct {
 }
 
 type addTaskInputArgs struct {
-	ActionID         string  `json:"action_id,omitempty"`
+	ActionID         string  `json:"action_id,omitempty" jsonschema:"description=Omit for a new operation. For corrections or retries of a failed operation reuse the returned action_id. Do not omit or change it; a different ID is a separate action and does not resolve the failure."`
 	TaskID           int64   `json:"task_id"`
 	ExpectedRevision int64   `json:"expected_revision"`
 	InputEventIDs    []int64 `json:"input_event_ids"`
@@ -178,7 +178,7 @@ func boundedTaskInputError(err error) string {
 
 // inputTools exposes only explicit same-task input addition.
 func (p *personalTools) inputTools() ([]tool.BaseTool, error) {
-	addInput, err := utils.InferTool("add_task_input", "为同一任务补充当前消息和用户刚发送的纯链接消息；只选择 PendingInputs 中相关链接，不创建新目标。收到失败结果后修正参数并沿用返回的 action_id 重试。", func(ctx context.Context, args addTaskInputArgs) (addTaskInputReply, error) {
+	addInput, err := utils.InferTool("add_task_input", "为同一尚未完成、也未取消的任务补充当前消息和用户刚发送的纯链接消息；只选择 PendingInputs 中相关链接，不创建新目标。检查返回的 task.status：queued 或 running 时不要调用 continue_task，等待现有阶段结束；其他可继续状态下，成功添加的材料需要安排后续阶段。收到失败结果后修正参数并沿用返回的 action_id 重试。", func(ctx context.Context, args addTaskInputArgs) (addTaskInputReply, error) {
 		if err := p.directUserMutation(); err != nil {
 			return addTaskInputToolErrorWithID(args.ActionID, err), nil
 		}
@@ -253,5 +253,5 @@ func (p *personalTools) inputTools() ([]tool.BaseTool, error) {
 }
 
 func addTaskInputToolErrorWithID(actionID string, err error) addTaskInputReply {
-	return addTaskInputReply{ActionID: actionID, OK: false, Error: err.Error()}
+	return addTaskInputReply{ActionID: actionID, OK: false, Error: taskActionErrorMessage(actionID, err)}
 }

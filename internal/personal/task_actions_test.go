@@ -60,6 +60,53 @@ func newTaskActionTools(t *testing.T, store Repository, event Event, input TurnI
 	return p, tools
 }
 
+func TestTaskActionIDSchemaExplainsRetryContractForEveryCaller(t *testing.T) {
+	store := testStore(t, ":memory:", time.Hour)
+	event := openUserEvent(t, store, 900, 1900, "Review this task")
+	_, tools := newTaskActionTools(t, store, event, TurnInput{})
+	wantNames := map[string]bool{"create_task": true, "update_task": true, "continue_task": true, "add_task_input": true}
+	wantDescription := ""
+	for _, candidate := range tools {
+		info, err := candidate.Info(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !wantNames[info.Name] {
+			continue
+		}
+		delete(wantNames, info.Name)
+		schema, err := info.ToJSONSchema()
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(schema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		description := decoded.Properties["action_id"].Description
+		if !strings.Contains(description, "Omit for a new operation") || !strings.Contains(description, "reuse the returned action_id") ||
+			!strings.Contains(description, "Do not omit or change it") || !strings.Contains(description, "does not resolve the failure") {
+			t.Errorf("%s action_id description=%q", info.Name, description)
+		}
+		if wantDescription == "" {
+			wantDescription = description
+		} else if description != wantDescription {
+			t.Errorf("%s action_id description differs from peers: %q; want %q", info.Name, description, wantDescription)
+		}
+	}
+	if len(wantNames) != 0 {
+		t.Fatalf("missing action tools: %v", wantNames)
+	}
+}
+
 type taskActionFaultRepository struct {
 	Repository
 	createTaskError    error
@@ -111,7 +158,8 @@ func TestTaskActionRetryWithSameIDCanCorrectArguments(t *testing.T) {
 	p, tools := newTaskActionTools(t, store, event, TurnInput{})
 
 	failed := invokeActionTool(t, tools, "create_task", createTaskArgs{ActionID: "create-report", Title: "Report", Goal: " "})
-	if failed.OK || failed.ActionID != "create-report" || len(p.unresolvedTaskActions()) != 1 {
+	if failed.OK || failed.ActionID != "create-report" || len(p.unresolvedTaskActions()) != 1 ||
+		!strings.Contains(failed.Error, `same action_id "create-report"`) || !strings.Contains(failed.Error, "different ID is a separate action") {
 		t.Fatalf("initial reply=%+v; failures=%+v", failed, p.unresolvedTaskActions())
 	}
 	succeeded := invokeActionTool(t, tools, "create_task", createTaskArgs{ActionID: failed.ActionID, Title: "Report", Goal: "Summarize the report"})
@@ -435,7 +483,7 @@ func TestAddTaskInputActionCanRetryWithCurrentEventID(t *testing.T) {
 	p, tools := newTaskActionTools(t, store, event, TurnInput{Tasks: []Task{task}})
 
 	failed, _ := invokeTaskInputTool(t, tools, addTaskInputArgs{ActionID: "add-current", TaskID: task.ID, ExpectedRevision: task.Revision})
-	if failed.OK || failed.ActionID != "add-current" || len(p.unresolvedTaskActions()) != 1 {
+	if failed.OK || failed.ActionID != "add-current" || len(p.unresolvedTaskActions()) != 1 || !strings.Contains(failed.Error, `same action_id "add-current"`) {
 		t.Fatalf("initial add input reply=%+v; failures=%+v", failed, p.unresolvedTaskActions())
 	}
 	succeeded, _ := invokeTaskInputTool(t, tools, addTaskInputArgs{
@@ -490,7 +538,8 @@ func TestAddTaskInputCoverageKeepsUnselectedInputsAndOtherTasks(t *testing.T) {
 		failed, _ := invokeTaskInputTool(t, tools, addTaskInputArgs{ActionID: "needs-input-three", TaskID: task.ID, ExpectedRevision: task.Revision, InputEventIDs: []int64{event.ID, inputThree}})
 		succeeded, _ := invokeTaskInputTool(t, tools, addTaskInputArgs{ActionID: "adds-input-two", TaskID: task.ID, ExpectedRevision: task.Revision, InputEventIDs: []int64{event.ID, inputTwo}})
 		failures := p.unresolvedTaskActions()
-		if failed.OK || !succeeded.OK || len(failures) != 1 || failures[0].ActionID != failed.ActionID {
+		if failed.OK || !succeeded.OK || len(failures) != 1 || failures[0].ActionID != failed.ActionID ||
+			!strings.Contains(p.requiredTaskReply(), "未能补充材料") {
 			t.Fatalf("failed/success replies=(%+v,%+v); failures=%+v", failed, succeeded, failures)
 		}
 	})
@@ -529,14 +578,26 @@ func TestContinueFailuresTrackOnlyDirectUserActions(t *testing.T) {
 
 	callback := Event{ID: 1908, Kind: EventTask, TaskID: task.ID}
 	callbackToolsOwner, callbackTools := newTaskActionTools(t, store, callback, TurnInput{Tasks: []Task{task}})
+	settlement := invokeActionTool(t, callbackTools, "settle_task", settleTaskArgs{TaskID: task.ID + 1, ExpectedRevision: task.Revision, Status: TaskCompleted, Summary: "Done"})
+	if settlement.OK || !strings.Contains(settlement.Error, "their own task") || len(callbackToolsOwner.unresolvedTaskActions()) != 0 || callbackToolsOwner.mustNotify {
+		t.Fatalf("cross-task settlement denial reply=%+v; failures=%+v mustNotify=%t", settlement, callbackToolsOwner.unresolvedTaskActions(), callbackToolsOwner.mustNotify)
+	}
 	denied := invokeActionTool(t, callbackTools, "continue_task", continueTaskArgs{ActionID: "callback-denied", TaskID: task.ID + 1, ExpectedRevision: task.Revision, Step: "Continue"})
 	if denied.OK || len(callbackToolsOwner.unresolvedTaskActions()) != 0 || callbackToolsOwner.mustNotify {
 		t.Fatalf("callback denial reply=%+v; failures=%+v mustNotify=%t", denied, callbackToolsOwner.unresolvedTaskActions(), callbackToolsOwner.mustNotify)
 	}
 
 	userToolsOwner, userTools := newTaskActionTools(t, store, userEvent, TurnInput{Tasks: []Task{task}})
-	settlement := invokeActionTool(t, userTools, "settle_task", settleTaskArgs{TaskID: task.ID, ExpectedRevision: task.Revision, Status: TaskCompleted, Summary: "Done"})
-	if settlement.OK || len(userToolsOwner.unresolvedTaskActions()) != 0 || userToolsOwner.mustNotify {
-		t.Fatalf("user settlement denial reply=%+v; failures=%+v mustNotify=%t", settlement, userToolsOwner.unresolvedTaskActions(), userToolsOwner.mustNotify)
+	for _, candidate := range userTools {
+		info, err := candidate.Info(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Name == "settle_task" {
+			t.Fatal("direct user tool list exposed callback-only settle_task")
+		}
+	}
+	if len(userToolsOwner.unresolvedTaskActions()) != 0 || userToolsOwner.mustNotify {
+		t.Fatalf("unavailable user settlement mutated reply state: failures=%+v mustNotify=%t", userToolsOwner.unresolvedTaskActions(), userToolsOwner.mustNotify)
 	}
 }

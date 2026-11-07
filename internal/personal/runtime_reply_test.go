@@ -215,6 +215,17 @@ func TestRuntimeTerminalTaskResultOverridesModelCommitment(t *testing.T) {
 			s := testStore(t, filepath.Join(t.TempDir(), "terminal.db"), time.Minute)
 			r := testRuntime(s)
 			var attachmentID string
+			var taskID int64
+			var presentedDraft string
+			presenterCalls := 0
+			r.PresentReply = func(_ context.Context, event Event, draft string) (string, error) {
+				if event.Kind != EventTask {
+					t.Fatalf("presenter received event kind %q", event.Kind)
+				}
+				presenterCalls++
+				presentedDraft = draft
+				return "整理后：\n" + draft, nil
+			}
 			if tc.status == TaskCompleted {
 				file, err := s.SaveAttachment(ctx, "receipt.txt", "text/plain", strings.NewReader("月费17元"))
 				if err != nil {
@@ -229,6 +240,7 @@ func TestRuntimeTerminalTaskResultOverridesModelCommitment(t *testing.T) {
 			r.Think = func(ctx context.Context, input TurnInput) (TurnOutput, error) {
 				if input.Event.Kind == EventUser {
 					task, _, err := s.CreateTask(ctx, input.Event.ID, "read", "价格核对", TaskInput{Goal: "Check the displayed price."})
+					taskID = task.ID
 					return TurnOutput{TaskID: task.ID, Silent: true}, err
 				}
 				task, err := s.Task(ctx, input.Event.TaskID)
@@ -261,6 +273,22 @@ func TestRuntimeTerminalTaskResultOverridesModelCommitment(t *testing.T) {
 			}
 			if strings.Contains(message.Text, "有结果再回复") {
 				t.Fatalf("model commitment replaced the saved result: %q", message.Text)
+			}
+			if presenterCalls != 1 || !strings.Contains(presentedDraft, tc.state) || !strings.Contains(presentedDraft, tc.want) || !strings.Contains(presentedDraft, "https://example.com/price") || strings.Contains(presentedDraft, "有结果再回复") {
+				t.Fatalf("presenter did not receive the committed terminal result first: calls=%d draft=%q", presenterCalls, presentedDraft)
+			}
+			history, err := s.History(ctx, message.EventID+1, 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var assistant *Message
+			for i := range history {
+				if history[i].EventID == message.EventID && history[i].Role == "assistant" {
+					assistant = &history[i]
+				}
+			}
+			if assistant == nil || assistant.Text != message.Text || assistant.TaskID != taskID {
+				t.Fatalf("presented delivery and history diverged: delivery=%+v history=%+v", message, assistant)
 			}
 			if tc.status == TaskCompleted {
 				if err := s.UpdateDelivery(ctx, message.ID, "sent", channel.Receipt{MessageID: "terminal-text"}, "", time.Time{}); err != nil {
@@ -336,9 +364,9 @@ func TestRuntimeTerminalScheduledTaskKeepsWindowAndSuggestion(t *testing.T) {
 		t.Fatalf("scheduled result delivery = %+v, %v", message, err)
 	}
 	for _, expected := range []string{
-		fmt.Sprintf("计划 #%d · Task #%d", schedule.ID, run.TaskID),
+		fmt.Sprintf("计划 #%d · 任务 #%d", schedule.ID, run.TaskID),
 		schedule.BaselineAt.Format(time.RFC3339),
-		"完整检查：false",
+		"检查结果：不完整",
 		"这次未能完成",
 		"无法确认完整区间",
 	} {

@@ -196,6 +196,7 @@ func (c *PersonalClient) inputForUpdate(ctx context.Context, update *models.Upda
 		text, entities = message.Caption, message.CaptionEntities
 	}
 	text = appendEntityURLs(text, entities)
+	text = preserveCodeEntities(text, entities)
 	attachments := make([]channel.Attachment, 0, 1)
 	if message.Document != nil {
 		attachment := c.receiveDocument(ctx, message.Document)

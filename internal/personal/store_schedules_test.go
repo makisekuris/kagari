@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -418,5 +419,65 @@ func TestScheduleValidationAndRequestKeyConflict(t *testing.T) {
 	}
 	if _, err := s.ScheduleOccurrences(ctx, created.ID, -1, 10); err == nil {
 		t.Fatal("negative occurrence cursor was accepted")
+	}
+}
+
+func TestScheduleRejectsWebURLInSourceIDWithoutWriting(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t, ":memory:", time.Minute)
+	event := openUserEvent(t, s, 1, 1101, "Create a schedule")
+	input := scheduleTestInput(WindowNone)
+	input.RequiredSources = []SourceRequirement{{ID: "HTTPS://status.example.invalid/baihua", Label: "Baihua status"}}
+	if _, _, err := s.CreateSchedule(ctx, event.ID, "bad-create", input, scheduleTestNow()); err == nil || !strings.Contains(err.Error(), "must be supplied in url, not only in id") {
+		t.Fatalf("CreateSchedule with URL-shaped ID error = %v", err)
+	}
+	var schedules, creates int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_schedules`).Scan(&schedules); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_requests WHERE event_id=? AND operation='create_schedule'`, event.ID).Scan(&creates); err != nil {
+		t.Fatal(err)
+	}
+	if schedules != 0 || creates != 0 {
+		t.Fatalf("rejected create changed storage: schedules=%d requests=%d", schedules, creates)
+	}
+
+	valid := scheduleTestInput(WindowNone)
+	schedule, replayed, err := s.CreateSchedule(ctx, event.ID, "valid-create", valid, scheduleTestNow())
+	if err != nil || replayed {
+		t.Fatalf("setup CreateSchedule = (%+v,%v,%v)", schedule, replayed, err)
+	}
+	badSources := []SourceRequirement{{ID: "https://status.example.invalid/baihua", Label: "Baihua status", URL: " "}}
+	if _, _, err := s.UpdateSchedule(ctx, event.ID, "bad-update", schedule.ID, schedule.Revision, SchedulePatch{RequiredSources: &badSources}, scheduleTestNow()); err == nil || !strings.Contains(err.Error(), "must be supplied in url, not only in id") {
+		t.Fatalf("UpdateSchedule with URL-shaped ID error = %v", err)
+	}
+	current, err := s.Schedule(ctx, schedule.ID)
+	if err != nil || current == nil || current.Revision != schedule.Revision || len(current.RequiredSources) != 1 || current.RequiredSources[0] != valid.RequiredSources[0] {
+		t.Fatalf("rejected update changed schedule: current=%+v error=%v", current, err)
+	}
+	var updates int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_requests WHERE event_id=? AND operation='update_schedule'`, event.ID).Scan(&updates); err != nil {
+		t.Fatal(err)
+	}
+	if updates != 0 {
+		t.Fatalf("rejected update wrote %d request rows", updates)
+	}
+}
+
+func TestScheduleAcceptsWebAndNonWebRequiredSources(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t, ":memory:", time.Minute)
+	for i, source := range []SourceRequirement{
+		{ID: "internal-feed", Label: "Internal feed"},
+		{ID: "status-page", Label: "Status page", URL: "https://status.example.invalid/baihua"},
+		{ID: "https://example.invalid/releases", Label: "Legacy release source", URL: "https://example.invalid/releases"},
+	} {
+		event := openUserEvent(t, s, int64(i+1), int64(i+1201), "Create a schedule")
+		input := scheduleTestInput(WindowNone)
+		input.RequiredSources = []SourceRequirement{source}
+		schedule, replayed, err := s.CreateSchedule(ctx, event.ID, fmt.Sprintf("valid-%d", i), input, scheduleTestNow())
+		if err != nil || replayed || len(schedule.RequiredSources) != 1 || schedule.RequiredSources[0] != source {
+			t.Fatalf("CreateSchedule with source %+v = (%+v,%v,%v)", source, schedule, replayed, err)
+		}
 	}
 }

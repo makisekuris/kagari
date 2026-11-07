@@ -18,6 +18,7 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"go.uber.org/zap"
 
+	"kagari/internal/channel"
 	"kagari/internal/logging"
 	"kagari/internal/textpage"
 )
@@ -78,7 +79,10 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 		return TurnOutput{}, err
 	}
 	registeredTools = append(registeredTools, replyTools...)
-	fileTools, err := attachmentTools(a.Store, nil, nil, nil)
+	var createdAttachments []channel.Attachment
+	fileTools, err := attachmentTools(a.Store, nil, func(file channel.Attachment) {
+		createdAttachments = append(createdAttachments, file)
+	}, nil)
 	if err != nil {
 		return TurnOutput{}, err
 	}
@@ -148,7 +152,7 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 	}
 	observer.Wait()
 	cancelModel()
-	response, err := a.selectReply(ctx, input, tools, output, err)
+	response, err := a.selectReply(ctx, input, tools, output, createdAttachments, err)
 	if err != nil {
 		return TurnOutput{}, err
 	}
@@ -178,7 +182,7 @@ func (a *MainAgent) Think(ctx context.Context, input TurnInput) (TurnOutput, err
 			taskID, scheduleID = 0, 0
 		}
 	}
-	return TurnOutput{ScheduleID: scheduleID, Text: response.Text, TaskID: taskID, Silent: !notify, Attachments: response.Attachments}, nil
+	return TurnOutput{ScheduleID: scheduleID, Text: response.Text, TaskID: taskID, Silent: !notify, Attachments: response.Attachments, replyKind: response.ReplyKind}, nil
 }
 
 func personalJSONOutputOption(name string, schema map[string]any) model.Option {

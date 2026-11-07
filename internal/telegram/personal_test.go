@@ -279,6 +279,89 @@ func TestUTF16SubstringUsesTelegramEntityOffsets(t *testing.T) {
 	}
 }
 
+func TestAppendEntityURLsUsesVisibleTextBoundaries(t *testing.T) {
+	prefix := "😀 请阅读 "
+	visible := "https://www.rfc-editor.org/rfc/rfc6761，比较示例域名的用途和限制。"
+	text := prefix + visible
+	entities := []models.MessageEntity{{
+		Type: models.MessageEntityTypeURL, Offset: len(utf16.Encode([]rune(prefix))),
+		Length: len(utf16.Encode([]rune(visible))),
+	}}
+	if got := appendEntityURLs(text, entities); got != text {
+		t.Fatalf("visible URL entity appended prose as a URL: %q", got)
+	}
+	hidden := "https://example.com/资料%EF%BC%8C说明"
+	entities = append(entities, models.MessageEntity{Type: models.MessageEntityTypeTextLink, Offset: 0, Length: 2, URL: hidden})
+	want := text + "\nhttps://example.com/%E8%B5%84%E6%96%99%EF%BC%8C%E8%AF%B4%E6%98%8E"
+	if got := appendEntityURLs(text, entities); got != want {
+		t.Fatalf("hidden link target changed: got %q, want %q", got, want)
+	}
+}
+
+func TestPersonalInputPreservesCodeEntitiesAndURLOffsets(t *testing.T) {
+	client := personalClient(t, &channelInboxFixture{}, newChannelFilesFixture(), roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("unexpected Telegram request: %s", req.URL)
+		return nil, errors.New("unexpected request")
+	}))
+
+	prefix := "😀 inline "
+	code := "**literal**"
+	middle := " before pre "
+	pre := "const marker = ```;"
+	urlLead := " reference "
+	url := "https://example.com/a"
+	text := prefix + code + middle + pre + urlLead + url
+	utf16Length := func(value string) int { return len(utf16.Encode([]rune(value))) }
+	entities := []models.MessageEntity{
+		{Type: models.MessageEntityTypeCode, Offset: utf16Length(prefix), Length: utf16Length(code)},
+		{Type: models.MessageEntityTypePre, Offset: utf16Length(prefix + code + middle), Length: utf16Length(pre)},
+		{Type: models.MessageEntityTypeURL, Offset: utf16Length(prefix + code + middle + pre + urlLead), Length: utf16Length(url)},
+	}
+	message := &models.Message{
+		ID: 55, Text: text, Entities: entities,
+		From: &models.User{ID: 7}, Chat: models.Chat{ID: 7, Type: models.ChatTypePrivate},
+	}
+
+	input, err := client.inputForUpdate(context.Background(), &models.Update{Message: message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input == nil {
+		t.Fatal("inputForUpdate() returned nil input")
+	}
+	want := prefix + "\n\n```\n" + code + "\n```\n\n" + middle + "\n\n````\n" + pre + "\n````\n\n" + urlLead + url
+	if input.Text != want {
+		t.Fatalf("input text = %q, want %q", input.Text, want)
+	}
+	if strings.Count(input.Text, url) != 1 {
+		t.Fatalf("URL occurrence count = %d, want 1: %q", strings.Count(input.Text, url), input.Text)
+	}
+}
+
+func TestPreserveCodeEntitiesKeepsTrailingLineEnding(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "LF", content: "line 1\n"},
+		{name: "CRLF", content: "line 1\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := "before " + tc.content + " after"
+			prefix := "before "
+			entity := models.MessageEntity{
+				Type:   models.MessageEntityTypePre,
+				Offset: len(utf16.Encode([]rune(prefix))), Length: len(utf16.Encode([]rune(tc.content))),
+			}
+			normalized := preserveCodeEntities(text, []models.MessageEntity{entity})
+			literals := channel.MarkdownCodeLiterals(normalized)
+			if len(literals) != 1 || literals[0] != tc.content {
+				t.Fatalf("code literals = %#v, want %#v; normalized input: %q", literals, []string{tc.content}, normalized)
+			}
+		})
+	}
+}
+
 func TestRetryAfterPreservesLongDelays(t *testing.T) {
 	if got := retryAfter(3601); got != 3601*time.Second {
 		t.Fatalf("retryAfter(3601) = %s, want %s", got, 3601*time.Second)

@@ -84,7 +84,7 @@ func TestScheduledAttachmentFallbackKeepsAttributionAndWindow(t *testing.T) {
 	if err != nil || delivery == nil {
 		t.Fatalf("fallback delivery=%+v %v", delivery, err)
 	}
-	for _, want := range []string{fmt.Sprintf("计划 #%d · Task #%d", p.ID, run.TaskID), p.BaselineAt.Format(time.RFC3339), started.Format(time.RFC3339), "完整检查：false", "附件已删除或不可用"} {
+	for _, want := range []string{fmt.Sprintf("计划 #%d · 任务 #%d", p.ID, run.TaskID), p.BaselineAt.Format(time.RFC3339), started.Format(time.RFC3339), "检查结果：不完整", "附件已删除或不可用"} {
 		if !strings.Contains(delivery.Text, want) {
 			t.Fatalf("fallback lost %q: %q", want, delivery.Text)
 		}
@@ -187,7 +187,7 @@ func TestRevisedScheduledTaskLabelsItsWindowAsHistorical(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT text FROM personal_outbox WHERE event_id=? ORDER BY part LIMIT 1`, callback.ID).Scan(&text); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text, "原检查区间") || !strings.Contains(text, "不计入计划检查进度") || strings.Contains(text, "完整检查：true") {
+	if !strings.Contains(text, "原检查区间") || !strings.Contains(text, "不计入计划检查进度") || strings.Contains(text, "检查结果：完整") {
 		t.Fatalf("revised task reported historical credit as its own: %q", text)
 	}
 }

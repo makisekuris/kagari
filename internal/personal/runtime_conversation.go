@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"kagari/internal/channel"
 	"kagari/internal/logging"
+	"kagari/internal/reader"
 
 	"go.uber.org/zap"
 )
@@ -190,29 +192,84 @@ func (r *Runtime) recoverTurn(ctx context.Context, event Event, task *Task) erro
 }
 
 func (r *Runtime) publish(ctx context.Context, event Event, output TurnOutput) error {
+	if output.Silent {
+		return r.Store.CompleteEvent(ctx, event.ID, TurnOutput{TaskID: output.TaskID, ScheduleID: output.ScheduleID, Silent: true}, nil)
+	}
+	if output.Text != "" {
+		skipPresentation := false
+		if event.Kind == EventUser && output.replyKind == replyReceipt {
+			deferred, err := r.Store.CanDeferReply(ctx, event.ID)
+			if err != nil {
+				return err
+			}
+			skipPresentation = deferred
+		}
+		if !skipPresentation {
+			draft := output.Text
+			presented, err := r.PresentReply(ctx, event, draft)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if err == nil && strings.TrimSpace(presented) == "" {
+				err = errors.New("reply presenter returned blank text")
+			}
+			if err == nil {
+				draftURLs := reader.ExtractURLs(draft)
+				presentedURLs := reader.ExtractURLs(presented)
+				if len(presentedURLs) != len(draftURLs) {
+					err = fmt.Errorf("reply presenter changed source URL set: draft has %d distinct URLs, presentation has %d", len(draftURLs), len(presentedURLs))
+				} else {
+					presentedURLSet := make(map[string]bool, len(presentedURLs))
+					for _, url := range presentedURLs {
+						presentedURLSet[url] = true
+					}
+					for _, url := range draftURLs {
+						if !presentedURLSet[url] {
+							err = fmt.Errorf("reply presenter omitted source URL %q", url)
+							break
+						}
+					}
+				}
+			}
+			if err != nil {
+				logging.FromContext(ctx).Warn("conversation.reply.presentation_failed", append(logging.ErrorFields(err), zap.Int64("event_id", event.ID))...)
+			} else {
+				output.Text = presented
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		}
+		var literals []string
+		if event.Kind == EventUser {
+			literals = channel.MarkdownCodeLiterals(event.Text)
+		}
+		output.Text = channel.PlainTextMarkdown(output.Text, literals...)
+	}
 	prefix := ""
-	if event.Kind == EventTask && event.TaskID > 0 && event.ScheduleID > 0 && !output.Silent {
+	if event.Kind == EventTask && event.TaskID > 0 && event.ScheduleID > 0 {
 		info, err := r.Store.ScheduleForTask(ctx, event.TaskID)
 		if err != nil {
 			return err
 		}
 		if info != nil {
-			label := fmt.Sprintf("计划 #%d · Task #%d", info.Schedule.ID, event.TaskID)
+			label := fmt.Sprintf("计划 #%d · 任务 #%d", info.Schedule.ID, event.TaskID)
 			if w := info.Occurrence.Window; w != nil {
 				if !info.Occurrence.CoverageEligible {
 					label += fmt.Sprintf("\n原检查区间 [%s, %s)，本次目标已修改，不计入计划检查进度", w.Start.Format(time.RFC3339), w.End.Format(time.RFC3339))
 				} else {
 					complete := info.Occurrence.CheckResult != nil && info.Occurrence.CheckResult.Complete && len(info.Occurrence.CheckResult.Limitations) == 0
-					label += fmt.Sprintf("\n检查区间 [%s, %s)，完整检查：%t", w.Start.Format(time.RFC3339), w.End.Format(time.RFC3339), complete)
+					completeness := "不完整"
+					if complete {
+						completeness = "完整"
+					}
+					label += fmt.Sprintf("\n检查区间 [%s, %s)，检查结果：%s", w.Start.Format(time.RFC3339), w.End.Format(time.RFC3339), completeness)
 				}
 			}
 			prefix = label + "\n\n"
 			output.Text = prefix + output.Text
 			output.ScheduleID = event.ScheduleID
 		}
-	}
-	if output.Silent {
-		return r.Store.CompleteEvent(ctx, event.ID, TurnOutput{TaskID: output.TaskID, ScheduleID: output.ScheduleID, Silent: true}, nil)
 	}
 	var chunks []string
 	if output.Text != "" {

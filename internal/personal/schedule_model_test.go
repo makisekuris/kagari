@@ -87,12 +87,86 @@ func TestMainAgentScheduleReplyDoesNotInheritAnUnrelatedTask(t *testing.T) {
 				t.Fatalf("persisted association=%d/%d %v", taskID, scheduleID, err)
 			}
 			var text string
-			if err := s.db.QueryRow(`SELECT text FROM personal_outbox WHERE event_id=? ORDER BY part LIMIT 1`, event.ID).Scan(&text); err != nil || strings.Contains(text, "Task #") {
+			if err := s.db.QueryRow(`SELECT text FROM personal_outbox WHERE event_id=? ORDER BY part LIMIT 1`, event.ID).Scan(&text); err != nil || strings.Contains(text, "任务 #") {
 				t.Fatalf("user reply inherited old report prefix: %q %v", text, err)
 			}
 			task, err := s.Task(ctx, run.TaskID)
 			if err != nil || task.Status != wantTaskState {
 				t.Fatalf("task operation lost: %+v %v", task, err)
+			}
+		})
+	}
+}
+
+func TestMainAgentScheduleMutationOwnsReplyAssociation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		steps []string
+	}{
+		{name: "read then create then read", steps: []string{"read", "create", "read"}},
+		{name: "create then read", steps: []string{"create", "read"}},
+		{name: "read then create", steps: []string{"read", "create"}},
+		{name: "multiple changed plans are ambiguous", steps: []string{"create", "create", "read"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := testStore(t, ":memory:", time.Hour)
+			oldEvent, oldSchedule := createScheduleForTest(t, store, 1, 101, "old-plan", ScheduleInput{
+				Title: "Old plan", Goal: "Review old plan", Cron: "0 * * * *", Timezone: "UTC",
+			}, scheduleTestNow())
+			completeScheduleUserEvent(t, store, oldEvent)
+
+			event := openUserEvent(t, store, 2, 102, "Register the requested plan")
+			newSchedule := ScheduleInput{Title: "New plan", Goal: "Review the new plan", Cron: "0 * * * *", Timezone: "UTC"}
+			var responses []fixtureResponse
+			created, read := 0, 0
+			for _, step := range tc.steps {
+				switch step {
+				case "read":
+					read++
+					callID := []string{"read-old-1", "read-old-2"}[read-1]
+					responses = append(responses, responseTool("get_schedule", getScheduleArgs{ScheduleID: oldSchedule.ID}, callID))
+				case "create":
+					created++
+					input := newSchedule
+					if created == 2 {
+						input.Title = "Another new plan"
+					}
+					responses = append(responses, responseTool("create_schedule", input, []string{"create-new", "create-another"}[created-1]))
+				}
+			}
+			responses = append(responses, responseText(`{"text":"The plan request was handled.","reply_kind":"content","attachments":[]}`))
+			fixture := &responsesFixture{t: t, responses: responses}
+			main := newMainAgent(t, fixture, store)
+			output, err := main.Think(ctx, livePersonalInput(t, ctx, store, event))
+			wantSchedule := int64(0)
+			if created == 1 {
+				wantSchedule = oldSchedule.ID + 1
+			}
+			if err != nil || output.TaskID != 0 || output.ScheduleID != wantSchedule {
+				t.Fatalf("output=%+v err=%v, want schedule %d and no task", output, err, wantSchedule)
+			}
+			if fixture.index != len(fixture.responses) {
+				t.Fatalf("mock model consumed %d of %d responses", fixture.index, len(fixture.responses))
+			}
+
+			if err := testRuntime(store).publish(ctx, event, output); err != nil {
+				t.Fatal(err)
+			}
+			var eventScheduleID, historyScheduleID int64
+			if err := store.db.QueryRow(`SELECT COALESCE(schedule_id,0) FROM personal_events WHERE id=?`, event.ID).Scan(&eventScheduleID); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.db.QueryRow(`SELECT COALESCE(schedule_id,0) FROM personal_history WHERE event_id=? AND role='assistant'`, event.ID).Scan(&historyScheduleID); err != nil {
+				t.Fatal(err)
+			}
+			var outboxCount int
+			var outboxText string
+			if err := store.db.QueryRow(`SELECT COUNT(*),COALESCE(MAX(text),'') FROM personal_outbox WHERE event_id=?`, event.ID).Scan(&outboxCount, &outboxText); err != nil {
+				t.Fatal(err)
+			}
+			if eventScheduleID != wantSchedule || historyScheduleID != wantSchedule || outboxCount != 1 || outboxText != output.Text {
+				t.Fatalf("published association/event/history/outbox=%d/%d/%d/%q, want %d/%d/1/%q", eventScheduleID, historyScheduleID, outboxCount, outboxText, wantSchedule, wantSchedule, output.Text)
 			}
 		})
 	}

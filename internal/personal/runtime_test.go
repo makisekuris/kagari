@@ -41,11 +41,20 @@ func receive[T any](t *testing.T, ch <-chan T) T {
 
 func testRuntime(s Repository) *Runtime {
 	return &Runtime{Store: s, Log: zap.NewNop(), idleDelay: 5 * time.Millisecond,
-		Prepare: func(text string) ([]string, error) { return []string{text}, nil },
+		PresentReply: func(_ context.Context, _ Event, draft string) (string, error) { return draft, nil },
+		Prepare:      func(text string) ([]string, error) { return []string{text}, nil },
 		Send: func(context.Context, channel.Content) (channel.Receipt, error) {
 			return channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner"}, nil
 		},
 		ReviewMemory: func(context.Context, MemoryReviewInput) (MemoryReview, error) { return MemoryReview{}, nil },
+	}
+}
+
+func TestRuntimeRequiresReplyPresenter(t *testing.T) {
+	runtime := testRuntime(testStore(t, ":memory:", time.Minute))
+	runtime.PresentReply = nil
+	if err := runtime.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "reply presenter") {
+		t.Fatalf("Run without reply presenter = %v", err)
 	}
 }
 
@@ -264,7 +273,7 @@ func TestRuntimeContinuesSameTaskAndAccountsRecoveredRun(t *testing.T) {
 	}
 }
 
-func TestRuntimeBudgetStopsExecutionAndNotifiesWithoutModel(t *testing.T) {
+func TestRuntimeBudgetStopsExecutionAndNotifiesWithoutTaskPlanning(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, filepath.Join(t.TempDir(), "budget.db"), 25*time.Millisecond)
 	event := openUserEvent(t, s, 1, 1, "long task")
@@ -276,7 +285,7 @@ func TestRuntimeBudgetStopsExecutionAndNotifiesWithoutModel(t *testing.T) {
 		return StageResult{Summary: "partial findings"}, ctx.Err()
 	}
 	r.Think = func(context.Context, TurnInput) (TurnOutput, error) {
-		t.Error("exhausted task called model")
+		t.Error("exhausted task called thinker")
 		return TurnOutput{}, nil
 	}
 	if _, err := r.task(ctx); err != nil {

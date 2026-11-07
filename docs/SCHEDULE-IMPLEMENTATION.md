@@ -308,7 +308,7 @@ Runtime.Run 在 Recover 后增加一个 schedule loop，复用现有默认 200ms
 
 增加 personal.timezone 及 KAGARI_PERSONAL_TIMEZONE，默认 Asia/Shanghai，配置加载时校验。默认时区由启动入口传到计划工具，Store 输入已经包含明确时区；保留 NewStore 现有默认预算参数。
 
-Event、Message、TurnInput/Output、工具归属集合、history、publish、附件替代回复、recoverTurn 都保留 ScheduleID。一个回合涉及多个计划时不强绑一个编号；模型不能通过最终输出自行伪造身份字段。
+Event、Message、TurnInput/Output、工具归属集合、history、publish、附件替代回复、recoverTurn 都保留 ScheduleID。本轮有成功的计划写操作（包括背景建议的记录与处理）时，回复关联使用这些操作涉及的计划，只读查询不改变关联候选；写操作涉及多个计划时不强绑一个编号。没有成功写操作时沿用查询与原事件的关联规则。模型不能通过最终输出自行伪造身份字段。
 
 Task 回调 ScheduleID 从 occurrence 得出，EventSchedule 不进入主模型或用户记忆写入分支。Runtime.context 只加载当前关联计划和建议；其他计划由工具查询，不把所有模板塞进每个回合。
 
