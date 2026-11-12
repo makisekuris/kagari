@@ -44,6 +44,7 @@ func assertPersonalToolMode(t *testing.T, request map[string]any, eventKind pers
 		"create_task", "list_tasks", "get_task", "update_task", "cancel_task", "continue_task", "get_run", "list_runs",
 		"memory_search", "memory_get", "memory_put", "memory_forget", "memory_history", "read_attachment", "write_attachment",
 		"create_schedule", "list_schedules", "get_schedule", "update_schedule", "cancel_schedule",
+		"list_deliveries", "get_delivery", "stop_delivery", "resume_task_delivery", "resend_delivery",
 		"propose_schedule_context_update", "resolve_schedule_context_update", "add_task_input", "set_user_questions",
 	} {
 		if !names[name] {

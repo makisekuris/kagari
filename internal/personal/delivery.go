@@ -28,6 +28,17 @@ type TaskSettlement struct {
 	Assessment *CheckAssessment `json:"check_assessment,omitempty"`
 }
 
+// SupplementalReply carries a separate answer from a turn that also committed
+// a control. It has its own scope; it never replaces the saved control payload.
+// Runtime prepares Chunks before Store completes the source event.
+type SupplementalReply struct {
+	Draft      DeliveryDraft   `json:"draft"`
+	TaskIDs    []int64         `json:"task_ids,omitempty"`
+	ScheduleID int64           `json:"schedule_id,omitempty"`
+	Purpose    DeliveryPurpose `json:"purpose"`
+	Chunks     []string        `json:"-"`
+}
+
 // DeliveryScope captures the task version when content was committed. RunID is
 // absent when the source is a direct user action without an execution result.
 type DeliveryScope struct {
@@ -56,6 +67,7 @@ type DeliveryIntent struct {
 	Scopes             []DeliveryScope     `json:"scopes"`
 	State              DeliveryIntentState `json:"state"`
 	Detail             string              `json:"detail,omitempty"`
+	PreparationError   string              `json:"preparation_error,omitempty"`
 	CreatedAt          time.Time           `json:"created_at"`
 }
 

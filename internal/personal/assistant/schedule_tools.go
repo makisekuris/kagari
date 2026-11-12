@@ -82,6 +82,7 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 			return scheduleToolError(err), nil
 		}
 		p.addScheduleID(schedule.ID, true)
+		p.addSupplementalSchedule(schedule.ID, personal.DeliveryControl)
 		return scheduleToolReply{OK: true, Replayed: replayed, Schedule: &schedule}, nil
 	})
 	if err != nil {
@@ -99,6 +100,10 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 		schedules, err := p.store.Schedules(ctx, args.IncludeCancelled, args.BeforeID, limit)
 		if err != nil {
 			return scheduleToolError(err), nil
+		}
+		p.recordSupplementalWork(personal.DeliveryControl)
+		for _, schedule := range schedules {
+			p.addSupplementalSchedule(schedule.ID, personal.DeliveryControl)
 		}
 		return scheduleToolReply{OK: true, Schedules: schedules}, nil
 	})
@@ -133,6 +138,7 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 			return scheduleToolError(err), nil
 		}
 		p.addScheduleID(schedule.ID, false)
+		p.addSupplementalSchedule(schedule.ID, personal.DeliveryControl)
 		return scheduleToolReply{OK: true, Schedule: schedule, Occurrences: occurrences, Suggestions: suggestions}, nil
 	})
 	if err != nil {
@@ -156,6 +162,7 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 			return scheduleToolError(err), nil
 		}
 		p.addScheduleID(schedule.ID, true)
+		p.addSupplementalSchedule(schedule.ID, personal.DeliveryControl)
 		return scheduleToolReply{OK: true, Replayed: replayed, Schedule: &schedule}, nil
 	})
 	if err != nil {
@@ -179,6 +186,7 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 			return scheduleToolError(err), nil
 		}
 		p.addScheduleID(schedule.ID, true)
+		p.addSupplementalSchedule(schedule.ID, personal.DeliveryControl)
 		return scheduleToolReply{OK: true, Replayed: replayed, Schedule: &schedule}, nil
 	})
 	if err != nil {

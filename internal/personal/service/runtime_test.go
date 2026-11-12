@@ -151,7 +151,7 @@ func TestRuntimeFourTasksLeaveConversationAndMemoryResponsive(t *testing.T) {
 		t.Fatal(got)
 	}
 	add(3, "cancel one")
-	if got := receive(t, sent); got != "one cancelled" {
+	if got := receive(t, sent); !strings.Contains(got, "取消任务「task 1」") {
 		t.Fatal(got)
 	}
 	if got := receive(t, started); got != 5 {

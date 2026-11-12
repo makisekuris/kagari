@@ -75,9 +75,9 @@ func TestQueueWaitingReplyDeliveryScopesAllLinkedTasks(t *testing.T) {
 	}
 }
 
-func TestPendingWaitDeletionRemovesDeliveryChildrenButSentWaitRemains(t *testing.T) {
-	for _, sent := range []bool{false, true} {
-		t.Run(map[bool]string{false: "pending", true: "sent"}[sent], func(t *testing.T) {
+func TestPendingWaitSuppressionPreservesDeliveryChildrenAndStartedWait(t *testing.T) {
+	for _, finalStatus := range []string{"pending", "sending", "sent", "uncertain"} {
+		t.Run(finalStatus, func(t *testing.T) {
 			ctx := context.Background()
 			s := testStore(t, ":memory:", time.Minute)
 			event := openUserEvent(t, s, 1, 1, "请研究")
@@ -93,7 +93,7 @@ func TestPendingWaitDeletionRemovesDeliveryChildrenButSentWaitRemains(t *testing
 			if err := s.db.QueryRowContext(ctx, `SELECT delivery_id,id FROM personal_outbox WHERE event_id=?`, event.ID).Scan(&deliveryID, &outboxID); err != nil {
 				t.Fatal(err)
 			}
-			if sent {
+			if finalStatus != "pending" {
 				if _, err := s.db.ExecContext(ctx, `UPDATE personal_outbox SET next_attempt_at=? WHERE id=?`, timestamp(time.Now().Add(-time.Second)), outboxID); err != nil {
 					t.Fatal(err)
 				}
@@ -101,9 +101,15 @@ func TestPendingWaitDeletionRemovesDeliveryChildrenButSentWaitRemains(t *testing
 				if err != nil || claimed == nil || claimed.ID != outboxID {
 					t.Fatalf("ClaimDelivery() = (%+v,%v)", claimed, err)
 				}
-				receipt := channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner", MessageID: "wait-receipt"}
-				if err := s.UpdateDelivery(ctx, outboxID, "sent", receipt, "", time.Time{}); err != nil {
-					t.Fatal(err)
+				if finalStatus == "sent" {
+					receipt := channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner", MessageID: "wait-receipt"}
+					if err := s.UpdateDelivery(ctx, outboxID, "sent", receipt, "", time.Time{}); err != nil {
+						t.Fatal(err)
+					}
+				} else if finalStatus == "uncertain" {
+					if err := s.UpdateDelivery(ctx, outboxID, "uncertain", channel.Receipt{}, "remote outcome unknown", time.Time{}); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			if _, err := s.db.ExecContext(ctx, `UPDATE personal_tasks SET status='cancelled' WHERE id=?`, task.ID); err != nil {
@@ -136,16 +142,19 @@ func TestPendingWaitDeletionRemovesDeliveryChildrenButSentWaitRemains(t *testing
 			if err := s.db.QueryRowContext(ctx, `SELECT wait_outbox_id,wait_history_id FROM personal_reply_groups WHERE id=?`, event.ID).Scan(&waitOutbox, &waitHistory); err != nil {
 				t.Fatal(err)
 			}
-			if sent {
-				var status string
-				if err := s.db.QueryRowContext(ctx, `SELECT status FROM personal_outbox WHERE id=?`, outboxID).Scan(&status); err != nil {
-					t.Fatal(err)
+			var status string
+			var state personal.DeliveryIntentState
+			var detail string
+			if err := s.db.QueryRowContext(ctx, `SELECT i.state,i.detail,d.status FROM personal_delivery_intents i
+				JOIN personal_outbox d ON d.delivery_id=i.id WHERE i.id=?`, deliveryID).Scan(&state, &detail, &status); err != nil {
+				t.Fatal(err)
+			}
+			if finalStatus != "pending" {
+				if intents != 1 || outbox != 1 || history != 1 || scopes != 1 || status != finalStatus || state != personal.DeliveryIntentRendered || !waitOutbox.Valid || !waitHistory.Valid {
+					t.Fatalf("started wait changed: intent/outbox/history/scopes=%d/%d/%d/%d state=%q status=%q pointers=%v/%v", intents, outbox, history, scopes, state, status, waitOutbox, waitHistory)
 				}
-				if intents != 1 || outbox != 1 || history != 1 || scopes != 1 || status != "sent" || !waitOutbox.Valid || !waitHistory.Valid {
-					t.Fatalf("sent wait changed: intent/outbox/history/scopes=%d/%d/%d/%d status=%q pointers=%v/%v", intents, outbox, history, scopes, status, waitOutbox, waitHistory)
-				}
-			} else if intents != 0 || outbox != 0 || history != 0 || scopes != 0 || waitOutbox.Valid || waitHistory.Valid {
-				t.Fatalf("pending wait was not removed: intent/outbox/history/scopes=%d/%d/%d/%d pointers=%v/%v", intents, outbox, history, scopes, waitOutbox, waitHistory)
+			} else if intents != 1 || outbox != 1 || history != 1 || scopes != 1 || status != "suppressed" || state != personal.DeliveryIntentSuppressed || !strings.Contains(detail, "reply_wait_superseded") || !waitOutbox.Valid || !waitHistory.Valid {
+				t.Fatalf("pending wait was not durably suppressed: intent/outbox/history/scopes=%d/%d/%d/%d state=%q status=%q detail=%q pointers=%v/%v", intents, outbox, history, scopes, state, status, detail, waitOutbox, waitHistory)
 			}
 		})
 	}

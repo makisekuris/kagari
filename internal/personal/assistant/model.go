@@ -44,9 +44,11 @@ type MainAgent struct {
 }
 
 type personalTurnResponse struct {
-	Text        string             `json:"text"`
-	ReplyKind   personal.ReplyKind `json:"reply_kind"`
-	Attachments []string           `json:"attachments"`
+	Text                    string                      `json:"text"`
+	ReplyKind               personal.ReplyKind          `json:"reply_kind"`
+	Attachments             []string                    `json:"attachments"`
+	SupplementalReply       *personal.SupplementalReply `json:"-"`
+	SupplementalReplyFailed bool                        `json:"-"`
 }
 
 func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (personal.TurnOutput, error) {
@@ -148,7 +150,20 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 	if err != nil {
 		return personal.TurnOutput{}, err
 	}
-	if tools.settledDelivery == nil {
+	if tools.persistedControl && response.SupplementalReply != nil {
+		files, err := agentctx.ResolveAttachments(ctx, a.Store, response.SupplementalReply.Draft.Attachments)
+		if err != nil {
+			logging.FromContext(ctx).Warn("conversation.reply.supplemental_attachment_failed", append(logging.ErrorFields(err), zap.Int64("event_id", input.Event.ID))...)
+			response.SupplementalReply = nil
+			response.SupplementalReplyFailed = true
+		} else {
+			attachments := make([]string, 0, len(files))
+			for _, file := range files {
+				attachments = append(attachments, file.ID)
+			}
+			response.SupplementalReply.Draft.Attachments = attachments
+		}
+	} else if tools.settledDelivery == nil && !tools.persistedControl {
 		files, err := agentctx.ResolveAttachments(ctx, a.Store, response.Attachments)
 		if err != nil {
 			return personal.TurnOutput{}, fmt.Errorf("reply attachment is unavailable: %w", err)
@@ -163,7 +178,11 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 		notify = true
 	}
 	taskID, scheduleID := tools.taskID(), tools.scheduleID()
-	if input.Event.Kind == personal.EventTask {
+	if tools.persistedControl {
+		// Saved controls own their own scopes. Supplemental task/schedule scopes
+		// are carried separately so they cannot be paired with a control target.
+		taskID, scheduleID = 0, 0
+	} else if input.Event.Kind == personal.EventTask {
 		taskID, scheduleID = input.Event.TaskID, input.Event.ScheduleID
 	} else if len(tools.scheduleIDs) > 1 {
 		taskID = 0
@@ -176,7 +195,26 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 			taskID, scheduleID = 0, 0
 		}
 	}
-	return personal.TurnOutput{ScheduleID: scheduleID, Text: response.Text, TaskID: taskID, Silent: !notify, Attachments: response.Attachments, ReplyKind: response.ReplyKind}, nil
+	requiredFeedback := ""
+	if tools.persistedControl && tools.settledDelivery == nil {
+		requiredFeedback = tools.requiredTaskReply()
+		if response.SupplementalReplyFailed {
+			const incompleteReply = "本轮其他查询或回复未能完成。"
+			if requiredFeedback != "" {
+				requiredFeedback += "\n\n"
+			}
+			requiredFeedback += incompleteReply
+		}
+	}
+	purpose := personal.DeliveryPurpose("")
+	if tools.deliveryQueried && !tools.taskResultCommitted && !tools.persistedControl && tools.settledDelivery == nil {
+		purpose = personal.DeliveryControl
+	}
+	taskIDs := tools.taskIDsSorted()
+	if len(taskIDs) > 1 {
+		taskID = 0
+	}
+	return personal.TurnOutput{ScheduleID: scheduleID, Text: response.Text, TaskID: taskID, TaskIDs: taskIDs, RequiredFeedback: requiredFeedback, SupplementalReply: response.SupplementalReply, Purpose: purpose, Silent: !notify, Attachments: response.Attachments, ReplyKind: response.ReplyKind}, nil
 }
 
 func personalJSONOutputOption(name string, schema map[string]any) model.Option {

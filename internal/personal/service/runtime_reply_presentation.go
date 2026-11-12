@@ -18,13 +18,18 @@ import (
 // renderReply only changes the presentation of an already selected payload.
 func (r *Runtime) renderReply(ctx context.Context, event personal.Event, output personal.TurnOutput) (personal.TurnOutput, []string, error) {
 	if output.Text != "" {
-		skipPresentation := false
+		// Control times and historical provenance are persisted facts. Rewording
+		// them could turn an old operation or result into a claim about now.
+		skipPresentation := output.Purpose == personal.DeliveryControl || output.Purpose == personal.DeliveryHistorical
 		if event.Kind == personal.EventUser && output.ReplyKind == personal.ReplyReceipt {
 			deferred, err := r.Store.CanDeferReply(ctx, event.ID)
 			if err != nil {
 				return output, nil, err
 			}
 			skipPresentation = deferred
+			if deferred && len(output.Attachments) == 0 {
+				output.Purpose = personal.DeliveryStatus
+			}
 		}
 		if !skipPresentation {
 			draft := output.Text

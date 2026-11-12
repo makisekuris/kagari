@@ -12,10 +12,11 @@ import (
 )
 
 func validatePreparedDeliveries(intents []personal.DeliveryIntent, prepared []personal.RenderedDelivery) (map[int64]personal.RenderedDelivery, error) {
-	if len(intents) != len(prepared) {
-		return nil, fmt.Errorf("personal: event has %d pending delivery intents but %d prepared deliveries", len(intents), len(prepared))
-	}
 	byID := make(map[int64]personal.RenderedDelivery, len(prepared))
+	known := make(map[int64]personal.DeliveryIntentState, len(intents))
+	for _, intent := range intents {
+		known[intent.ID] = intent.State
+	}
 	for _, render := range prepared {
 		if render.DeliveryID <= 0 {
 			return nil, errors.New("personal: prepared delivery requires a positive delivery ID")
@@ -23,11 +24,16 @@ func validatePreparedDeliveries(intents []personal.DeliveryIntent, prepared []pe
 		if _, exists := byID[render.DeliveryID]; exists {
 			return nil, fmt.Errorf("personal: duplicate prepared delivery %d", render.DeliveryID)
 		}
+		if _, exists := known[render.DeliveryID]; !exists {
+			return nil, fmt.Errorf("personal: prepared delivery %d is not saved for this event", render.DeliveryID)
+		}
 		byID[render.DeliveryID] = render
 	}
 	for _, intent := range intents {
-		if _, ok := byID[intent.ID]; !ok {
-			return nil, fmt.Errorf("personal: missing prepared delivery %d", intent.ID)
+		if intent.State == personal.DeliveryIntentPending {
+			if _, ok := byID[intent.ID]; !ok {
+				return nil, fmt.Errorf("personal: missing prepared delivery %d", intent.ID)
+			}
 		}
 	}
 	return byID, nil
@@ -54,17 +60,41 @@ func validatePreparedText(name, text string, chunks []string) error {
 }
 
 func oneDeliveryTask(intents []personal.DeliveryIntent) (int64, bool) {
-	var taskID int64
+	if len(intents) == 0 {
+		return 0, false
+	}
+	var first []int64
 	for _, intent := range intents {
+		current := []int64{}
 		for _, scope := range intent.Scopes {
-			if taskID == 0 {
-				taskID = scope.TaskID
-			} else if taskID != scope.TaskID {
+			found := false
+			for _, id := range current {
+				if id == scope.TaskID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				current = append(current, scope.TaskID)
+			}
+		}
+		if first == nil {
+			first = current
+			continue
+		}
+		if len(first) != len(current) {
+			return 0, false
+		}
+		for i, id := range first {
+			if current[i] != id {
 				return 0, false
 			}
 		}
 	}
-	return taskID, taskID > 0
+	if len(first) != 1 {
+		return 0, false
+	}
+	return first[0], true
 }
 
 func oneDeliverySchedule(intents []personal.DeliveryIntent) (int64, bool) {

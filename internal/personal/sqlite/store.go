@@ -81,7 +81,7 @@ func checkPersonalSchema(ctx context.Context, db schemaQueryer) error {
 	var marker int
 	err := db.QueryRowContext(ctx, `SELECT version FROM personal_schema LIMIT 1`).Scan(&marker)
 	if err == nil {
-		if marker != 5 {
+		if marker != 6 {
 			return fmt.Errorf("personal: unsupported database schema version %d", marker)
 		}
 		return nil

@@ -119,6 +119,9 @@ func finishEvent(t *testing.T, s *Store, event personal.Event, output personal.T
 	}
 	renders := make([]personal.RenderedDelivery, 0, len(intents))
 	for _, intent := range intents {
+		if intent.State == personal.DeliveryIntentSuppressed {
+			continue
+		}
 		prepared, err := channel.PrepareText(intent.Draft.Text)
 		if err != nil {
 			t.Fatal(err)
@@ -803,11 +806,12 @@ func TestOutboxOrderReceiptsReplyLinkingAndUnknownRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	third, err := s.ClaimDelivery(ctx)
-	if err != nil || third == nil || third.Text != "third" {
-		t.Fatalf("third chunk stayed blocked after uncertain second: (%+v,%v)", third, err)
+	if err != nil || third != nil {
+		t.Fatalf("third chunk was claimable after uncertain second: (%+v,%v)", third, err)
 	}
-	if err := s.UpdateDelivery(ctx, third.ID, "sent", channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner"}, "", time.Time{}); err != nil {
-		t.Fatal(err)
+	var thirdStatus string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM personal_outbox WHERE event_id=? AND text='third'`, event.ID).Scan(&thirdStatus); err != nil || thirdStatus != "suppressed" {
+		t.Fatalf("third chunk status = (%q,%v), want suppressed", thirdStatus, err)
 	}
 
 	byReceiptInput := sourceInput("502", "Reply to the first answer")
@@ -986,8 +990,8 @@ func TestCancelTaskIdempotenceAndLateStageNoop(t *testing.T) {
 func TestPersonalSchemaKeepsChannelTablesWithoutDerivedColumns(t *testing.T) {
 	s := testStore(t, ":memory:", time.Minute)
 	var tables int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'personal_%'`).Scan(&tables); err != nil || tables != 26 {
-		t.Fatalf("personal tables = (%d,%v), want 26", tables, err)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'personal_%'`).Scan(&tables); err != nil || tables != 27 {
+		t.Fatalf("personal tables = (%d,%v), want 27", tables, err)
 	}
 	for _, field := range []struct{ table, column string }{
 		{"personal_runs", "remaining_ms"},

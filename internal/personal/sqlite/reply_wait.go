@@ -37,37 +37,20 @@ CREATE TABLE IF NOT EXISTS personal_reply_tasks (
 CREATE INDEX IF NOT EXISTS personal_reply_tasks_task ON personal_reply_tasks(task_id,group_id);
 `
 
-func deletePendingReplyWaitTx(ctx context.Context, tx *sql.Tx, outboxID int64, historyID sql.NullInt64) error {
+func suppressPendingReplyWaitTx(ctx context.Context, tx *sql.Tx, outboxID int64) error {
 	var status string
 	var deliveryID int64
 	err := tx.QueryRowContext(ctx, `SELECT status,delivery_id FROM personal_outbox WHERE id=?`, outboxID).Scan(&status, &deliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if err != nil || status != "pending" {
-		return err
-	}
-	var hasSettledPart bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM personal_outbox WHERE delivery_id=? AND status<>'pending')`, deliveryID).Scan(&hasSettledPart); err != nil {
-		return err
-	}
-	if hasSettledPart {
-		return nil
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_reply_groups SET wait_outbox_id=NULL,wait_history_id=NULL
-		WHERE wait_outbox_id=? OR wait_history_id=?`, outboxID, nullableID(historyID.Int64)); err != nil {
-		return err
-	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM personal_delivery_intents WHERE id=? AND state='rendered'`, deliveryID)
 	if err != nil {
 		return err
 	}
-	if changed, err := res.RowsAffected(); err != nil {
-		return err
-	} else if changed != 1 {
-		return errors.New("personal: pending reply wait has no rendered delivery intent")
+	if status != "pending" {
+		return nil
 	}
-	return nil
+	return suppressDeliveryTx(ctx, tx, deliveryID, deliverySuppressionWaitSuperseded)
 }
 
 func (s *Store) CanDeferReply(ctx context.Context, eventID int64) (bool, error) {
@@ -246,6 +229,9 @@ func (s *Store) QueueWaitingReply(ctx context.Context, now time.Time, delay time
 		} else if changed != 1 {
 			return false, nil
 		}
+		if err := refreshDeliveryIntentValidityTx(ctx, tx, intent.ID); err != nil {
+			return false, err
+		}
 		if err := tx.Commit(); err != nil {
 			return false, err
 		}
@@ -256,7 +242,7 @@ func (s *Store) QueueWaitingReply(ctx context.Context, now time.Time, delay time
 
 // suppressStaleWaitRepliesTx leaves sending and settled deliveries intact.
 func suppressStaleWaitRepliesTx(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, `SELECT g.wait_outbox_id,g.wait_history_id FROM personal_reply_groups g
+	rows, err := tx.QueryContext(ctx, `SELECT g.wait_outbox_id FROM personal_reply_groups g
 		JOIN personal_outbox d ON d.id=g.wait_outbox_id
 		WHERE d.status='pending' AND (g.has_content=1 OR g.closed=1 OR (
 			EXISTS(SELECT 1 FROM personal_reply_tasks rt WHERE rt.group_id=g.id) AND
@@ -266,15 +252,14 @@ func suppressStaleWaitRepliesTx(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return err
 	}
-	var stale []replyWait
+	var stale []int64
 	for rows.Next() {
-		var wait replyWait
-		if err := rows.Scan(&wait.outboxID, &wait.historyID); err != nil {
+		var outboxID int64
+		if err := rows.Scan(&outboxID); err != nil {
 			rows.Close()
 			return err
 		}
-		wait.status = "pending"
-		stale = append(stale, wait)
+		stale = append(stale, outboxID)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -283,8 +268,8 @@ func suppressStaleWaitRepliesTx(ctx context.Context, tx *sql.Tx) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	for _, wait := range stale {
-		if err := deletePendingReplyWaitTx(ctx, tx, wait.outboxID, wait.historyID); err != nil {
+	for _, outboxID := range stale {
+		if err := suppressPendingReplyWaitTx(ctx, tx, outboxID); err != nil {
 			return err
 		}
 	}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +80,8 @@ func TestMainAgentScheduleReplyDoesNotInheritAnUnrelatedTask(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var userMessage, assistantReply *personal.Message
+			var userMessage *personal.Message
+			var assistantReplies []personal.Message
 			for i := range messages {
 				if messages[i].EventID != event.ID {
 					continue
@@ -88,15 +90,43 @@ func TestMainAgentScheduleReplyDoesNotInheritAnUnrelatedTask(t *testing.T) {
 				case "user":
 					userMessage = &messages[i]
 				case "assistant":
-					assistantReply = &messages[i]
+					assistantReplies = append(assistantReplies, messages[i])
 				}
 			}
-			if userMessage == nil || assistantReply == nil || userMessage.TaskID != 0 || userMessage.ScheduleID != wantSchedule || assistantReply.TaskID != 0 || assistantReply.ScheduleID != wantSchedule {
-				t.Fatalf("persisted association user=%+v assistant=%+v, want no task and schedule %d", userMessage, assistantReply, wantSchedule)
+			if userMessage == nil || userMessage.TaskID != 0 || userMessage.ScheduleID != wantSchedule {
+				t.Fatalf("persisted user association=%+v, want no task and schedule %d", userMessage, wantSchedule)
 			}
-			published, err := store.ClaimDelivery(ctx)
-			if err != nil || published == nil || strings.Contains(published.Text, "任务 #") {
-				t.Fatalf("reply inherited old report prefix: %+v %v", published, err)
+			wantReplies := 1
+			if name == "task and other plan" {
+				wantReplies = 2
+			}
+			if len(assistantReplies) != wantReplies {
+				t.Fatalf("requested answers missing: %+v", assistantReplies)
+			}
+			querySchedule := wantSchedule
+			if name == "task and other plan" {
+				querySchedule = b.ID
+			}
+			foundQuery := false
+			for _, reply := range assistantReplies {
+				if reply.Text == "Requested plan details." {
+					foundQuery = true
+					if reply.TaskID != 0 || reply.ScheduleID != querySchedule {
+						t.Fatalf("query inherited control task: %+v", reply)
+					}
+				}
+			}
+			if !foundQuery {
+				t.Fatalf("control confirmation replaced plan query: %+v", assistantReplies)
+			}
+			for i := 0; i < wantReplies; i++ {
+				published, err := store.ClaimDelivery(ctx)
+				if err != nil || published == nil || strings.Contains(published.Text, "任务 #") {
+					t.Fatalf("reply inherited old report prefix: %+v %v", published, err)
+				}
+				if err := store.UpdateDelivery(ctx, published.ID, "sent", channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner", MessageID: fmt.Sprintf("query-reply-%d", i)}, "", time.Time{}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if extra, err := store.ClaimDelivery(ctx); err != nil || extra != nil {
 				t.Fatalf("unexpected additional delivery=%+v %v", extra, err)

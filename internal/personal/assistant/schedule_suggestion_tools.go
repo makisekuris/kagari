@@ -61,6 +61,7 @@ func (p *personalTools) buildScheduleSuggestionTools() ([]tool.BaseTool, error) 
 			return suggestionToolReply{Error: err.Error()}, nil
 		}
 		p.addScheduleID(r.Suggestion.ScheduleID, true)
+		p.addSupplementalSchedule(r.Suggestion.ScheduleID, personal.DeliveryControl)
 		return suggestionToolReply{OK: true, Replayed: replayed, Resolution: &r}, nil
 	})
 	if err != nil {

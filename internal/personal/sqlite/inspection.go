@@ -75,13 +75,14 @@ type DeliveryRecord struct {
 }
 
 type DiagnosticSnapshot struct {
-	StoreID         string                    `json:"store_id"`
-	Events          []EventRecord             `json:"events"`
-	Tasks           []personal.Task           `json:"tasks"`
-	Runs            []personal.Run            `json:"runs"`
-	Deliveries      []DeliveryRecord          `json:"deliveries"`
-	DeliveryIntents []personal.DeliveryIntent `json:"delivery_intents"`
-	Memories        []personal.Memory         `json:"memories"`
+	StoreID          string                           `json:"store_id"`
+	Events           []EventRecord                    `json:"events"`
+	Tasks            []personal.Task                  `json:"tasks"`
+	Runs             []personal.Run                   `json:"runs"`
+	Deliveries       []DeliveryRecord                 `json:"deliveries"`
+	DeliveryIntents  []personal.DeliveryIntent        `json:"delivery_intents"`
+	DeliveryControls []personal.DeliveryControlResult `json:"delivery_controls"`
+	Memories         []personal.Memory                `json:"memories"`
 }
 
 func scanEventRecord(row scanner) (EventRecord, error) {
@@ -136,7 +137,7 @@ func (s *Store) RecentEvents(ctx context.Context, limit int) ([]EventRecord, err
 // Diagnostic reads one database snapshot, then releases its transaction before
 // the CLI scans log files. A long log scan must not hold a SQLite read lock.
 func (s *Store) Diagnostic(ctx context.Context, eventID, taskID int64) (DiagnosticSnapshot, error) {
-	result := DiagnosticSnapshot{Events: []EventRecord{}, Tasks: []personal.Task{}, Runs: []personal.Run{}, Deliveries: []DeliveryRecord{}, DeliveryIntents: []personal.DeliveryIntent{}, Memories: []personal.Memory{}}
+	result := DiagnosticSnapshot{Events: []EventRecord{}, Tasks: []personal.Task{}, Runs: []personal.Run{}, Deliveries: []DeliveryRecord{}, DeliveryIntents: []personal.DeliveryIntent{}, DeliveryControls: []personal.DeliveryControlResult{}, Memories: []personal.Memory{}}
 	if (eventID > 0) == (taskID > 0) || eventID < 0 || taskID < 0 {
 		return result, errors.New("specify exactly one positive event or task ID")
 	}
@@ -217,6 +218,45 @@ func (s *Store) Diagnostic(ctx context.Context, eventID, taskID int64) (Diagnost
 		FROM personal_delivery_intents d LEFT JOIN personal_delivery_scopes s ON s.delivery_id=d.id
 		WHERE d.event_id IN (`+eventList+`) OR s.task_id IN (`+taskList+`) ORDER BY d.id`)
 	if err != nil {
+		return result, err
+	}
+	deliveryIDsForControls := make([]int64, len(result.DeliveryIntents))
+	for i, intent := range result.DeliveryIntents {
+		deliveryIDsForControls[i] = intent.ID
+	}
+	deliveryList := inspectionIDs(deliveryIDsForControls)
+	controlRows, err := tx.QueryContext(ctx, `SELECT id,request_json,result_json,result_delivery_id,created_at FROM personal_delivery_controls
+		WHERE event_id IN (`+eventList+`) OR target_task_id IN (`+taskList+`) OR target_delivery_id IN (`+deliveryList+`) ORDER BY id`)
+	if err != nil {
+		return result, err
+	}
+	for controlRows.Next() {
+		var id, deliveryID int64
+		var requestJSON, resultJSON, created string
+		if err := controlRows.Scan(&id, &requestJSON, &resultJSON, &deliveryID, &created); err != nil {
+			controlRows.Close()
+			return result, err
+		}
+		var control personal.DeliveryControlResult
+		if err := json.Unmarshal([]byte(resultJSON), &control); err != nil || control.ID == 0 {
+			if err := json.Unmarshal([]byte(requestJSON), &control.Request); err != nil {
+				controlRows.Close()
+				return result, fmt.Errorf("decode delivery control request: %w", err)
+			}
+			control.ID, control.DeliveryID = id, deliveryID
+		}
+		control.CreatedAt, err = parseTimestamp(created)
+		if err != nil {
+			controlRows.Close()
+			return result, err
+		}
+		result.DeliveryControls = append(result.DeliveryControls, control)
+	}
+	if err := controlRows.Err(); err != nil {
+		controlRows.Close()
+		return result, err
+	}
+	if err := controlRows.Close(); err != nil {
 		return result, err
 	}
 	rows, err = tx.QueryContext(ctx, `SELECT `+taskColumns+` FROM personal_tasks WHERE id IN (`+taskList+`) ORDER BY id`)

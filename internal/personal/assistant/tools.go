@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/cloudwego/eino/components/tool"
 	"go.uber.org/zap"
@@ -13,16 +14,19 @@ import (
 )
 
 type personalToolReply struct {
-	ActionID string            `json:"action_id,omitempty"`
-	OK       bool              `json:"ok"`
-	Error    string            `json:"error,omitempty"`
-	Queued   bool              `json:"queued,omitempty"`
-	Task     *personal.Task    `json:"task,omitempty"`
-	Tasks    []personal.Task   `json:"tasks,omitempty"`
-	Run      *personal.Run     `json:"run,omitempty"`
-	Runs     []personal.Run    `json:"runs,omitempty"`
-	Memory   *personal.Memory  `json:"memory,omitempty"`
-	Memories []personal.Memory `json:"memories,omitempty"`
+	ActionID   string                          `json:"action_id,omitempty"`
+	OK         bool                            `json:"ok"`
+	Error      string                          `json:"error,omitempty"`
+	Queued     bool                            `json:"queued,omitempty"`
+	Task       *personal.Task                  `json:"task,omitempty"`
+	Tasks      []personal.Task                 `json:"tasks,omitempty"`
+	Run        *personal.Run                   `json:"run,omitempty"`
+	Runs       []personal.Run                  `json:"runs,omitempty"`
+	Memory     *personal.Memory                `json:"memory,omitempty"`
+	Memories   []personal.Memory               `json:"memories,omitempty"`
+	Delivery   *personal.DeliveryIntent        `json:"delivery,omitempty"`
+	Deliveries *personal.DeliveryPage          `json:"deliveries,omitempty"`
+	Control    *personal.DeliveryControlResult `json:"control,omitempty"`
 }
 
 type createTaskArgs struct {
@@ -104,21 +108,29 @@ type memoryHistoryArgs struct {
 // personalTools carries request scope and the in-memory action ledger shared by
 // the task, memory, schedule, reply, and attachment tool groups.
 type personalTools struct {
-	timezone         string
-	scheduleIDs      map[int64]struct{}
-	scheduleChanged  bool
-	store            Repository
-	log              *zap.Logger
-	input            personal.TurnInput
-	event            personal.Event
-	taskIDs          map[int64]struct{}
-	mustNotify       bool
-	questions        []string
-	settledDelivery  *personal.DeliveryDraft
-	callbackFailure  *taskActionFailure
-	taskActions      map[string]*taskActionState
-	taskActionOrder  []string
-	nextTaskActionID uint64
+	timezone              string
+	scheduleIDs           map[int64]struct{}
+	scheduleChanged       bool
+	store                 Repository
+	log                   *zap.Logger
+	input                 personal.TurnInput
+	event                 personal.Event
+	taskIDs               map[int64]struct{}
+	mustNotify            bool
+	questions             []string
+	settledDelivery       *personal.DeliveryDraft
+	callbackFailure       *taskActionFailure
+	controlDeliveries     []personal.DeliveryIntent
+	persistedControl      bool
+	supplementalWork      bool
+	supplementalTaskIDs   map[int64]struct{}
+	supplementalSchedules map[int64]struct{}
+	supplementalPurpose   personal.DeliveryPurpose
+	deliveryQueried       bool
+	taskResultCommitted   bool
+	taskActions           map[string]*taskActionState
+	taskActionOrder       []string
+	nextTaskActionID      uint64
 }
 
 func (p *personalTools) addScheduleID(id int64, changed bool) {
@@ -179,7 +191,111 @@ func (p *personalTools) taskID() int64 {
 
 func (p *personalTools) addTaskID(id int64) {
 	if id > 0 {
+		if p.taskIDs == nil {
+			p.taskIDs = make(map[int64]struct{})
+		}
 		p.taskIDs[id] = struct{}{}
+	}
+}
+
+func (p *personalTools) taskIDsSorted() []int64 {
+	ids := make([]int64, 0, len(p.taskIDs)+1)
+	seen := make(map[int64]struct{}, len(p.taskIDs)+1)
+	add := func(id int64) {
+		if id <= 0 {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	for id := range p.taskIDs {
+		add(id)
+	}
+	for _, failure := range p.unresolvedTaskActions() {
+		add(failure.TaskID)
+	}
+	if len(ids) == 0 {
+		if id := p.taskID(); id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+func (p *personalTools) addControlDelivery(intent personal.DeliveryIntent) {
+	for _, existing := range p.controlDeliveries {
+		if existing.ID == intent.ID {
+			return
+		}
+	}
+	p.controlDeliveries = append(p.controlDeliveries, intent)
+	for _, scope := range intent.Scopes {
+		p.addTaskID(scope.TaskID)
+	}
+	p.persistedControl = true
+	p.mustNotify = true
+}
+
+func (p *personalTools) recordSupplementalWork(purpose personal.DeliveryPurpose) {
+	p.supplementalWork = true
+	if supplementalPurposeRank(purpose) > supplementalPurposeRank(p.supplementalPurpose) {
+		p.supplementalPurpose = purpose
+	}
+}
+
+func (p *personalTools) addSupplementalTask(id int64, purpose personal.DeliveryPurpose) {
+	if id > 0 {
+		if p.supplementalTaskIDs == nil {
+			p.supplementalTaskIDs = make(map[int64]struct{})
+		}
+		p.supplementalTaskIDs[id] = struct{}{}
+	}
+	p.recordSupplementalWork(purpose)
+}
+
+func (p *personalTools) addSupplementalSchedule(id int64, purpose personal.DeliveryPurpose) {
+	if id > 0 {
+		if p.supplementalSchedules == nil {
+			p.supplementalSchedules = make(map[int64]struct{})
+		}
+		p.supplementalSchedules[id] = struct{}{}
+	}
+	p.recordSupplementalWork(purpose)
+}
+
+func (p *personalTools) supplementalTaskIDsSorted() []int64 {
+	ids := make([]int64, 0, len(p.supplementalTaskIDs))
+	for id := range p.supplementalTaskIDs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+func (p *personalTools) supplementalScheduleID() int64 {
+	if len(p.supplementalSchedules) != 1 {
+		return 0
+	}
+	for id := range p.supplementalSchedules {
+		return id
+	}
+	return 0
+}
+
+func supplementalPurposeRank(purpose personal.DeliveryPurpose) int {
+	switch purpose {
+	case personal.DeliveryResult:
+		return 3
+	case personal.DeliveryStatus:
+		return 2
+	case personal.DeliveryControl:
+		return 1
+	default:
+		return 0
 	}
 }
 
@@ -226,10 +342,14 @@ func (p *personalTools) taskByID(id int64) *personal.Task {
 	return nil
 }
 
-// build registers the core task, memory, and query tools. Schedule, reply,
+// build registers the task, memory, delivery, and query tools. Schedule, reply,
 // attachment, context, and progress tools are appended by their focused files.
 func (p *personalTools) build() ([]tool.BaseTool, error) {
 	taskTools, err := p.taskTools()
+	if err != nil {
+		return nil, err
+	}
+	deliveryTools, err := p.deliveryTools()
 	if err != nil {
 		return nil, err
 	}
@@ -251,5 +371,6 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 	scheduled = append(scheduled, inputs...)
-	return append(append(taskTools, memoryTools...), scheduled...), nil
+	tools := append(append(taskTools, memoryTools...), deliveryTools...)
+	return append(tools, scheduled...), nil
 }

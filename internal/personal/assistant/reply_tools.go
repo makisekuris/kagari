@@ -61,6 +61,12 @@ func (p *personalTools) requiredTaskReply() string {
 			operation = "继续执行"
 		case "add_task_input":
 			operation = "补充材料"
+		case "stop_delivery":
+			operation = "停止投递"
+		case "resume_task_delivery":
+			operation = "恢复后续投递"
+		case "resend_delivery":
+			operation = "补发历史交付"
 		}
 		parts = append(parts, fmt.Sprintf("「%s」未能%s。这部分尚未完成，可以让我重试。", textclip.Excerpt(failure.Target, 80), operation))
 	}

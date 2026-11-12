@@ -253,9 +253,9 @@ Schedule details include pending suggestions, recent Task summaries, and deliver
 
 ### 从旧版本更新 / Updating from older versions
 
-V1 阅读归档及其 `read`、`analyze`、`digest`、`status`、`export`、`retry`、`retry-delivery`、`db` 命令已移除。旧数据库和旧表不会自动删除，也不会导入 personal Task。上下文管理与定时计划使用 schema 5；请指定新的 `storage.path`，保留旧数据库及其工作区、附件和凭证，不执行迁移。
+V1 阅读归档及其 `read`、`analyze`、`digest`、`status`、`export`、`retry`、`retry-delivery`、`db` 命令已移除。旧数据库和旧表不会自动删除，也不会导入 personal Task。上下文管理与定时计划使用 schema 6；请指定新的 `storage.path`，保留旧数据库及其工作区、附件和凭证，不执行迁移。
 
-V1 reading archives and the `read`, `analyze`, `digest`, `status`, `export`, `retry`, `retry-delivery`, and `db` commands have been removed. Old databases and tables are neither deleted automatically nor imported into personal Tasks. Context management and schedules use schema 5. Choose a new `storage.path` and retain the old database, workspace, attachments, and credentials; no migration is performed.
+V1 reading archives and the `read`, `analyze`, `digest`, `status`, `export`, `retry`, `retry-delivery`, and `db` commands have been removed. Old databases and tables are neither deleted automatically nor imported into personal Tasks. Context management and schedules use schema 6. Choose a new `storage.path` and retain the old database, workspace, attachments, and credentials; no migration is performed.
 
 从旧配置删除 `weekly`、`max_attempts`、`reader.cache_ttl` 和 `telegram.target_chat_ids`，以及对应的 `KAGARI_*` 环境变量。YAML 仍严格校验，保留这些旧键会报错。网页读取只在同一次 Task 阶段内复用 HTTP 结果。
 

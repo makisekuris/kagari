@@ -196,6 +196,10 @@ func TestRuntimePresentationRespectsReplyKindAndTerminalCallback(t *testing.T) {
 		if err != nil || delivery == nil || delivery.Text != "已安排后台重新阅读，完成后回复你。" {
 			t.Fatalf("receipt changed before delivery: %+v, %v", delivery, err)
 		}
+		snapshot, err := s.Diagnostic(ctx, delivery.EventID, 0)
+		if err != nil || len(snapshot.DeliveryIntents) != 1 || snapshot.DeliveryIntents[0].Purpose != personal.DeliveryStatus {
+			t.Fatalf("queue receipt was not classified as temporary status: %+v, %v", snapshot.DeliveryIntents, err)
+		}
 		tasks, err := s.Tasks(ctx, 10)
 		if err != nil || len(tasks) != 1 || tasks[0].Status != personal.TaskQueued {
 			t.Fatalf("queued task state = %+v, %v", tasks, err)

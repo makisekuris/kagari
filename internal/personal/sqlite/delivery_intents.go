@@ -100,7 +100,7 @@ func insertDeliveryIntentTx(ctx context.Context, tx *sql.Tx, input deliveryInten
 		if err := tx.QueryRowContext(ctx, `SELECT revision FROM personal_tasks WHERE id=?`, scope.TaskID).Scan(&currentRevision); err != nil {
 			return personal.DeliveryIntent{}, err
 		}
-		if scope.Revision != currentRevision && input.purpose != personal.DeliveryHistorical {
+		if scope.Revision != currentRevision && input.purpose != personal.DeliveryHistorical && input.purpose != personal.DeliveryControl {
 			return personal.DeliveryIntent{}, fmt.Errorf("personal: delivery task %d revision changed from %d to %d", scope.TaskID, scope.Revision, currentRevision)
 		}
 		if scope.RunID > 0 {
@@ -118,9 +118,9 @@ func insertDeliveryIntentTx(ctx context.Context, tx *sql.Tx, input deliveryInten
 	}
 	created := timestamp(now.UTC())
 	res, err := tx.ExecContext(ctx, `INSERT INTO personal_delivery_intents(
-		event_id,schedule_id,original_delivery_id,purpose,draft_text,draft_attachments,state,detail,
+		event_id,schedule_id,original_delivery_id,purpose,draft_text,draft_attachments,state,detail,preparation_error,
 		settlement_task_id,settlement_revision,settlement_payload_json,settlement_result_json,created_at)
-		VALUES(?,?,?,?,?,?,'pending',?,?,?,?,?,?)`,
+		VALUES(?,?,?,?,?,?,'pending',?,'',?,?,?,?,?)`,
 		input.eventID, nullableID(input.scheduleID), nullableID(input.originalDeliveryID), input.purpose,
 		input.draft.Text, string(attachmentsJSON), input.detail, nullableID(input.settlementTaskID),
 		nullableID(input.settlementRevision), input.settlementPayload, input.settlementResult, created)
@@ -156,7 +156,7 @@ func scanDeliveryIntent(row scanner) (personal.DeliveryIntent, error) {
 	var scheduleID, originalID sql.NullInt64
 	var attachments, created string
 	if err := row.Scan(&intent.ID, &intent.EventID, &scheduleID, &originalID, &intent.Purpose,
-		&intent.Draft.Text, &attachments, &intent.State, &intent.Detail, &created); err != nil {
+		&intent.Draft.Text, &attachments, &intent.State, &intent.Detail, &intent.PreparationError, &created); err != nil {
 		return intent, err
 	}
 	intent.ScheduleID, intent.OriginalDeliveryID = scheduleID.Int64, originalID.Int64
@@ -171,7 +171,7 @@ func scanDeliveryIntent(row scanner) (personal.DeliveryIntent, error) {
 	return intent, err
 }
 
-const deliveryIntentColumns = `id,event_id,schedule_id,original_delivery_id,purpose,draft_text,draft_attachments,state,detail,created_at`
+const deliveryIntentColumns = `id,event_id,schedule_id,original_delivery_id,purpose,draft_text,draft_attachments,state,detail,preparation_error,created_at`
 
 func loadDeliveryIntentScopesTx(ctx context.Context, tx *sql.Tx, deliveryID int64) ([]personal.DeliveryScope, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT task_id,revision,COALESCE(run_id,0) FROM personal_delivery_scopes WHERE delivery_id=? ORDER BY ordinal`, deliveryID)
@@ -226,9 +226,10 @@ func loadDeliveryIntentsTx(ctx context.Context, tx *sql.Tx, query string, args .
 	return intents, nil
 }
 
-func loadPendingSettlementIntentsTx(ctx context.Context, tx *sql.Tx, eventID int64) ([]personal.DeliveryIntent, error) {
+func loadEventDeliveriesTx(ctx context.Context, tx *sql.Tx, eventID int64) ([]personal.DeliveryIntent, error) {
 	return loadDeliveryIntentsTx(ctx, tx, `SELECT `+deliveryIntentColumns+` FROM personal_delivery_intents
-		WHERE event_id=? AND settlement_task_id IS NOT NULL AND state='pending' ORDER BY id`, eventID)
+		WHERE event_id=? AND (state='pending' OR (state='suppressed' AND NOT EXISTS(
+			SELECT 1 FROM personal_history h WHERE h.delivery_id=personal_delivery_intents.id))) ORDER BY id`, eventID)
 }
 
 func deliveryScopesForEventTx(ctx context.Context, tx *sql.Tx, eventID int64, kind personal.EventKind, taskID, runID, revision int64) ([]personal.DeliveryScope, error) {
@@ -299,16 +300,63 @@ func deliveryScopesForEventTx(ctx context.Context, tx *sql.Tx, eventID int64, ki
 	return canonicalDeliveryScopes(scopes), nil
 }
 
+func deliveryScopesForOutputTx(ctx context.Context, tx *sql.Tx, eventID int64, kind personal.EventKind, taskID, runID, revision int64, explicitTaskIDs []int64) ([]personal.DeliveryScope, error) {
+	scopes, err := deliveryScopesForEventTx(ctx, tx, eventID, kind, taskID, runID, revision)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int64]bool, len(scopes))
+	for _, scope := range scopes {
+		seen[scope.TaskID] = true
+	}
+	for _, id := range explicitTaskIDs {
+		if id <= 0 {
+			return nil, errors.New("personal: explicit delivery task IDs must be positive")
+		}
+		if seen[id] {
+			continue
+		}
+		extra, err := deliveryScopesForTaskIDsTx(ctx, tx, []int64{id})
+		if err != nil {
+			return nil, err
+		}
+		scopes = append(scopes, extra...)
+		seen[id] = true
+	}
+	return canonicalDeliveryScopes(scopes), nil
+}
+
+func deliveryScopesForTaskIDsTx(ctx context.Context, tx *sql.Tx, taskIDs []int64) ([]personal.DeliveryScope, error) {
+	ids := uniqueIDs(taskIDs)
+	scopes := make([]personal.DeliveryScope, 0, len(ids))
+	for _, id := range ids {
+		var scope personal.DeliveryScope
+		scope.TaskID = id
+		if err := tx.QueryRowContext(ctx, `SELECT revision FROM personal_tasks WHERE id=?`, id).Scan(&scope.Revision); err != nil {
+			return nil, err
+		}
+		err := tx.QueryRowContext(ctx, `SELECT id FROM personal_runs WHERE task_id=? AND revision=? AND kind='task' ORDER BY id DESC LIMIT 1`, id, scope.Revision).Scan(&scope.RunID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		scopes = append(scopes, scope)
+	}
+	return canonicalDeliveryScopes(scopes), nil
+}
+
 func (s *Store) EventDeliveries(ctx context.Context, eventID int64) ([]personal.DeliveryIntent, error) {
 	if eventID <= 0 {
 		return nil, errors.New("personal: event ID must be positive")
 	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	intents, err := loadPendingSettlementIntentsTx(ctx, tx, eventID)
+	if err := refreshEventDeliveryValidityTx(ctx, tx, eventID); err != nil {
+		return nil, err
+	}
+	intents, err := loadEventDeliveriesTx(ctx, tx, eventID)
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +367,11 @@ func (s *Store) EventDeliveries(ctx context.Context, eventID int64) ([]personal.
 }
 
 func updateDeliveryIntentRenderedTx(ctx context.Context, tx *sql.Tx, deliveryID int64, detail string) error {
-	res, err := tx.ExecContext(ctx, `UPDATE personal_delivery_intents SET state='rendered',detail=? WHERE id=? AND state='pending'`, detail, deliveryID)
+	return updateDeliveryIntentRenderedWithErrorTx(ctx, tx, deliveryID, detail, "")
+}
+
+func updateDeliveryIntentRenderedWithErrorTx(ctx context.Context, tx *sql.Tx, deliveryID int64, detail, preparationError string) error {
+	res, err := tx.ExecContext(ctx, `UPDATE personal_delivery_intents SET state='rendered',detail=?,preparation_error=? WHERE id=? AND state='pending'`, detail, preparationError, deliveryID)
 	if err != nil {
 		return err
 	}

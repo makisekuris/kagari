@@ -38,7 +38,7 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 	}
 	if len(intents) > 0 {
 		outcome = "recovered_delivery"
-		return true, r.publishIntents(ctx, *event, intents)
+		return true, r.publishIntents(ctx, *event, intents, personal.TurnOutput{})
 	}
 	if event.Kind == personal.EventTask {
 		state, err := r.taskCallbackState(ctx, *event)
@@ -136,7 +136,7 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 		return true, err
 	}
 	if len(intents) > 0 {
-		return true, r.publishIntents(ctx, *event, intents)
+		return true, r.publishIntents(ctx, *event, intents, output)
 	}
 	callbackState := personal.TaskCallbackCurrent
 	if event.Kind == personal.EventTask {
@@ -305,7 +305,7 @@ func (r *Runtime) publish(ctx context.Context, event personal.Event, output pers
 		return err
 	}
 	if len(intents) > 0 {
-		return r.publishIntents(ctx, event, intents)
+		return r.publishIntents(ctx, event, intents, output)
 	}
 	if event.Kind == personal.EventTask {
 		state, err := r.taskCallbackState(ctx, event)
@@ -331,7 +331,7 @@ func (r *Runtime) publish(ctx context.Context, event personal.Event, output pers
 		if prepareErr != nil {
 			return prepareErr
 		}
-		fallback := personal.TurnOutput{TaskID: output.TaskID, ScheduleID: output.ScheduleID, Text: text, Purpose: output.Purpose}
+		fallback := personal.TurnOutput{TaskID: output.TaskID, TaskIDs: output.TaskIDs, ScheduleID: output.ScheduleID, Text: text, Purpose: output.Purpose}
 		return r.Store.CompleteEvent(ctx, event.ID, fallback, fallbackChunks)
 	}
 	return nil

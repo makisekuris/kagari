@@ -93,7 +93,7 @@ func TestStoreTaskOutcomeLogsReplayNoopAndStaleStage(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertStoreOutcome(t, logs, 3, "task.cancel", "cancelled")
-	fields = assertStoreOutcome(t, logs, 4, "task.cancel", "unchanged")
+	fields = assertStoreOutcome(t, logs, 4, "task.cancel", "replayed")
 	if payload, ok := fields["payload"].(map[string]any); !ok || payload["task"] == nil {
 		t.Fatalf("cancel no-op omitted current task payload: %v", fields["payload"])
 	}

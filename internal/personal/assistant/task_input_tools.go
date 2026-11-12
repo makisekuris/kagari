@@ -101,6 +101,7 @@ func (p *personalTools) inputTools() ([]tool.BaseTool, error) {
 			return fail(err)
 		}
 		p.addTaskID(task.ID)
+		p.addSupplementalTask(task.ID, personal.DeliveryStatus)
 		p.succeedTaskAction(attempt)
 		return addTaskInputReply{ActionID: attempt.actionID, OK: true, Task: &addTaskInputTask{ID: task.ID, Revision: task.Revision, Status: task.Status}, Inputs: selected}, nil
 	})

@@ -4,8 +4,8 @@ package sqlite
 // attachments, and replies. Feature-specific schema fragments stay beside the
 // code that owns them and are concatenated during NewStore.
 const personalSchema = `
-CREATE TABLE IF NOT EXISTS personal_schema (version INTEGER PRIMARY KEY CHECK(version=5));
-INSERT OR IGNORE INTO personal_schema(version) VALUES(5);
+CREATE TABLE IF NOT EXISTS personal_schema (version INTEGER PRIMARY KEY CHECK(version=6));
+INSERT OR IGNORE INTO personal_schema(version) VALUES(6);
 CREATE TABLE IF NOT EXISTS personal_meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS personal_outbox (
 	delivery_part INTEGER NOT NULL CHECK(delivery_part>0),
 	text TEXT NOT NULL,
 	attachment_id TEXT REFERENCES personal_attachments(id),
-	status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','uncertain')),
+	status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','uncertain','suppressed')),
 	attempts INTEGER NOT NULL DEFAULT 0,
 	next_attempt_at TEXT NOT NULL,
 	receipt_channel TEXT NOT NULL DEFAULT '',

@@ -27,6 +27,7 @@ func (p *personalTools) memoryTools() ([]tool.BaseTool, error) {
 				active = append(active, memory)
 			}
 		}
+		p.recordSupplementalWork(personal.DeliveryControl)
 		return personalToolReply{OK: true, Memories: active}, nil
 	})
 	if err != nil {
@@ -49,6 +50,7 @@ func (p *personalTools) memoryTools() ([]tool.BaseTool, error) {
 			copy.Value = ""
 			memory = &copy
 		}
+		p.recordSupplementalWork(personal.DeliveryControl)
 		return personalToolReply{OK: true, Memory: memory}, nil
 	})
 	if err != nil {
@@ -71,6 +73,7 @@ func (p *personalTools) memoryTools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return p.memoryError(a.Key, "put", err), nil
 		}
+		p.recordSupplementalWork(personal.DeliveryControl)
 		return personalToolReply{OK: true, Memory: &memory}, nil
 	})
 	if err != nil {
@@ -93,6 +96,7 @@ func (p *personalTools) memoryTools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return p.memoryError(a.Key, "forget", err), nil
 		}
+		p.recordSupplementalWork(personal.DeliveryControl)
 		return personalToolReply{OK: true, Memory: &memory}, nil
 	})
 	if err != nil {
@@ -104,6 +108,7 @@ func (p *personalTools) memoryTools() ([]tool.BaseTool, error) {
 		if err != nil {
 			return toolError(err), nil
 		}
+		p.recordSupplementalWork(personal.DeliveryControl)
 		return personalToolReply{OK: true, Memories: history}, nil
 	})
 	if err != nil {

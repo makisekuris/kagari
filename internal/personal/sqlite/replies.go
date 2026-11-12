@@ -206,7 +206,7 @@ func mergeReplyGroupsTx(ctx context.Context, tx *sql.Tx, firstID, secondID int64
 			continue
 		}
 		if wait.status == "pending" {
-			if err := deletePendingReplyWaitTx(ctx, tx, wait.outboxID, wait.historyID); err != nil {
+			if err := suppressPendingReplyWaitTx(ctx, tx, wait.outboxID); err != nil {
 				return 0, err
 			}
 		}
@@ -255,6 +255,13 @@ func recordReplyTx(ctx context.Context, tx *sql.Tx, eventID int64, output person
 		if err := rows.Close(); err != nil {
 			return err
 		}
+		for _, taskID := range output.TaskIDs {
+			if taskID <= 0 {
+				return errors.New("personal: reply task IDs must be positive")
+			}
+			requestTasks = append(requestTasks, taskID)
+		}
+		requestTasks = uniqueIDs(requestTasks)
 		for _, taskID := range requestTasks {
 			if err := bindReplyTaskTx(ctx, tx, eventID, taskID); err != nil {
 				return err
@@ -291,9 +298,15 @@ func recordReplyTx(ctx context.Context, tx *sql.Tx, eventID int64, output person
 		}
 	}
 	// Ordinary replies can report progress through get_task while the task remains active.
-	if kind == personal.EventUser && len(requestTasks) == 0 && output.TaskID > 0 {
-		if err := appendOpenReplyTaskGroupsTx(ctx, tx, output.TaskID, &groupIDs); err != nil {
-			return err
+	if kind == personal.EventUser && len(requestTasks) == 0 {
+		linkedTaskIDs := append([]int64(nil), output.TaskIDs...)
+		if output.TaskID > 0 {
+			linkedTaskIDs = append(linkedTaskIDs, output.TaskID)
+		}
+		for _, linkedTaskID := range uniqueIDs(linkedTaskIDs) {
+			if err := appendOpenReplyTaskGroupsTx(ctx, tx, linkedTaskID, &groupIDs); err != nil {
+				return err
+			}
 		}
 	}
 	for _, groupID := range groupIDs {
@@ -315,9 +328,25 @@ func recordReplyTx(ctx context.Context, tx *sql.Tx, eventID int64, output person
 	return suppressStaleWaitRepliesTx(ctx, tx)
 }
 
+func uniqueIDs(ids []int64) []int64 {
+	seen := make(map[int64]bool, len(ids))
+	unique := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		unique = append(unique, id)
+	}
+	return unique
+}
+
 func recordSettlementRepliesTx(ctx context.Context, tx *sql.Tx, eventID int64, intents []personal.DeliveryIntent, fallbackTaskID int64) error {
 	seenTaskIDs := map[int64]bool{}
 	for _, intent := range intents {
+		if intent.State == personal.DeliveryIntentSuppressed {
+			continue
+		}
 		output := personal.TurnOutput{Text: intent.Draft.Text, Attachments: append([]string(nil), intent.Draft.Attachments...)}
 		if len(intent.Scopes) == 0 {
 			output.TaskID = fallbackTaskID

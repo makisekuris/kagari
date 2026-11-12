@@ -80,6 +80,9 @@ func FinishEvent(t *testing.T, s *sqlite.Store, event personal.Event, output per
 	}
 	var renders []personal.RenderedDelivery
 	for _, intent := range intents {
+		if intent.State == personal.DeliveryIntentSuppressed {
+			continue
+		}
 		var parts []string
 		if intent.Draft.Text != "" {
 			parts, err = channel.PrepareText(intent.Draft.Text)

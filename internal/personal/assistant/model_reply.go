@@ -24,6 +24,59 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 			Attachments: append([]string{}, tools.settledDelivery.Attachments...),
 		}, nil
 	}
+	if tools.persistedControl {
+		if modelErr != nil {
+			logging.FromContext(ctx).Warn("conversation.reply.recovered", append(logging.ErrorFields(modelErr), zap.Int64("event_id", input.Event.ID))...)
+		}
+		response := personalTurnResponse{ReplyKind: personal.ReplyContent, Attachments: []string{}}
+		seen := make(map[string]struct{})
+		for _, delivery := range tools.controlDeliveries {
+			if delivery.Draft.Text != "" {
+				if response.Text != "" {
+					response.Text += "\n\n"
+				}
+				response.Text += delivery.Draft.Text
+			}
+			for _, id := range delivery.Draft.Attachments {
+				if _, ok := seen[id]; ok {
+					continue
+				}
+				seen[id] = struct{}{}
+				response.Attachments = append(response.Attachments, id)
+			}
+		}
+		if !tools.supplementalWork {
+			return response, nil
+		}
+		if modelErr != nil {
+			response.SupplementalReplyFailed = true
+			return response, nil
+		}
+		supplemental, err := decodePersonalTurnResponse(raw)
+		if err != nil {
+			supplemental, err = a.formatTurn(ctx, raw, createdAttachments)
+		}
+		if err != nil {
+			logging.FromContext(ctx).Warn("conversation.reply.supplemental_recovered", append(logging.ErrorFields(err), zap.Int64("event_id", input.Event.ID))...)
+			response.SupplementalReplyFailed = true
+			return response, nil
+		}
+		if supplemental.ReplyKind == personal.ReplySilent || strings.TrimSpace(supplemental.Text) == "" && len(supplemental.Attachments) == 0 {
+			response.SupplementalReplyFailed = true
+			return response, nil
+		}
+		purpose := tools.supplementalPurpose
+		if purpose == "" {
+			purpose = personal.DeliveryControl
+		}
+		response.SupplementalReply = &personal.SupplementalReply{
+			Draft:      personal.DeliveryDraft{Text: supplemental.Text, Attachments: append([]string{}, supplemental.Attachments...)},
+			TaskIDs:    tools.supplementalTaskIDsSorted(),
+			ScheduleID: tools.supplementalScheduleID(),
+			Purpose:    purpose,
+		}
+		return response, nil
+	}
 	if modelErr != nil {
 		if required == "" {
 			return personalTurnResponse{}, modelErr

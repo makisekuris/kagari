@@ -186,6 +186,9 @@ func (s *Store) ReviseTask(ctx context.Context, eventID int64, key string, taskI
 	if err != nil {
 		return personal.Task{}, personal.Run{}, err
 	}
+	if err := refreshDeliveryValidityTx(ctx, tx, taskID); err != nil {
+		return personal.Task{}, personal.Run{}, err
+	}
 	if err := insertRequest(ctx, tx, eventID, key, "revise_task", payload, taskID, run.ID, 0); err != nil {
 		return personal.Task{}, personal.Run{}, err
 	}
@@ -214,7 +217,37 @@ func (s *Store) CancelTask(ctx context.Context, eventID, taskID, expectedRevisio
 		return personal.Task{}, err
 	}
 	defer tx.Rollback()
-	if err := requireUserEvent(ctx, tx, eventID, true); err != nil {
+	key := fmt.Sprintf("internal:cancel_task:%d:%d", taskID, expectedRevision)
+	request := personal.DeliveryControlRequest{Action: personal.DeliveryControlAction("cancel_task"), TaskID: taskID}
+	requestJSON, err := json.Marshal(request)
+	if err != nil {
+		return personal.Task{}, err
+	}
+	var savedRequest, savedResult string
+	err = tx.QueryRowContext(ctx, `SELECT request_json,result_json FROM personal_delivery_controls WHERE event_id=? AND request_key=?`, eventID, key).
+		Scan(&savedRequest, &savedResult)
+	if err == nil {
+		if savedRequest != string(requestJSON) {
+			return personal.Task{}, errors.New("personal: saved task cancellation identity has a different request")
+		}
+		var saved cancelTaskControlSnapshot
+		if err := json.Unmarshal([]byte(savedResult), &saved); err != nil {
+			return personal.Task{}, fmt.Errorf("personal: decode saved task cancellation result: %w", err)
+		}
+		if saved.Task.ID != taskID || saved.Task.Revision != expectedRevision || saved.Task.Status != personal.TaskCancelled {
+			return personal.Task{}, errors.New("personal: saved task cancellation result does not match its identity")
+		}
+		if err := commitStoreOutcome(ctx, tx, "task.cancel", "replayed", taskOutcomePayload{Task: saved.Task},
+			zap.Int64("event_id", eventID), zap.Int64("task_id", taskID), zap.Int64("revision", expectedRevision),
+			zap.String("task_status", string(saved.Task.Status))); err != nil {
+			return personal.Task{}, err
+		}
+		return saved.Task, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return personal.Task{}, err
+	}
+	if err := requireUserEvent(ctx, tx, eventID, false); err != nil {
 		return personal.Task{}, err
 	}
 	task, err := scanTask(tx.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM personal_tasks WHERE id=?`, taskID))
@@ -224,31 +257,31 @@ func (s *Store) CancelTask(ctx context.Context, eventID, taskID, expectedRevisio
 	if task.Revision != expectedRevision {
 		return personal.Task{}, fmt.Errorf("personal: task %d revision is %d, expected %d", taskID, task.Revision, expectedRevision)
 	}
-	if task.Status == personal.TaskCancelled {
-		if err := commitStoreOutcome(ctx, tx, "task.cancel", "unchanged", taskOutcomePayload{Task: *task},
-			zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID),
-			zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
+	now := time.Now().UTC()
+	if task.Status != personal.TaskCancelled {
+		if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='cancelled' WHERE task_id=? AND status IN ('queued','running')`, taskID); err != nil {
 			return personal.Task{}, err
 		}
-		return *task, nil
+		if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET status='cancelled',updated_at=? WHERE id=? AND revision=?`, timestamp(now), taskID, expectedRevision); err != nil {
+			return personal.Task{}, err
+		}
+		if err := releaseTerminalTaskInputsTx(ctx, tx); err != nil {
+			return personal.Task{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE personal_reply_groups SET closed=1
+			WHERE id IN (SELECT group_id FROM personal_reply_tasks WHERE task_id=?) AND NOT EXISTS(
+				SELECT 1 FROM personal_reply_tasks rt JOIN personal_tasks t ON t.id=rt.task_id
+				WHERE rt.group_id=personal_reply_groups.id AND t.status IN ('queued','running','awaiting_review'))`, taskID); err != nil {
+			return personal.Task{}, err
+		}
+		task.Status, task.UpdatedAt = personal.TaskCancelled, now
 	}
-	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='cancelled' WHERE task_id=? AND status IN ('queued','running')`, taskID); err != nil {
+	if err := refreshDeliveryValidityTx(ctx, tx, taskID); err != nil {
 		return personal.Task{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET status='cancelled',updated_at=? WHERE id=? AND revision=?`, timestamp(now), taskID, expectedRevision); err != nil {
+	if err := insertCancelTaskControlTx(ctx, tx, eventID, key, requestJSON, *task, now); err != nil {
 		return personal.Task{}, err
 	}
-	if err := releaseTerminalTaskInputsTx(ctx, tx); err != nil {
-		return personal.Task{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_reply_groups SET closed=1
-		WHERE id IN (SELECT group_id FROM personal_reply_tasks WHERE task_id=?) AND NOT EXISTS(
-			SELECT 1 FROM personal_reply_tasks rt JOIN personal_tasks t ON t.id=rt.task_id
-			WHERE rt.group_id=personal_reply_groups.id AND t.status IN ('queued','running','awaiting_review'))`, taskID); err != nil {
-		return personal.Task{}, err
-	}
-	task.Status, task.UpdatedAt = personal.TaskCancelled, now
 	if err := commitStoreOutcome(ctx, tx, "task.cancel", "cancelled", taskOutcomePayload{Task: *task},
 		zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID),
 		zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {
@@ -362,6 +395,9 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 	task.Attachments, task.Status, task.UpdatedAt = input.Attachments, personal.TaskQueued, now
 	run, err := s.taskRun(ctx, tx, task, eventID, input, now)
 	if err != nil {
+		return personal.Task{}, personal.Run{}, err
+	}
+	if err := refreshDeliveryValidityTx(ctx, tx, taskID); err != nil {
 		return personal.Task{}, personal.Run{}, err
 	}
 	if err := insertRequest(ctx, tx, eventID, key, "continue_task", payload, taskID, run.ID, 0); err != nil {
@@ -491,13 +527,17 @@ func (s *Store) SettleTask(ctx context.Context, eventID, taskID, expectedRevisio
 	if err := tx.QueryRowContext(ctx, `SELECT schedule_id FROM personal_schedule_occurrences WHERE task_id=?`, taskID).Scan(&scheduleID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return personal.Task{}, err
 	}
-	if _, err := insertDeliveryIntentTx(ctx, tx, deliveryIntentInsert{
+	intent, err := insertDeliveryIntentTx(ctx, tx, deliveryIntentInsert{
 		eventID: eventID, scheduleID: scheduleID.Int64,
 		purpose: personal.DeliveryResult, draft: settlement.Delivery,
 		scopes:           []personal.DeliveryScope{{TaskID: taskID, Revision: expectedRevision, RunID: sourceRunID}},
 		settlementTaskID: taskID, settlementRevision: expectedRevision,
 		settlementPayload: string(settlementPayload), settlementResult: string(resultSnapshot),
-	}, now); err != nil {
+	}, now)
+	if err != nil {
+		return personal.Task{}, err
+	}
+	if err := refreshDeliveryIntentValidityTx(ctx, tx, intent.ID); err != nil {
 		return personal.Task{}, err
 	}
 	if err := commitStoreOutcome(ctx, tx, "task.settle", "settled", taskOutcomePayload{Task: *task},

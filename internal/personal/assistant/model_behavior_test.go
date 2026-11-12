@@ -266,6 +266,17 @@ func TestTaskOutputAssociationRejectsMultipleTaskIDs(t *testing.T) {
 	if got := tools.taskID(); got != 0 {
 		t.Fatalf("task ID=%d, want 0 for multiple tasks", got)
 	}
+	if got := tools.taskIDsSorted(); !sameInt64Slice(got, []int64{7, 8}) {
+		t.Fatalf("task IDs=%v, want sorted related tasks [7 8]", got)
+	}
+	tools.taskIDs = map[int64]struct{}{8: {}}
+	if got := tools.taskIDsSorted(); !sameInt64Slice(got, []int64{8}) {
+		t.Fatalf("task IDs=%v, must not inherit unrelated event task 7", got)
+	}
+	tools.taskIDs = nil
+	if got := tools.taskIDsSorted(); !sameInt64Slice(got, []int64{7}) {
+		t.Fatalf("task IDs=%v, want event task fallback [7]", got)
+	}
 	tools.taskIDs = map[int64]struct{}{7: {}}
 	if got := tools.taskID(); got != 7 {
 		t.Fatalf("task ID=%d, want explicit event task 7", got)

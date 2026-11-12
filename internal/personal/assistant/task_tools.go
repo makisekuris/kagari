@@ -44,6 +44,12 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 			return fail(fmt.Errorf("task creation returned no task"))
 		}
 		p.addTaskID(task.ID)
+		p.taskResultCommitted = true
+		purpose := personal.DeliveryStatus
+		if run.Status != personal.RunQueued {
+			purpose = personal.DeliveryResult
+		}
+		p.addSupplementalTask(task.ID, purpose)
 		p.succeedTaskAction(attempt)
 		return personalToolReply{ActionID: attempt.actionID, OK: true, Queued: run.Status == personal.RunQueued, Task: &task, Run: &run}, nil
 	})
@@ -52,7 +58,20 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 	}
 
 	listTasks, err := utils.InferTool("list_tasks", "按关键词、更新时间及 ID 游标查找任务；后页同时传回 next_before_id、snapshot_max_id、query_key，并保持查询条件。goal/context 全文使用 read_task。", func(ctx context.Context, a personal.TaskQuery) (personal.TaskPage, error) {
-		return p.store.QueryTasks(ctx, personal.ReadScope{EventID: p.event.ID}, a)
+		page, err := p.store.QueryTasks(ctx, personal.ReadScope{EventID: p.event.ID}, a)
+		if err != nil {
+			return personal.TaskPage{}, err
+		}
+		purpose := personal.DeliveryControl
+		for _, task := range page.Tasks {
+			p.addTaskID(task.ID)
+			if task.Summary != "" {
+				purpose = personal.DeliveryResult
+			}
+			p.addSupplementalTask(task.ID, purpose)
+		}
+		p.recordSupplementalWork(purpose)
+		return page, nil
 	})
 	if err != nil {
 		return nil, err
@@ -70,6 +89,11 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 			return toolError(fmt.Errorf("task not found")), nil
 		}
 		p.addTaskID(task.ID)
+		purpose := personal.DeliveryControl
+		if task.Summary != "" {
+			purpose = personal.DeliveryResult
+		}
+		p.addSupplementalTask(task.ID, purpose)
 		card := personal.TaskCard(*task)
 		return personalToolReply{OK: true, Task: &card}, nil
 	})
@@ -117,6 +141,12 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 			return fail(fmt.Errorf("task update returned no task"))
 		}
 		p.addTaskID(task.ID)
+		p.taskResultCommitted = true
+		purpose := personal.DeliveryStatus
+		if run.Status != personal.RunQueued {
+			purpose = personal.DeliveryResult
+		}
+		p.addSupplementalTask(task.ID, purpose)
 		p.succeedTaskAction(attempt)
 		return personalToolReply{ActionID: attempt.actionID, OK: true, Queued: run.Status == personal.RunQueued, Task: &task, Run: &run}, nil
 	})
@@ -124,7 +154,7 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	cancelTask, err := utils.InferTool("cancel_task", "由直接用户事件取消指定版本的任务。", func(ctx context.Context, a cancelTaskArgs) (personalToolReply, error) {
+	cancelTask, err := utils.InferTool("cancel_task", "由直接用户事件取消任务执行并保留已生成成果及待发交付。取消计算不等于停止投递；用户明确要求不要再发送时另用 stop_delivery。", func(ctx context.Context, a cancelTaskArgs) (personalToolReply, error) {
 		if err := p.directUserMutation(); err != nil {
 			return toolError(err), nil
 		}
@@ -140,6 +170,11 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 			return toolError(fmt.Errorf("task cancellation returned no task")), nil
 		}
 		p.addTaskID(task.ID)
+		p.persistedControl = true
+		p.mustNotify = true
+		if err := p.captureTaskCancellationDeliveries(ctx); err != nil {
+			return toolError(err), nil
+		}
 		return personalToolReply{OK: true, Task: &task}, nil
 	})
 	if err != nil {
@@ -205,6 +240,12 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 			return fail(fmt.Errorf("task continuation returned no task"))
 		}
 		p.addTaskID(task.ID)
+		p.taskResultCommitted = true
+		purpose := personal.DeliveryStatus
+		if run.Status != personal.RunQueued {
+			purpose = personal.DeliveryResult
+		}
+		p.addSupplementalTask(task.ID, purpose)
 		if tracking {
 			p.succeedTaskAction(attempt)
 		} else if p.event.Kind == personal.EventTask {
@@ -265,6 +306,7 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 			return toolError(fmt.Errorf("task settlement returned no task")), nil
 		}
 		p.addTaskID(task.ID)
+		p.taskResultCommitted = true
 		p.mustNotify = true
 		draft := settlement.Delivery
 		draft.Attachments = append([]string{}, settlement.Delivery.Attachments...)
@@ -287,6 +329,11 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 			return toolError(fmt.Errorf("run not found")), nil
 		}
 		p.addTaskID(run.TaskID)
+		purpose := personal.DeliveryControl
+		if run.Result != "" {
+			purpose = personal.DeliveryResult
+		}
+		p.addSupplementalTask(run.TaskID, purpose)
 		card := personal.RunCard(*run)
 		return personalToolReply{OK: true, Run: &card}, nil
 	})
@@ -298,8 +345,19 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 		TaskID int64 `json:"task_id"`
 		personal.ListPage
 	}) (personal.RunPage, error) {
+		page, err := p.store.QueryRuns(ctx, personal.ReadScope{EventID: p.event.ID}, a.TaskID, a.ListPage)
+		if err != nil {
+			return personal.RunPage{}, err
+		}
 		p.addTaskID(a.TaskID)
-		return p.store.QueryRuns(ctx, personal.ReadScope{EventID: p.event.ID}, a.TaskID, a.ListPage)
+		purpose := personal.DeliveryControl
+		for _, run := range page.Runs {
+			if run.Result != "" {
+				purpose = personal.DeliveryResult
+			}
+		}
+		p.addSupplementalTask(a.TaskID, purpose)
+		return page, nil
 	})
 	if err != nil {
 		return nil, err

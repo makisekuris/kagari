@@ -124,7 +124,7 @@ func TestQueueWaitingReplyUsesTaskState(t *testing.T) {
 	}
 }
 
-func TestRecordReplyRemovesPendingWaitAndClosesGroup(t *testing.T) {
+func TestRecordReplySuppressesPendingWaitAndClosesGroup(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Minute)
 	event := openUserEvent(t, s, 1, 1, "帮我处理")
@@ -133,10 +133,10 @@ func TestRecordReplyRemovesPendingWaitAndClosesGroup(t *testing.T) {
 	}
 	finishEvent(t, s, event, personal.TurnOutput{Text: "处理完成"}, []string{"处理完成"})
 	var deliveries, histories int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE event_id=?`, event.ID).Scan(&deliveries); err != nil || deliveries != 1 {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE event_id=?`, event.ID).Scan(&deliveries); err != nil || deliveries != 2 {
 		t.Fatalf("outbox count = %d, %v", deliveries, err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_history WHERE event_id=? AND role='assistant'`, event.ID).Scan(&histories); err != nil || histories != 1 {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_history WHERE event_id=? AND role='assistant'`, event.ID).Scan(&histories); err != nil || histories != 2 {
 		t.Fatalf("assistant history count = %d, %v", histories, err)
 	}
 	var notified, hasContent, closed int
@@ -145,7 +145,11 @@ func TestRecordReplyRemovesPendingWaitAndClosesGroup(t *testing.T) {
 		FROM personal_reply_groups WHERE id=?`, event.ID).Scan(&notified, &hasContent, &closed, &waitOutbox, &waitHistory); err != nil {
 		t.Fatal(err)
 	}
-	if notified != 1 || hasContent != 1 || closed != 1 || waitOutbox != 0 || waitHistory != 0 {
+	var waitStatus string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM personal_outbox WHERE id=?`, waitOutbox).Scan(&waitStatus); err != nil {
+		t.Fatal(err)
+	}
+	if notified != 1 || hasContent != 1 || closed != 1 || waitOutbox == 0 || waitHistory == 0 || waitStatus != "suppressed" {
 		t.Fatalf("reply group state = notified:%d content:%d closed:%d wait:%d/%d", notified, hasContent, closed, waitOutbox, waitHistory)
 	}
 }
@@ -235,7 +239,7 @@ func TestMergeReplyInputsKeepsOriginalEvents(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE event_id IN (?,?)`, first.ID, second.ID).Scan(&waits); err != nil {
 		t.Fatal(err)
 	}
-	if firstGroup != secondGroup || firstGroup != first.ID || events != 2 || history != 3 || groups != 1 || tasks != 2 || waits != 1 {
+	if firstGroup != secondGroup || firstGroup != first.ID || events != 2 || history != 4 || groups != 1 || tasks != 2 || waits != 2 {
 		t.Fatalf("merge: groups=%d/%d events=%d history=%d reply groups=%d tasks=%d waits=%d", firstGroup, secondGroup, events, history, groups, tasks, waits)
 	}
 }
@@ -306,13 +310,13 @@ func TestMergeReplyGroupsKeepsSendingWaitForRetrySuppression(t *testing.T) {
 		t.Fatal(err)
 	}
 	var retryRows, sentRows int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE id=?`, secondWait.ID).Scan(&retryRows); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE id=? AND status='suppressed'`, secondWait.ID).Scan(&retryRows); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE id=? AND status='sent'`, firstWait.ID).Scan(&sentRows); err != nil {
 		t.Fatal(err)
 	}
-	if retryRows != 0 || sentRows != 1 {
+	if retryRows != 1 || sentRows != 1 {
 		t.Fatalf("merged wait rows: retry=%d sent=%d", retryRows, sentRows)
 	}
 }
@@ -407,14 +411,17 @@ func TestGetTaskReplyDoesNotKeepInquiryGroupOpen(t *testing.T) {
 				t.Fatalf("reply groups: inquiry closed=%d, original content=%d closed=%d, inquiry task links=%d", inquiryGroupClosed, originalGroupContent, originalGroupClosed, inquiryTaskLinks)
 			}
 			if waitQueued {
-				var waits, histories int
+				var waits, histories, suppressed int
 				if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE event_id=?`, taskEvent.ID).Scan(&waits); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE event_id=? AND status='suppressed'`, taskEvent.ID).Scan(&suppressed); err != nil {
 					t.Fatal(err)
 				}
 				if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_history WHERE event_id=? AND role='assistant'`, taskEvent.ID).Scan(&histories); err != nil {
 					t.Fatal(err)
 				}
-				if waits != 0 || histories != 0 {
+				if waits != 1 || histories != 1 || suppressed != 1 {
 					t.Fatalf("pending wait after progress reply: outbox=%d history=%d", waits, histories)
 				}
 			} else if queued, err := s.QueueWaitingReply(ctx, taskEvent.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || queued {
@@ -509,7 +516,15 @@ func TestSuppressStaleWaitAfterTaskStops(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT wait_notified FROM personal_reply_groups WHERE id=?`, event.ID).Scan(&notified); err != nil {
 		t.Fatal(err)
 	}
-	if waits != 0 || assistantHistory != 0 || notified != 1 {
+	var waitStatus string
+	var waitOutbox, waitHistory int64
+	if err := s.db.QueryRowContext(ctx, `SELECT wait_outbox_id,wait_history_id FROM personal_reply_groups WHERE id=?`, event.ID).Scan(&waitOutbox, &waitHistory); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM personal_outbox WHERE id=?`, waitOutbox).Scan(&waitStatus); err != nil {
+		t.Fatal(err)
+	}
+	if waits != 1 || assistantHistory != 1 || notified != 1 || waitOutbox == 0 || waitHistory == 0 || waitStatus != "suppressed" {
 		t.Fatalf("stale wait: outbox=%d history=%d wait_notified=%d", waits, assistantHistory, notified)
 	}
 }
