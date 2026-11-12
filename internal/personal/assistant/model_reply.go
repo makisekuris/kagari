@@ -14,6 +14,16 @@ import (
 // Tool outcomes and explicit questions take precedence over the model's reply label.
 func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, tools *personalTools, raw string, createdAttachments []channel.Attachment, modelErr error) (personalTurnResponse, error) {
 	required := tools.requiredTaskReply()
+	if tools.settledDelivery != nil {
+		if modelErr != nil {
+			logging.FromContext(ctx).Warn("conversation.reply.recovered", append(logging.ErrorFields(modelErr), zap.Int64("event_id", input.Event.ID))...)
+		}
+		return personalTurnResponse{
+			Text:        tools.settledDelivery.Text,
+			ReplyKind:   personal.ReplyContent,
+			Attachments: append([]string{}, tools.settledDelivery.Attachments...),
+		}, nil
+	}
 	if modelErr != nil {
 		if required == "" {
 			return personalTurnResponse{}, modelErr

@@ -173,21 +173,64 @@ func TestScheduledCheckFrozenWindowAndAtomicCredit(t *testing.T) {
 		t.Fatalf("callback schedule lost=%+v", e)
 	}
 	bad := &personal.CheckAssessment{Complete: true, RequiredSources: []personal.SourceAssessment{{ID: "wrong", Complete: true, Evidence: "looked"}}}
-	if _, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, personal.TaskCompleted, "done", bad); err == nil {
+	if _, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, testTaskSettlement(personal.TaskCompleted, "done", bad)); err == nil {
 		t.Fatal("mismatched assessment accepted")
 	}
 	state, _ := s.Task(ctx, r.TaskID)
 	got, _ := s.Schedule(ctx, p.ID)
-	if state.Status != personal.TaskAwaitingReview || got.CoveredThrough != nil {
+	var intentsAfterReject int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_delivery_intents WHERE event_id=?`, e.ID).Scan(&intentsAfterReject); err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != personal.TaskAwaitingReview || got.CoveredThrough != nil || intentsAfterReject != 0 {
 		t.Fatal("rejected assessment changed state")
 	}
 	good := &personal.CheckAssessment{Complete: true, RequiredSources: []personal.SourceAssessment{{ID: "feed", Complete: true, Evidence: "All history in frozen window checked"}}}
-	if _, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, personal.TaskCompleted, "done", good); err != nil {
+	settlement := testTaskSettlement(personal.TaskCompleted, "done", good)
+	settledTask, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, settlement)
+	if err != nil {
 		t.Fatal(err)
 	}
 	got, _ = s.Schedule(ctx, p.ID)
 	if got.CoveredThrough == nil || !got.CoveredThrough.Equal(start) {
 		t.Fatalf("credit=%+v", got)
+	}
+	credited := got.CoveredThrough
+	info, err := s.ScheduleForTask(ctx, r.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creditedAt := info.Occurrence.CreditedAt
+	replayed, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, settlement)
+	if err != nil || replayed.UpdatedAt != settledTask.UpdatedAt || replayed.Status != settledTask.Status {
+		t.Fatalf("same-payload settlement replay=(%+v,%v), original=(%+v)", replayed, err, settledTask)
+	}
+	conflict := settlement
+	conflict.Summary = "different summary"
+	conflict.Delivery.Text = "different result"
+	if _, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, conflict); err == nil {
+		t.Fatal("different settlement payload reused the saved identity")
+	}
+	var intentCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_delivery_intents WHERE event_id=? AND settlement_task_id=?`, e.ID, r.TaskID).Scan(&intentCount); err != nil || intentCount != 1 {
+		t.Fatalf("settlement intents after replay/conflict=%d, %v", intentCount, err)
+	}
+	conflicts := []personal.TaskSettlement{settlement, settlement, settlement}
+	conflicts[0].Delivery.Text = "different text"
+	conflicts[1].Delivery.Attachments = []string{"different-file"}
+	conflicts[2].Status = personal.TaskFailed
+	for i, conflict := range conflicts {
+		if _, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, conflict); err == nil || !strings.Contains(err.Error(), "different payload") {
+			t.Errorf("conflicting settlement field %d error=%v, want identity payload conflict", i, err)
+		}
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_delivery_intents WHERE event_id=? AND settlement_task_id=?`, e.ID, r.TaskID).Scan(&intentCount); err != nil || intentCount != 1 {
+		t.Fatalf("settlement intents after field conflicts=%d, %v", intentCount, err)
+	}
+	got, _ = s.Schedule(ctx, p.ID)
+	info, err = s.ScheduleForTask(ctx, r.TaskID)
+	if err != nil || got.CoveredThrough == nil || !got.CoveredThrough.Equal(*credited) || info.Occurrence.CreditedAt == nil || creditedAt == nil || !info.Occurrence.CreditedAt.Equal(*creditedAt) {
+		t.Fatalf("replay changed schedule credit: schedule=%+v occurrence=%+v err=%v", got, info, err)
 	}
 	finishEvent(t, s, e, personal.TurnOutput{TaskID: r.TaskID, Text: "done"}, []string{"done"})
 	if _, err := s.db.Exec(`UPDATE personal_outbox SET status='failed'`); err != nil {
@@ -197,7 +240,7 @@ func TestScheduledCheckFrozenWindowAndAtomicCredit(t *testing.T) {
 	if !got.CoveredThrough.Equal(start) {
 		t.Fatal("delivery failure changed credit")
 	}
-	info, _ := s.ScheduleForTask(ctx, r.TaskID)
+	info, _ = s.ScheduleForTask(ctx, r.TaskID)
 	if info.Occurrence.CreditedTaskRevision != 1 || info.Occurrence.CreditedAt == nil {
 		t.Fatalf("receipt=%+v", info)
 	}
@@ -242,7 +285,7 @@ func TestScheduleOldScopeAndRevisedTaskCannotCredit(t *testing.T) {
 			if !revise {
 				check = &personal.CheckAssessment{Complete: true, RequiredSources: []personal.SourceAssessment{{ID: "feed", Complete: true, Evidence: "old goal checked"}}}
 			}
-			if _, err := s.SettleTask(ctx, callback.ID, r.TaskID, r.Revision, personal.TaskCompleted, "done", check); err != nil {
+			if _, err := s.SettleTask(ctx, callback.ID, r.TaskID, r.Revision, testTaskSettlement(personal.TaskCompleted, "done", check)); err != nil {
 				t.Fatal(err)
 			}
 			got, _ := s.Schedule(ctx, p.ID)
@@ -297,7 +340,7 @@ func TestScheduleWaitingInputStopsBlockingAfterCallbackCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := dispatchTestFinish(t, s, r)
-	if _, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, personal.TaskWaitingInput, "Need a selection"); err != nil {
+	if _, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, testTaskSettlement(personal.TaskWaitingInput, "Need a selection")); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.Schedule(ctx, p.ID)
@@ -322,11 +365,11 @@ func TestScheduledCheckCreditRollsBackWithSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := dispatchTestFinish(t, s, r)
-	if _, err := s.db.Exec(`CREATE TRIGGER reject_settle BEFORE UPDATE ON personal_tasks WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT,'fixture failure'); END`); err != nil {
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_settlement_intent BEFORE INSERT ON personal_delivery_intents BEGIN SELECT RAISE(ABORT,'fixture failure'); END`); err != nil {
 		t.Fatal(err)
 	}
 	check := &personal.CheckAssessment{Complete: true, RequiredSources: []personal.SourceAssessment{{ID: "feed", Complete: true, Evidence: "checked"}}}
-	if _, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, personal.TaskCompleted, "done", check); err == nil {
+	if _, err := s.SettleTask(ctx, e.ID, r.TaskID, 1, testTaskSettlement(personal.TaskCompleted, "done", check)); err == nil {
 		t.Fatal("injected failure accepted")
 	}
 	info, err := s.ScheduleForTask(ctx, r.TaskID)
@@ -337,7 +380,11 @@ func TestScheduledCheckCreditRollsBackWithSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.Status != personal.TaskAwaitingReview || info.Schedule.CoveredThrough != nil || info.Occurrence.CheckResult != nil || info.Occurrence.CreditedAt != nil {
+	var intentCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM personal_delivery_intents WHERE event_id=?`, e.ID).Scan(&intentCount); err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != personal.TaskAwaitingReview || info.Schedule.CoveredThrough != nil || info.Occurrence.CheckResult != nil || info.Occurrence.CreditedAt != nil || intentCount != 0 {
 		t.Fatalf("partial credit: %+v %+v", task, info)
 	}
 }

@@ -75,10 +75,10 @@ func TestScheduledAttachmentFallbackKeepsAttributionAndWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteAttachment(ctx, file.ID); err != nil {
+	if _, err := s.SettleTask(ctx, callback.ID, run.TaskID, run.Revision, personal.TaskSettlement{Status: personal.TaskFailed, Summary: "Source failed", Delivery: personal.DeliveryDraft{Text: "Source failed", Attachments: []string{file.ID}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SettleTask(ctx, callback.ID, run.TaskID, run.Revision, personal.TaskFailed, "Source failed"); err != nil {
+	if err := s.DeleteAttachment(ctx, file.ID); err != nil {
 		t.Fatal(err)
 	}
 	r := testRuntime(s)
@@ -165,7 +165,7 @@ func TestRevisedScheduledTaskLabelsItsWindowAsHistorical(t *testing.T) {
 	}
 	callback := testkit.FinishRun(t, s, run)
 	check := &personal.CheckAssessment{Complete: true, RequiredSources: []personal.SourceAssessment{{ID: "feed", Complete: true, Evidence: "No updates in the full interval"}}}
-	if _, err := s.SettleTask(ctx, callback.ID, run.TaskID, run.Revision, personal.TaskCompleted, "No new updates", check); err != nil {
+	if _, err := s.SettleTask(ctx, callback.ID, run.TaskID, run.Revision, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: "No new updates", Delivery: personal.DeliveryDraft{Text: "No new updates"}, Assessment: check}); err != nil {
 		t.Fatal(err)
 	}
 	testkit.FinishEvent(t, s, callback, personal.TurnOutput{TaskID: run.TaskID}, nil)
@@ -182,7 +182,7 @@ func TestRevisedScheduledTaskLabelsItsWindowAsHistorical(t *testing.T) {
 		t.Fatal(err)
 	}
 	callback = testkit.FinishRun(t, s, *revised)
-	if _, err := s.SettleTask(ctx, callback.ID, revised.TaskID, revised.Revision, personal.TaskCompleted, "Exercise drafted"); err != nil {
+	if _, err := s.SettleTask(ctx, callback.ID, revised.TaskID, revised.Revision, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: "Exercise drafted", Delivery: personal.DeliveryDraft{Text: "Exercise drafted"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := testRuntime(s).publish(ctx, callback, personal.TurnOutput{TaskID: revised.TaskID, Text: "Exercise drafted"}); err != nil {

@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"kagari/internal/channel"
 	"kagari/internal/personal"
 )
 
@@ -169,9 +170,18 @@ func pauseScheduleTx(ctx context.Context, tx *sql.Tx, schedule personal.Schedule
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text,schedule_id) VALUES(?,'assistant',?,?)`, eventID, text, schedule.ID); err != nil {
+	intent, err := insertDeliveryIntentTx(ctx, tx, deliveryIntentInsert{
+		eventID: eventID, scheduleID: schedule.ID, purpose: personal.DeliveryControl,
+		draft: personal.DeliveryDraft{Text: text, Attachments: []string{}},
+	}, now)
+	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,status,next_attempt_at) VALUES(?,1,?,'pending',?)`, eventID, text, timestamp(now))
-	return err
+	if _, err := appendDeliveryPartsTx(ctx, tx, eventID, intent.ID, text, []channel.Attachment{}, []string{text}, schedule.ID, 0); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE personal_outbox SET next_attempt_at=? WHERE delivery_id=?`, timestamp(now.UTC()), intent.ID); err != nil {
+		return err
+	}
+	return updateDeliveryIntentRenderedTx(ctx, tx, intent.ID, "")
 }

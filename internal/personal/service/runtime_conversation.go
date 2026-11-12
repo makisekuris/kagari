@@ -9,11 +9,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"kagari/internal/channel"
 	"kagari/internal/logging"
 	"kagari/internal/personal"
 	"kagari/internal/personal/internal/textclip"
-	"kagari/internal/reader"
 )
 
 func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
@@ -34,6 +32,14 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 			log.Info("conversation.finished", append(fields, zap.String("outcome", outcome))...)
 		}
 	}()
+	intents, err := r.Store.EventDeliveries(ctx, event.ID)
+	if err != nil {
+		return true, err
+	}
+	if len(intents) > 0 {
+		outcome = "recovered_delivery"
+		return true, r.publishIntents(ctx, *event, intents)
+	}
 	if event.Kind == personal.EventTask {
 		state, err := r.taskCallbackState(ctx, *event)
 		if err != nil {
@@ -54,7 +60,7 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 				return true, fmt.Errorf("personal: continued callback task %d is missing", event.TaskID)
 			}
 			if task.Status == personal.TaskWaitingBudget {
-				return true, r.publish(ctx, *event, personal.TurnOutput{TaskID: task.ID, Text: taskBudgetText(task)})
+				return true, r.publish(ctx, *event, personal.TurnOutput{TaskID: task.ID, Text: taskBudgetText(task), Purpose: personal.DeliveryStatus})
 			}
 			outcome = "continued"
 			return true, r.Store.CompleteEvent(ctx, event.ID, personal.TurnOutput{TaskID: event.TaskID, Silent: true}, nil)
@@ -75,7 +81,7 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 			return true, r.completeStaleTaskCallback(ctx, *event)
 		}
 		if task.Status == personal.TaskWaitingBudget {
-			return true, r.publish(ctx, *event, personal.TurnOutput{TaskID: task.ID, Text: taskBudgetText(task)})
+			return true, r.publish(ctx, *event, personal.TurnOutput{TaskID: task.ID, Text: taskBudgetText(task), Purpose: personal.DeliveryStatus})
 		}
 	}
 	if event.Interrupted {
@@ -124,6 +130,13 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 	}
 	if ctx.Err() != nil {
 		return true, ctx.Err()
+	}
+	intents, err = r.Store.EventDeliveries(ctx, event.ID)
+	if err != nil {
+		return true, err
+	}
+	if len(intents) > 0 {
+		return true, r.publishIntents(ctx, *event, intents)
 	}
 	callbackState := personal.TaskCallbackCurrent
 	if event.Kind == personal.EventTask {
@@ -174,6 +187,7 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 			// owns any further Task decision.
 			if current.Status == personal.TaskWaitingBudget {
 				output.Text = taskBudgetText(current)
+				output.Purpose = personal.DeliveryStatus
 				output.TaskID = task.ID
 				output.Silent = false
 			}
@@ -194,7 +208,10 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 				output = personal.TurnOutput{TaskID: task.ID, Silent: true}
 			} else {
 				// An incomplete planning turn must not strand work without a visible state.
-				settled, err := r.Store.SettleTask(ctx, event.ID, task.ID, current.Revision, personal.TaskWaitingInput, current.Summary)
+				draft := fmt.Sprintf("「%s」的阶段成果已保存，后续安排未能完成。你可以让我继续。\n\n%s", current.Title, textclip.Excerpt(current.Summary, 6000))
+				_, err := r.Store.SettleTask(ctx, event.ID, task.ID, current.Revision, personal.TaskSettlement{
+					Status: personal.TaskWaitingInput, Summary: current.Summary, Delivery: personal.DeliveryDraft{Text: draft},
+				})
 				if errors.Is(err, personal.ErrStaleTaskCallback) {
 					outcome = "stale"
 					return true, r.completeStaleTaskCallback(ctx, *event)
@@ -202,12 +219,13 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 				if err != nil {
 					return true, err
 				}
-				output.Text = fmt.Sprintf("「%s」的阶段成果已保存，后续安排未能完成。你可以让我继续。\n\n%s", settled.Title, textclip.Excerpt(settled.Summary, 6000))
+				output.Text = draft
 				output.TaskID = task.ID
 				output.Silent = false
 			}
 		} else if current.Status == personal.TaskWaitingBudget {
 			output.Text = taskBudgetText(current)
+			output.Purpose = personal.DeliveryStatus
 			output.TaskID = task.ID
 			output.Silent = false
 		} else if current.Status == personal.TaskCompleted || current.Status == personal.TaskFailed || current.Status == personal.TaskWaitingInput {
@@ -254,13 +272,16 @@ func (r *Runtime) recoverTurn(ctx context.Context, event personal.Event, task *p
 			return r.publish(ctx, event, personal.TurnOutput{TaskID: task.ID, ScheduleID: event.ScheduleID, Silent: true})
 		}
 		if task.Status == personal.TaskAwaitingReview {
-			if _, err := r.Store.SettleTask(ctx, event.ID, task.ID, task.Revision, personal.TaskWaitingInput, task.Summary); err != nil {
+			draft := fmt.Sprintf("「%s」的阶段成果已保存，但后续安排被中断。请告诉我是否继续。\n\n%s", task.Title, textclip.Excerpt(task.Summary, 6000))
+			if _, err := r.Store.SettleTask(ctx, event.ID, task.ID, task.Revision, personal.TaskSettlement{
+				Status: personal.TaskWaitingInput, Summary: task.Summary, Delivery: personal.DeliveryDraft{Text: draft},
+			}); err != nil {
 				if errors.Is(err, personal.ErrStaleTaskCallback) {
 					return r.completeStaleTaskCallback(ctx, event)
 				}
 				return err
 			}
-			output.Text = fmt.Sprintf("「%s」的阶段成果已保存，但后续安排被中断。请告诉我是否继续。\n\n%s", task.Title, textclip.Excerpt(task.Summary, 6000))
+			output.Text = draft
 		} else {
 			output.Text = fmt.Sprintf("「%s」此前的回复被中断，已保存的结果如下。\n\n%s", task.Title, textclip.Excerpt(task.Summary, 6000))
 		}
@@ -279,6 +300,13 @@ func (r *Runtime) recoverTurn(ctx context.Context, event personal.Event, task *p
 }
 
 func (r *Runtime) publish(ctx context.Context, event personal.Event, output personal.TurnOutput) error {
+	intents, err := r.Store.EventDeliveries(ctx, event.ID)
+	if err != nil {
+		return err
+	}
+	if len(intents) > 0 {
+		return r.publishIntents(ctx, event, intents)
+	}
 	if event.Kind == personal.EventTask {
 		state, err := r.taskCallbackState(ctx, event)
 		if err != nil {
@@ -291,102 +319,19 @@ func (r *Runtime) publish(ctx context.Context, event personal.Event, output pers
 	if output.Silent {
 		return r.Store.CompleteEvent(ctx, event.ID, personal.TurnOutput{TaskID: output.TaskID, ScheduleID: output.ScheduleID, Silent: true}, nil)
 	}
-	if output.Text != "" {
-		skipPresentation := false
-		if event.Kind == personal.EventUser && output.ReplyKind == personal.ReplyReceipt {
-			deferred, err := r.Store.CanDeferReply(ctx, event.ID)
-			if err != nil {
-				return err
-			}
-			skipPresentation = deferred
-		}
-		if !skipPresentation {
-			draft := output.Text
-			presented, err := r.PresentReply(ctx, event, draft)
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if err == nil && strings.TrimSpace(presented) == "" {
-				err = errors.New("reply presenter returned blank text")
-			}
-			if err == nil {
-				draftURLs := reader.ExtractURLs(draft)
-				presentedURLs := reader.ExtractURLs(presented)
-				if len(presentedURLs) != len(draftURLs) {
-					err = fmt.Errorf("reply presenter changed source URL set: draft has %d distinct URLs, presentation has %d", len(draftURLs), len(presentedURLs))
-				} else {
-					presentedURLSet := make(map[string]bool, len(presentedURLs))
-					for _, url := range presentedURLs {
-						presentedURLSet[url] = true
-					}
-					for _, url := range draftURLs {
-						if !presentedURLSet[url] {
-							err = fmt.Errorf("reply presenter omitted source URL %q", url)
-							break
-						}
-					}
-				}
-			}
-			if err != nil {
-				logging.FromContext(ctx).Warn("conversation.reply.presentation_failed", append(logging.ErrorFields(err), zap.Int64("event_id", event.ID))...)
-			} else {
-				output.Text = presented
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-		}
-		var literals []string
-		if event.Kind == personal.EventUser {
-			literals = channel.MarkdownCodeLiterals(event.Text)
-		}
-		output.Text = channel.PlainTextMarkdown(output.Text, literals...)
-	}
-	prefix := ""
-	if event.Kind == personal.EventTask && event.TaskID > 0 && event.ScheduleID > 0 {
-		info, err := r.Store.ScheduleForTask(ctx, event.TaskID)
-		if err != nil {
-			return err
-		}
-		if info != nil {
-			label := fmt.Sprintf("计划 #%d · 任务 #%d", info.Schedule.ID, event.TaskID)
-			if w := info.Occurrence.Window; w != nil {
-				if !info.Occurrence.CoverageEligible {
-					label += fmt.Sprintf("\n原检查区间 [%s, %s)，本次目标已修改，不计入计划检查进度", w.Start.Format(time.RFC3339), w.End.Format(time.RFC3339))
-				} else {
-					complete := info.Occurrence.CheckResult != nil && info.Occurrence.CheckResult.Complete && len(info.Occurrence.CheckResult.Limitations) == 0
-					completeness := "不完整"
-					if complete {
-						completeness = "完整"
-					}
-					label += fmt.Sprintf("\n检查区间 [%s, %s)，检查结果：%s", w.Start.Format(time.RFC3339), w.End.Format(time.RFC3339), completeness)
-				}
-			}
-			prefix = label + "\n\n"
-			output.Text = prefix + output.Text
-			output.ScheduleID = event.ScheduleID
-		}
-	}
-	var chunks []string
-	if output.Text != "" {
-		var err error
-		chunks, err = r.Prepare(output.Text)
-		if err != nil {
-			return err
-		}
-	}
-	if len(chunks) == 0 && len(output.Attachments) == 0 {
-		return errors.New("personal delivery produced no message")
+	output, chunks, err := r.renderReply(ctx, event, output)
+	if err != nil {
+		return err
 	}
 	if err := r.Store.CompleteEvent(ctx, event.ID, output, chunks); err != nil {
 		if !errors.Is(err, personal.ErrAttachmentUnavailable) || len(output.Attachments) == 0 {
 			return err
 		}
-		fallback := personal.TurnOutput{TaskID: output.TaskID, ScheduleID: output.ScheduleID, Text: prefix + "要发送的附件已删除或不可用，未发送。请重新上传或重新生成文件。"}
-		fallbackChunks, prepareErr := r.Prepare(fallback.Text)
+		text, fallbackChunks, prepareErr := r.unavailableAttachmentReply(ctx, event)
 		if prepareErr != nil {
 			return prepareErr
 		}
+		fallback := personal.TurnOutput{TaskID: output.TaskID, ScheduleID: output.ScheduleID, Text: text, Purpose: output.Purpose}
 		return r.Store.CompleteEvent(ctx, event.ID, fallback, fallbackChunks)
 	}
 	return nil

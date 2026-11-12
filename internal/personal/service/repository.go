@@ -14,7 +14,8 @@ type Repository interface {
 	ClaimEvent(context.Context) (*personal.Event, error)
 	TaskCallbackState(context.Context, int64) (personal.TaskCallbackState, error)
 	History(context.Context, int64, int) ([]personal.Message, error)
-	CompleteEvent(context.Context, int64, personal.TurnOutput, []string) error
+	CompleteEvent(context.Context, int64, personal.TurnOutput, []string, ...personal.RenderedDelivery) error
+	EventDeliveries(context.Context, int64) ([]personal.DeliveryIntent, error)
 	CanDeferReply(context.Context, int64) (bool, error)
 	QueueWaitingReply(context.Context, time.Time, time.Duration) (bool, error)
 	PendingInputs(context.Context, int64) ([]personal.Event, error)
@@ -24,7 +25,7 @@ type Repository interface {
 	Run(context.Context, int64) (*personal.Run, error)
 	Task(context.Context, int64) (*personal.Task, error)
 	ContinueTask(context.Context, int64, string, int64, int64, string, bool) (personal.Task, personal.Run, error)
-	SettleTask(context.Context, int64, int64, int64, personal.TaskStatus, string, ...*personal.CheckAssessment) (personal.Task, error)
+	SettleTask(context.Context, int64, int64, int64, personal.TaskSettlement) (personal.Task, error)
 	AccountEvent(context.Context, int64, time.Duration) error
 	MemoryReviewInput(context.Context, int64) (personal.MemoryReviewInput, error)
 	FinishMemoryReview(context.Context, int64, personal.MemoryReview, string) error

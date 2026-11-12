@@ -125,7 +125,7 @@ func TestMainAgentScheduledCheckAssessmentCreditsCoverage(t *testing.T) {
 		RequiredSources: []personal.SourceAssessment{{ID: "feed", Complete: true, Evidence: "The required feed was checked for the frozen window."}},
 	}
 	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
-		testkit.ResponseTool("settle_task", settleTaskArgs{TaskID: run.TaskID, ExpectedRevision: run.Revision, Status: personal.TaskCompleted, Summary: "Complete feed check saved.", Assessment: assessment}, "scheduled-settle"),
+		testkit.ResponseTool("settle_task", settleTaskArgs{TaskID: run.TaskID, ExpectedRevision: run.Revision, Status: personal.TaskCompleted, Summary: "Complete feed check saved.", Delivery: personal.DeliveryDraft{Text: "连续检查已完成。", Attachments: []string{}}, Assessment: assessment}, "scheduled-settle"),
 		testkit.ResponseText(`{"text":"连续检查已完成。","reply_kind":"silent","attachments":[]}`),
 	}}
 	main := newMainAgent(t, fixture, store)
@@ -164,7 +164,7 @@ func TestMainAgentOrdinaryTaskCompletesWithoutCheckAssessment(t *testing.T) {
 		t.Fatalf("ClaimEvent() = (%+v, %v), want ordinary task callback", callback, err)
 	}
 	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
-		testkit.ResponseTool("settle_task", settleTaskArgs{TaskID: task.ID, ExpectedRevision: run.Revision, Status: personal.TaskCompleted, Summary: "The exercise is complete."}, "ordinary-settle"),
+		testkit.ResponseTool("settle_task", settleTaskArgs{TaskID: task.ID, ExpectedRevision: run.Revision, Status: personal.TaskCompleted, Summary: "The exercise is complete.", Delivery: personal.DeliveryDraft{Text: "The exercise is complete.", Attachments: []string{}}}, "ordinary-settle"),
 		testkit.ResponseText(`{"text":"普通任务已完成。","reply_kind":"silent","attachments":[]}`),
 	}}
 	main := newMainAgent(t, fixture, store)

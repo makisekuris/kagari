@@ -29,7 +29,7 @@ func TestRuntimeDeferredReadingAndWaitingDelivery(t *testing.T) {
 				if err != nil {
 					return personal.TurnOutput{}, err
 				}
-				_, err = s.SettleTask(ctx, input.Event.ID, task.ID, task.Revision, personal.TaskCompleted, "requires a dedicated server")
+				_, err = s.SettleTask(ctx, input.Event.ID, task.ID, task.Revision, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: "requires a dedicated server", Delivery: personal.DeliveryDraft{Text: "requires a dedicated server"}})
 				return personal.TurnOutput{TaskID: task.ID, Text: "这个方案需要独立服务器，不适合直接部署到静态托管平台。"}, err
 			}
 			r.Execute = func(context.Context, personal.Run, func(string) error) (personal.StageResult, error) {
@@ -121,7 +121,7 @@ func TestRuntimeClosesAfterAnImportantIntermediateReply(t *testing.T) {
 			_, _, err = s.ContinueTask(ctx, input.Event.ID, "next", task.ID, task.Revision, "Check the second reference.", false)
 			return personal.TurnOutput{TaskID: task.ID, Text: "第一个页面说明它不支持离线使用，我还在核对第二个页面。"}, err
 		}
-		_, err = s.SettleTask(ctx, input.Event.ID, task.ID, task.Revision, personal.TaskCompleted, "第二个页面也核对完了，结论不变。")
+		_, err = s.SettleTask(ctx, input.Event.ID, task.ID, task.Revision, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: "第二个页面也核对完了，结论不变。", Delivery: personal.DeliveryDraft{Text: "第二个页面也核对完了，结论不变。"}})
 		return personal.TurnOutput{TaskID: task.ID, Silent: true}, err
 	}
 	testkit.AcceptInput(t, s, "1", testkit.SourceInput("1", "https://example.com/first https://example.com/second"))
@@ -159,7 +159,7 @@ func TestRuntimeClosesWhenModelSettlesWithoutReplyText(t *testing.T) {
 			task, _, err := s.CreateTask(ctx, input.Event.ID, "read", "资料核对", personal.TaskInput{Goal: "核对资料"})
 			return personal.TurnOutput{TaskID: task.ID, Silent: true}, err
 		}
-		task, err := s.SettleTask(ctx, input.Event.ID, input.Event.TaskID, 1, personal.TaskCompleted, "新资料已经核对，结论不变。")
+		task, err := s.SettleTask(ctx, input.Event.ID, input.Event.TaskID, 1, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: "新资料已经核对，结论不变。", Delivery: personal.DeliveryDraft{Text: "资料已经处理完，新资料已核对，结论不变。"}})
 		return personal.TurnOutput{TaskID: task.ID}, err
 	}
 	testkit.AcceptInput(t, s, "1", testkit.SourceInput("1", "https://example.com/reference"))
@@ -251,7 +251,11 @@ func TestRuntimeTerminalTaskResultOverridesModelCommitment(t *testing.T) {
 				if err != nil {
 					return personal.TurnOutput{}, err
 				}
-				if _, err := s.SettleTask(ctx, input.Event.ID, task.ID, task.Revision, tc.status, tc.summary); err != nil {
+				delivery := personal.DeliveryDraft{Text: tc.state + "。\n\n" + tc.summary + "\nhttps://example.com/price"}
+				if attachmentID != "" {
+					delivery.Attachments = []string{attachmentID}
+				}
+				if _, err := s.SettleTask(ctx, input.Event.ID, task.ID, task.Revision, personal.TaskSettlement{Status: tc.status, Summary: tc.summary, Delivery: delivery}); err != nil {
 					return personal.TurnOutput{}, err
 				}
 				output := personal.TurnOutput{TaskID: task.ID, Text: "我会继续处理，有结果再回复。"}
@@ -355,7 +359,7 @@ func TestRuntimeTerminalScheduledTaskKeepsWindowAndSuggestion(t *testing.T) {
 		if _, _, err := s.ProposeScheduleContextUpdate(ctx, input.Event.ID, "proposal", task.ID, testkit.SuggestionProposal(schedule, memory), testkit.ScheduleNow()); err != nil {
 			return personal.TurnOutput{}, err
 		}
-		if _, err := s.SettleTask(ctx, input.Event.ID, task.ID, task.Revision, personal.TaskFailed, "来源检查失败，无法确认完整区间。"); err != nil {
+		if _, err := s.SettleTask(ctx, input.Event.ID, task.ID, task.Revision, personal.TaskSettlement{Status: personal.TaskFailed, Summary: "来源检查失败，无法确认完整区间。", Delivery: personal.DeliveryDraft{Text: "这次未能完成检查。来源检查失败，无法确认完整区间。"}}); err != nil {
 			return personal.TurnOutput{}, err
 		}
 		return personal.TurnOutput{TaskID: task.ID, ScheduleID: input.Event.ScheduleID, Text: "我会继续处理，有结果再回复。"}, nil

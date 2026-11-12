@@ -68,11 +68,11 @@ func finishScheduleSuggestionCallback(t *testing.T, s *Store, callback personal.
 	if err != nil || task == nil {
 		t.Fatalf("callback task = (%+v, %v)", task, err)
 	}
-	if _, err := s.SettleTask(ctx, callback.ID, task.ID, task.Revision, personal.TaskFailed, "The scheduled review ended with a result."); err != nil {
-		t.Fatal(err)
-	}
 	output := personal.TurnOutput{TaskID: task.ID, Text: "The scheduled review ended with a result.", Silent: silent}
 	chunks := []string{"The scheduled review ended with a result."}
+	if _, err := s.SettleTask(ctx, callback.ID, task.ID, task.Revision, testTaskSettlement(personal.TaskFailed, "The scheduled review ended with a result.")); err != nil {
+		t.Fatal(err)
+	}
 	if silent {
 		output.Text, chunks = "", nil
 	}
@@ -192,7 +192,7 @@ func TestProposeScheduleContextUpdateDeduplicatesAfterMemoryVersionChangeAndRepl
 	}
 }
 
-func TestUnnotifiedScheduleSuggestionMovesToCurrentCallback(t *testing.T) {
+func TestSettledScheduleSuggestionUsesSeparateDeliveryGroups(t *testing.T) {
 	ctx := context.Background()
 	s, schedule, memory := scheduleSuggestionFixture(t, personal.WindowNone)
 	callback1 := scheduleSuggestionCallback(t, s, schedule.ID)
@@ -203,23 +203,19 @@ func TestUnnotifiedScheduleSuggestionMovesToCurrentCallback(t *testing.T) {
 	}
 	finishScheduleSuggestionCallback(t, s, callback1, true)
 	var notified sql.NullInt64
-	if err := s.db.QueryRow(`SELECT notified_event_id FROM personal_schedule_context_suggestions WHERE id=?`, suggestion.ID).Scan(&notified); err != nil || notified.Valid {
-		t.Fatalf("silent callback marked suggestion notified: (%+v, %v)", notified, err)
+	if err := s.db.QueryRow(`SELECT notified_event_id FROM personal_schedule_context_suggestions WHERE id=?`, suggestion.ID).Scan(&notified); err != nil || !notified.Valid || notified.Int64 != callback1.ID {
+		t.Fatalf("committed settlement did not notify suggestion on its callback: (%+v, %v)", notified, err)
 	}
-	var outboxCount int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM personal_outbox WHERE event_id=?`, callback1.ID).Scan(&outboxCount); err != nil || outboxCount != 0 {
-		t.Fatalf("silent callback created outbox rows: (%d, %v)", outboxCount, err)
+	var deliveryCount, historyCount int
+	if err := s.db.QueryRow(`SELECT COUNT(DISTINCT delivery_id) FROM personal_outbox WHERE event_id=?`, callback1.ID).Scan(&deliveryCount); err != nil || deliveryCount != 2 {
+		t.Fatalf("callback delivery groups=%d, want saved result and schedule notice: %v", deliveryCount, err)
 	}
-
-	callback2 := scheduleSuggestionCallback(t, s, schedule.ID)
-	updated, replayed, err := s.ProposeScheduleContextUpdate(ctx, callback2.ID, "proposal-two", callback2.TaskID, proposal, scheduleTestNow().Add(time.Minute))
-	if err != nil || replayed || updated.ID != suggestion.ID || updated.OriginEventID != callback2.ID || updated.TaskID != callback2.TaskID {
-		t.Fatalf("unnotified candidate transfer = (%+v, %v, %v)", updated, replayed, err)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM personal_history WHERE event_id=? AND role='assistant'`, callback1.ID).Scan(&historyCount); err != nil || historyCount != 2 {
+		t.Fatalf("callback assistant History rows=%d, want 2 separate groups: %v", historyCount, err)
 	}
-	finishScheduleSuggestionCallback(t, s, callback2, false)
-	var notifiedEventID int64
-	if err := s.db.QueryRow(`SELECT notified_event_id FROM personal_schedule_context_suggestions WHERE id=?`, suggestion.ID).Scan(&notifiedEventID); err != nil || notifiedEventID != callback2.ID {
-		t.Fatalf("transferred candidate notification event = (%d, %v), want %d", notifiedEventID, err, callback2.ID)
+	var distinctHistoryDeliveries int
+	if err := s.db.QueryRow(`SELECT COUNT(DISTINCT delivery_id) FROM personal_history WHERE event_id=? AND role='assistant'`, callback1.ID).Scan(&distinctHistoryDeliveries); err != nil || distinctHistoryDeliveries != 2 {
+		t.Fatalf("assistant History delivery groups=%d, want 2: %v", distinctHistoryDeliveries, err)
 	}
 	var outboxID int64
 	if err := s.db.QueryRow(`SELECT id FROM personal_outbox WHERE suggestion_id=? ORDER BY id LIMIT 1`, suggestion.ID).Scan(&outboxID); err != nil {

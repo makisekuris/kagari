@@ -103,7 +103,7 @@ func TestTaskInputProcessingReadsPagesAndAppliesOnlyReportedInputs(t *testing.T)
 	if err != nil || callback == nil || callback.Kind != personal.EventTask {
 		t.Fatalf("ClaimEvent() = (%+v,%v), want task callback", callback, err)
 	}
-	if _, err := store.SettleTask(ctx, callback.ID, task.ID, task.Revision, personal.TaskCompleted, "Finished"); err == nil || !strings.Contains(err.Error(), "event_id:status") || !strings.Contains(err.Error(), "pending") {
+	if _, err := store.SettleTask(ctx, callback.ID, task.ID, task.Revision, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: "Finished", Delivery: personal.DeliveryDraft{Text: "Finished"}}); err == nil || !strings.Contains(err.Error(), "event_id:status") || !strings.Contains(err.Error(), "pending") {
 		t.Fatalf("completion gate error=%v, want pending input IDs", err)
 	}
 }

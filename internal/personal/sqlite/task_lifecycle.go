@@ -375,18 +375,52 @@ func (s *Store) ContinueTask(ctx context.Context, eventID int64, key string, tas
 	return *task, run, nil
 }
 
-func (s *Store) SettleTask(ctx context.Context, eventID, taskID, expectedRevision int64, status personal.TaskStatus, summary string, assessment ...*personal.CheckAssessment) (personal.Task, error) {
-	if taskID <= 0 || expectedRevision <= 0 || utf8.RuneCountInString(summary) > personal.MaxTaskChars {
+func (s *Store) SettleTask(ctx context.Context, eventID, taskID, expectedRevision int64, settlement personal.TaskSettlement) (personal.Task, error) {
+	if taskID <= 0 || expectedRevision <= 0 || utf8.RuneCountInString(settlement.Summary) > personal.MaxTaskChars {
 		return personal.Task{}, errors.New("personal: task ID, revision and bounded summary are required")
 	}
-	if status != personal.TaskCompleted && status != personal.TaskFailed && status != personal.TaskWaitingInput {
+	if settlement.Status != personal.TaskCompleted && settlement.Status != personal.TaskFailed && settlement.Status != personal.TaskWaitingInput {
 		return personal.Task{}, errors.New("personal: invalid settled task state")
+	}
+	settlement.Delivery = normalizeDeliveryDraft(settlement.Delivery)
+	if err := validateDeliveryDraft(settlement.Delivery); err != nil {
+		return personal.Task{}, err
+	}
+	settlementPayload, err := json.Marshal(settlement)
+	if err != nil {
+		return personal.Task{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return personal.Task{}, err
 	}
 	defer tx.Rollback()
+	var storedPayload, storedResult string
+	err = tx.QueryRowContext(ctx, `SELECT settlement_payload_json,settlement_result_json FROM personal_delivery_intents
+		WHERE event_id=? AND settlement_task_id=? AND settlement_revision=?`, eventID, taskID, expectedRevision).
+		Scan(&storedPayload, &storedResult)
+	if err == nil {
+		if storedPayload != string(settlementPayload) {
+			return personal.Task{}, errors.New("personal: task settlement identity already has a different payload")
+		}
+		var original personal.Task
+		if err := json.Unmarshal([]byte(storedResult), &original); err != nil {
+			return personal.Task{}, fmt.Errorf("personal: decode saved task settlement result: %w", err)
+		}
+		if original.ID != taskID || original.Revision != expectedRevision || original.Status != settlement.Status {
+			return personal.Task{}, errors.New("personal: saved task settlement result does not match its identity")
+		}
+		if err := commitStoreOutcome(ctx, tx, "task.settle", "replayed", taskOutcomePayload{Task: original},
+			zap.Int64("event_id", eventID), zap.Int64("task_id", taskID), zap.Int64("revision", expectedRevision),
+			zap.String("task_status", string(original.Status))); err != nil {
+			return personal.Task{}, err
+		}
+		return original, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return personal.Task{}, err
+	}
+
 	kind, sourceStatus, err := eventState(ctx, tx, eventID)
 	if err != nil {
 		return personal.Task{}, err
@@ -394,6 +428,7 @@ func (s *Store) SettleTask(ctx context.Context, eventID, taskID, expectedRevisio
 	if sourceStatus != personal.EventRunning {
 		return personal.Task{}, errors.New("personal: settle requires an active source event")
 	}
+	var sourceRunID int64
 	if kind == personal.EventUser {
 		if err := requireUserEvent(ctx, tx, eventID, false); err != nil {
 			return personal.Task{}, err
@@ -401,6 +436,12 @@ func (s *Store) SettleTask(ctx context.Context, eventID, taskID, expectedRevisio
 	} else if kind == personal.EventTask {
 		if err := requireCallback(ctx, tx, eventID, taskID, expectedRevision); err != nil {
 			return personal.Task{}, err
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT run_id FROM personal_events WHERE id=?`, eventID).Scan(&sourceRunID); err != nil {
+			return personal.Task{}, err
+		}
+		if sourceRunID <= 0 {
+			return personal.Task{}, errors.New("personal: task callback has no source run")
 		}
 	} else {
 		return personal.Task{}, errors.New("personal: settle requires a user event or authorized task callback")
@@ -419,31 +460,46 @@ func (s *Store) SettleTask(ctx context.Context, eventID, taskID, expectedRevisio
 		return personal.Task{}, errors.New("personal: callback cannot settle an active task run")
 	}
 	now := time.Now().UTC()
-	if len(assessment) > 1 {
-		return personal.Task{}, errors.New("personal: at most one check assessment is allowed")
+	for _, id := range settlement.Delivery.Attachments {
+		if _, err := s.validateStoredAttachment(ctx, tx, id); err != nil {
+			return personal.Task{}, err
+		}
 	}
-	var check *personal.CheckAssessment
-	if len(assessment) == 1 {
-		check = assessment[0]
-	}
-	if status == personal.TaskCompleted {
+	if settlement.Status == personal.TaskCompleted {
 		if err := validateTaskInputsSettledTx(ctx, tx, taskID); err != nil {
 			return personal.Task{}, err
 		}
 	}
-	if err := settleScheduledTask(ctx, tx, *task, status, check, now); err != nil {
+	if err := settleScheduledTask(ctx, tx, *task, settlement.Status, settlement.Assessment, now); err != nil {
 		return personal.Task{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='cancelled' WHERE task_id=? AND status IN ('queued','running')`, taskID); err != nil {
 		return personal.Task{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET status=?,summary=?,updated_at=? WHERE id=? AND revision=?`, status, summary, timestamp(now), taskID, expectedRevision); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET status=?,summary=?,updated_at=? WHERE id=? AND revision=?`, settlement.Status, settlement.Summary, timestamp(now), taskID, expectedRevision); err != nil {
 		return personal.Task{}, err
 	}
 	if err := releaseTerminalTaskInputsTx(ctx, tx); err != nil {
 		return personal.Task{}, err
 	}
-	task.Status, task.Summary, task.UpdatedAt = status, summary, now
+	task.Status, task.Summary, task.UpdatedAt = settlement.Status, settlement.Summary, now
+	resultSnapshot, err := json.Marshal(task)
+	if err != nil {
+		return personal.Task{}, err
+	}
+	var scheduleID sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT schedule_id FROM personal_schedule_occurrences WHERE task_id=?`, taskID).Scan(&scheduleID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return personal.Task{}, err
+	}
+	if _, err := insertDeliveryIntentTx(ctx, tx, deliveryIntentInsert{
+		eventID: eventID, scheduleID: scheduleID.Int64,
+		purpose: personal.DeliveryResult, draft: settlement.Delivery,
+		scopes:           []personal.DeliveryScope{{TaskID: taskID, Revision: expectedRevision, RunID: sourceRunID}},
+		settlementTaskID: taskID, settlementRevision: expectedRevision,
+		settlementPayload: string(settlementPayload), settlementResult: string(resultSnapshot),
+	}, now); err != nil {
+		return personal.Task{}, err
+	}
 	if err := commitStoreOutcome(ctx, tx, "task.settle", "settled", taskOutcomePayload{Task: *task},
 		zap.Int64("event_id", eventID), zap.Int64("task_id", task.ID),
 		zap.Int64("revision", task.Revision), zap.String("task_status", string(task.Status))); err != nil {

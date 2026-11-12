@@ -315,6 +315,31 @@ func recordReplyTx(ctx context.Context, tx *sql.Tx, eventID int64, output person
 	return suppressStaleWaitRepliesTx(ctx, tx)
 }
 
+func recordSettlementRepliesTx(ctx context.Context, tx *sql.Tx, eventID int64, intents []personal.DeliveryIntent, fallbackTaskID int64) error {
+	seenTaskIDs := map[int64]bool{}
+	for _, intent := range intents {
+		output := personal.TurnOutput{Text: intent.Draft.Text, Attachments: append([]string(nil), intent.Draft.Attachments...)}
+		if len(intent.Scopes) == 0 {
+			output.TaskID = fallbackTaskID
+			if err := recordReplyTx(ctx, tx, eventID, output); err != nil {
+				return err
+			}
+			continue
+		}
+		for _, scope := range intent.Scopes {
+			if seenTaskIDs[scope.TaskID] {
+				continue
+			}
+			seenTaskIDs[scope.TaskID] = true
+			output.TaskID = scope.TaskID
+			if err := recordReplyTx(ctx, tx, eventID, output); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func appendOpenReplyTaskGroupsTx(ctx context.Context, tx *sql.Tx, taskID int64, groupIDs *[]int64) error {
 	rows, err := tx.QueryContext(ctx, `SELECT rt.group_id FROM personal_reply_tasks rt
 		JOIN personal_reply_groups g ON g.id=rt.group_id WHERE rt.task_id=? AND g.closed=0 ORDER BY rt.group_id`, taskID)
@@ -345,9 +370,16 @@ func appendOpenReplyTaskGroupsTx(ctx context.Context, tx *sql.Tx, taskID int64, 
 	return rows.Close()
 }
 
-func appendReplyPartsTx(ctx context.Context, tx *sql.Tx, eventID int64, text string, attachments []channel.Attachment, chunks []string, scheduleID int64) (int, error) {
+func appendDeliveryPartsTx(ctx context.Context, tx *sql.Tx, eventID, deliveryID int64, text string, attachments []channel.Attachment, chunks []string, scheduleID, suggestionID int64) (int, error) {
+	if eventID <= 0 || deliveryID <= 0 {
+		return 0, errors.New("personal: event and delivery IDs are required")
+	}
 	var part int
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(part),0) FROM personal_outbox WHERE event_id=?`, eventID).Scan(&part); err != nil {
+		return 0, err
+	}
+	var deliveryPart int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(delivery_part),0) FROM personal_outbox WHERE delivery_id=?`, deliveryID).Scan(&deliveryPart); err != nil {
 		return 0, err
 	}
 	if text != "" || len(attachments) > 0 {
@@ -358,8 +390,8 @@ func appendReplyPartsTx(ctx context.Context, tx *sql.Tx, eventID int64, text str
 		if err != nil {
 			return 0, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text,attachments,schedule_id) VALUES(?,'assistant',?,?,?)`,
-			eventID, text, string(attachmentJSON), nullableID(scheduleID)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,delivery_id,role,text,attachments,schedule_id) VALUES(?,?,'assistant',?,?,?)`,
+			eventID, deliveryID, text, string(attachmentJSON), nullableID(scheduleID)); err != nil {
 			return 0, err
 		}
 	}
@@ -369,14 +401,17 @@ func appendReplyPartsTx(ctx context.Context, tx *sql.Tx, eventID int64, text str
 			continue
 		}
 		part++
-		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,status,next_attempt_at) VALUES(?,?,?,'pending',?)`, eventID, part, chunk, now); err != nil {
+		deliveryPart++
+		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,delivery_id,part,delivery_part,text,suggestion_id,status,next_attempt_at) VALUES(?,?,?,?,?,?, 'pending',?)`,
+			eventID, deliveryID, part, deliveryPart, chunk, nullableID(suggestionID), now); err != nil {
 			return 0, err
 		}
 	}
 	for _, attachment := range attachments {
 		part++
-		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,attachment_id,status,next_attempt_at) VALUES(?,?,?,?,'pending',?)`,
-			eventID, part, "", attachment.ID, now); err != nil {
+		deliveryPart++
+		if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,delivery_id,part,delivery_part,text,attachment_id,suggestion_id,status,next_attempt_at) VALUES(?,?,?,?,?,?,?,'pending',?)`,
+			eventID, deliveryID, part, deliveryPart, "", attachment.ID, nullableID(suggestionID), now); err != nil {
 			return 0, err
 		}
 	}

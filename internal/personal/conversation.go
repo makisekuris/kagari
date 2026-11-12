@@ -33,7 +33,8 @@ type TurnOutput struct {
 	Attachments []string
 	TaskID      int64
 	Silent      bool
-	ReplyKind   ReplyKind `json:"-"`
+	ReplyKind   ReplyKind       `json:"-"`
+	Purpose     DeliveryPurpose `json:"-"`
 }
 
 type ThinkFunc func(context.Context, TurnInput) (TurnOutput, error)

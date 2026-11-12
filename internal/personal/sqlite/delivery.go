@@ -47,9 +47,9 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*personal.Outgoing, error) {
 	var out personal.Outgoing
 	var taskID sql.NullInt64
 	var attachmentID sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT d.id,d.event_id,e.task_id,d.text,d.attachment_id,d.attempts
+	if err := tx.QueryRowContext(ctx, `SELECT d.id,d.delivery_id,d.delivery_part,d.event_id,e.task_id,d.text,d.attachment_id,d.attempts
 		FROM personal_outbox d JOIN personal_events e ON e.id=d.event_id WHERE d.id=?`, id).
-		Scan(&out.ID, &out.EventID, &taskID, &out.Text, &attachmentID, &out.Attempts); err != nil {
+		Scan(&out.ID, &out.DeliveryID, &out.DeliveryPart, &out.EventID, &taskID, &out.Text, &attachmentID, &out.Attempts); err != nil {
 		return nil, err
 	}
 	out.TaskID, out.AttachmentID = taskID.Int64, attachmentID.String

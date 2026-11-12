@@ -15,7 +15,7 @@ func completeScheduledCheck(t *testing.T, s *Store, run personal.Run, evidence s
 	check := &personal.CheckAssessment{Complete: true, RequiredSources: []personal.SourceAssessment{{
 		ID: "feed", Complete: true, Evidence: evidence,
 	}}}
-	if _, err := s.SettleTask(ctx, event.ID, run.TaskID, run.Revision, personal.TaskCompleted, "Checked the feed", check); err != nil {
+	if _, err := s.SettleTask(ctx, event.ID, run.TaskID, run.Revision, testTaskSettlement(personal.TaskCompleted, "Checked the feed", check)); err != nil {
 		t.Fatal(err)
 	}
 	finishEvent(t, s, event, personal.TurnOutput{TaskID: run.TaskID, Text: "Check complete"}, []string{"Check complete"})
@@ -33,7 +33,7 @@ func TestScheduleLateOlderCheckDoesNotRegressCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	olderCallback := dispatchTestFinish(t, s, olderRun)
-	if _, err := s.SettleTask(ctx, olderCallback.ID, olderRun.TaskID, olderRun.Revision, personal.TaskWaitingInput, "Need a detail"); err != nil {
+	if _, err := s.SettleTask(ctx, olderCallback.ID, olderRun.TaskID, olderRun.Revision, testTaskSettlement(personal.TaskWaitingInput, "Need a detail")); err != nil {
 		t.Fatal(err)
 	}
 	finishEvent(t, s, olderCallback, personal.TurnOutput{TaskID: olderRun.TaskID, Text: "Need a detail"}, []string{"Need a detail"})

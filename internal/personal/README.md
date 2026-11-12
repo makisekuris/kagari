@@ -15,7 +15,7 @@
 
 `cmd/kagari` 创建 Store、MainAgent、TaskExecutor 和 Runtime，并注入回调。实现子包依赖根包的业务契约；根包不依赖实现子包。`assistant` 与 `execution` 共用 `agentctx`，`service` 通过仓库接口和回调运行，不创建模型或数据库连接。
 
-任务、计划、事件、输入交接和消息投递存在跨表状态转换，因此相关 SQL 保持在 `sqlite` 内的同一个事务中。SQL 辅助函数只在存储包内共享；业务类型与模型工具不持有数据库连接。
+任务、计划、事件、输入交接和消息投递存在跨表状态转换，因此相关 SQL 保持在 `sqlite` 内的同一个事务中。结案事务保存 `TaskSettlement` 及不可变 `DeliveryIntent`，`service` 只整理其正文；事件完成时一起保存 History、全部 outbox 项和意图转换。SQL 辅助函数只在存储包内共享；业务类型与模型工具不持有数据库连接。
 
 工具查询遇到缺失记录时使用 `personal.ErrRecordNotFound`，SQL 错误的转换由 `sqlite` 负责；`Task`、`Run` 等可选查询仍以 `nil, nil` 表示不存在。工具记录的调用 ID 由 `agentctx` 从模型消息中提取，`sqlite` 接收正文及元数据，不解析模型框架的消息类型。
 

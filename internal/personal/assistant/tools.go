@@ -68,7 +68,8 @@ type settleTaskArgs struct {
 	TaskID           int64                     `json:"task_id"`
 	ExpectedRevision int64                     `json:"expected_revision"`
 	Status           personal.TaskStatus       `json:"status"`
-	Summary          string                    `json:"summary" jsonschema:"description=The task closing message sent directly to the user. Write plain text with direct source URLs; do not use Markdown headings or bold or link syntax. Do not claim internal stage findings were already reported unless the chat history contains that report."`
+	Summary          string                    `json:"summary" jsonschema:"description=Required internal task summary saved on the task. This is not the user-facing message. Keep the actual result, failure, or remaining need and supporting source URLs; do not copy IDs or tool logs."`
+	Delivery         personal.DeliveryDraft    `json:"delivery" jsonschema:"description=The user-facing closing delivery intent saved atomically with the task status. Set text to the plain-language message and attachments to the explicit ordered file IDs selected for this delivery. Use an empty attachments array when no file should be sent. Text may be empty only for an attachment-only delivery."`
 }
 
 type runArgs struct {
@@ -113,6 +114,8 @@ type personalTools struct {
 	taskIDs          map[int64]struct{}
 	mustNotify       bool
 	questions        []string
+	settledDelivery  *personal.DeliveryDraft
+	callbackFailure  *taskActionFailure
 	taskActions      map[string]*taskActionState
 	taskActionOrder  []string
 	nextTaskActionID uint64

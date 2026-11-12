@@ -62,6 +62,8 @@ func (s *Store) ExportRuns(ctx context.Context, taskID int64, limit int) ([]RunE
 
 type DeliveryRecord struct {
 	ID           int64            `json:"id"`
+	DeliveryID   int64            `json:"delivery_id"`
+	DeliveryPart int              `json:"delivery_part"`
 	EventID      int64            `json:"event_id"`
 	Part         int              `json:"part"`
 	Text         string           `json:"text,omitempty"`
@@ -73,12 +75,13 @@ type DeliveryRecord struct {
 }
 
 type DiagnosticSnapshot struct {
-	StoreID    string            `json:"store_id"`
-	Events     []EventRecord     `json:"events"`
-	Tasks      []personal.Task   `json:"tasks"`
-	Runs       []personal.Run    `json:"runs"`
-	Deliveries []DeliveryRecord  `json:"deliveries"`
-	Memories   []personal.Memory `json:"memories"`
+	StoreID         string                    `json:"store_id"`
+	Events          []EventRecord             `json:"events"`
+	Tasks           []personal.Task           `json:"tasks"`
+	Runs            []personal.Run            `json:"runs"`
+	Deliveries      []DeliveryRecord          `json:"deliveries"`
+	DeliveryIntents []personal.DeliveryIntent `json:"delivery_intents"`
+	Memories        []personal.Memory         `json:"memories"`
 }
 
 func scanEventRecord(row scanner) (EventRecord, error) {
@@ -133,7 +136,7 @@ func (s *Store) RecentEvents(ctx context.Context, limit int) ([]EventRecord, err
 // Diagnostic reads one database snapshot, then releases its transaction before
 // the CLI scans log files. A long log scan must not hold a SQLite read lock.
 func (s *Store) Diagnostic(ctx context.Context, eventID, taskID int64) (DiagnosticSnapshot, error) {
-	result := DiagnosticSnapshot{Events: []EventRecord{}, Tasks: []personal.Task{}, Runs: []personal.Run{}, Deliveries: []DeliveryRecord{}, Memories: []personal.Memory{}}
+	result := DiagnosticSnapshot{Events: []EventRecord{}, Tasks: []personal.Task{}, Runs: []personal.Run{}, Deliveries: []DeliveryRecord{}, DeliveryIntents: []personal.DeliveryIntent{}, Memories: []personal.Memory{}}
 	if (eventID > 0) == (taskID > 0) || eventID < 0 || taskID < 0 {
 		return result, errors.New("specify exactly one positive event or task ID")
 	}
@@ -210,6 +213,12 @@ func (s *Store) Diagnostic(ctx context.Context, eventID, taskID int64) (Diagnost
 		}
 	}
 	eventList := inspectionIDs(eventIDs)
+	result.DeliveryIntents, err = loadDeliveryIntentsTx(ctx, tx, `SELECT DISTINCT `+deliveryIntentColumns+`
+		FROM personal_delivery_intents d LEFT JOIN personal_delivery_scopes s ON s.delivery_id=d.id
+		WHERE d.event_id IN (`+eventList+`) OR s.task_id IN (`+taskList+`) ORDER BY d.id`)
+	if err != nil {
+		return result, err
+	}
 	rows, err = tx.QueryContext(ctx, `SELECT `+taskColumns+` FROM personal_tasks WHERE id IN (`+taskList+`) ORDER BY id`)
 	if err != nil {
 		return result, err
@@ -244,7 +253,7 @@ func (s *Store) Diagnostic(ctx context.Context, eventID, taskID int64) (Diagnost
 	if err != nil {
 		return result, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT id,event_id,part,text,attachment_id,status,attempts,
+	rows, err = tx.QueryContext(ctx, `SELECT id,delivery_id,delivery_part,event_id,part,text,attachment_id,status,attempts,
 		receipt_channel,receipt_account,receipt_conversation,receipt_message_id,detail
 		FROM personal_outbox WHERE event_id IN (`+eventList+`) ORDER BY id`)
 	if err != nil {
@@ -255,7 +264,7 @@ func (s *Store) Diagnostic(ctx context.Context, eventID, taskID int64) (Diagnost
 		var receipt channel.Receipt
 		var attachmentID sql.NullString
 		var receiptChannel, receiptAccount, receiptConversation, receiptMessageID string
-		if err := rows.Scan(&delivery.ID, &delivery.EventID, &delivery.Part, &delivery.Text, &attachmentID, &delivery.Status,
+		if err := rows.Scan(&delivery.ID, &delivery.DeliveryID, &delivery.DeliveryPart, &delivery.EventID, &delivery.Part, &delivery.Text, &attachmentID, &delivery.Status,
 			&delivery.Attempts, &receiptChannel, &receiptAccount, &receiptConversation, &receiptMessageID, &delivery.Detail); err != nil {
 			rows.Close()
 			return result, err

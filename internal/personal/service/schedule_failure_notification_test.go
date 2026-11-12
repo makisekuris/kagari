@@ -26,7 +26,7 @@ func failScheduledRun(t *testing.T, store *sqlite.Store, now time.Time) (persona
 		if input.Event.Kind != personal.EventTask || input.Event.TaskID != run.TaskID || input.CurrentRun == nil {
 			t.Fatalf("unexpected failure callback: event=%+v run=%+v", input.Event, input.CurrentRun)
 		}
-		_, err := store.SettleTask(ctx, input.Event.ID, input.Event.TaskID, input.CurrentRun.Revision, personal.TaskFailed, "Source request failed")
+		_, err := store.SettleTask(ctx, input.Event.ID, input.Event.TaskID, input.CurrentRun.Revision, personal.TaskSettlement{Status: personal.TaskFailed, Summary: "Source request failed", Delivery: personal.DeliveryDraft{Text: "Source request failed"}})
 		return personal.TurnOutput{TaskID: input.Event.TaskID, Silent: true}, err
 	}
 	worked, err := runtime.turn(ctx)

@@ -81,7 +81,7 @@ func TestRuntimeFourTasksLeaveConversationAndMemoryResponsive(t *testing.T) {
 			if err != nil {
 				return personal.TurnOutput{}, err
 			}
-			_, err = s.SettleTask(ctx, in.Event.ID, task.ID, task.Revision, personal.TaskCompleted, "complete")
+			_, err = s.SettleTask(ctx, in.Event.ID, task.ID, task.Revision, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: "complete", Delivery: personal.DeliveryDraft{Text: fmt.Sprintf("「task %d」已经处理完了。\n\ncomplete", task.ID)}})
 			return personal.TurnOutput{Text: fmt.Sprintf("completed %d", task.ID), TaskID: task.ID}, err
 		}
 		return personal.TurnOutput{Text: "unexpected event"}, nil
@@ -232,7 +232,7 @@ func TestRuntimeContinuesSameTaskAndAccountsRecoveredRun(t *testing.T) {
 			}
 			return personal.TurnOutput{Text: "continuing", TaskID: task.ID, Silent: true}, err
 		}
-		_, err := s.SettleTask(ctx, in.Event.ID, task.ID, task.Revision, personal.TaskCompleted, "final evidence")
+		_, err := s.SettleTask(ctx, in.Event.ID, task.ID, task.Revision, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: "final evidence", Delivery: personal.DeliveryDraft{Text: "已经处理完了。\n\nfinal evidence"}})
 		return personal.TurnOutput{Text: "complete", TaskID: task.ID}, err
 	}
 	if _, err := r.task(ctx); err != nil {

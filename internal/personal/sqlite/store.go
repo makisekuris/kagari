@@ -43,7 +43,7 @@ func NewStore(path string, taskBudget time.Duration) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("personal: begin schema transaction: %w", err)
 	}
-	if _, err := tx.Exec(personalSchema + scheduleSchema + scheduleSuggestionSchema + replySchema + taskInputSchema + materialSchema + progressSchema); err != nil {
+	if _, err := tx.Exec(personalSchema + scheduleSchema + scheduleSuggestionSchema + replySchema + taskInputSchema + materialSchema + progressSchema + deliverySchema); err != nil {
 		_ = tx.Rollback()
 		_ = db.Close()
 		return nil, fmt.Errorf("personal: initialize schema: %w", err)
@@ -81,7 +81,7 @@ func checkPersonalSchema(ctx context.Context, db schemaQueryer) error {
 	var marker int
 	err := db.QueryRowContext(ctx, `SELECT version FROM personal_schema LIMIT 1`).Scan(&marker)
 	if err == nil {
-		if marker != 4 {
+		if marker != 5 {
 			return fmt.Errorf("personal: unsupported database schema version %d", marker)
 		}
 		return nil

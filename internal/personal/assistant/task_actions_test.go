@@ -221,7 +221,7 @@ func TestTaskActionCorrectedRequiredFieldsWithNewIDClearFailures(t *testing.T) {
 		store := testkit.Store(t, ":memory:", time.Hour)
 		event := testkit.OpenUserEvent(t, store, 918, 1918, "Continue the report")
 		task, _ := testkit.CreateTask(t, store, event, "task-action-continue-step", "Continue target", "Original goal", "")
-		task, err := store.SettleTask(context.Background(), event.ID, task.ID, task.Revision, personal.TaskWaitingInput, "Need input")
+		task, err := store.SettleTask(context.Background(), event.ID, task.ID, task.Revision, personal.TaskSettlement{Status: personal.TaskWaitingInput, Summary: "Need input", Delivery: personal.DeliveryDraft{Text: "Need input", Attachments: []string{}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -238,7 +238,7 @@ func TestTaskActionCorrectedRequiredFieldsWithNewIDClearFailures(t *testing.T) {
 		store := testkit.Store(t, ":memory:", time.Hour)
 		event := testkit.OpenUserEvent(t, store, 919, 1919, "Continue the report")
 		task, _ := testkit.CreateTask(t, store, event, "task-action-continue-revision", "Continue target", "Original goal", "")
-		task, err := store.SettleTask(context.Background(), event.ID, task.ID, task.Revision, personal.TaskWaitingInput, "Need input")
+		task, err := store.SettleTask(context.Background(), event.ID, task.ID, task.Revision, personal.TaskSettlement{Status: personal.TaskWaitingInput, Summary: "Need input", Delivery: personal.DeliveryDraft{Text: "Need input", Attachments: []string{}}})
 		if err != nil {
 			t.Fatal(err)
 		}

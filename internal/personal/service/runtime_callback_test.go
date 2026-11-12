@@ -73,13 +73,13 @@ func (s *racingTaskMutationStore) ContinueTask(ctx context.Context, eventID int6
 	return s.Repository.ContinueTask(ctx, eventID, key, taskID, revision, step, extend)
 }
 
-func (s *racingTaskMutationStore) SettleTask(ctx context.Context, eventID, taskID, revision int64, status personal.TaskStatus, summary string, assessment ...*personal.CheckAssessment) (personal.Task, error) {
+func (s *racingTaskMutationStore) SettleTask(ctx context.Context, eventID, taskID, revision int64, settlement personal.TaskSettlement) (personal.Task, error) {
 	if eventID == s.callbackID && s.mutate != nil {
 		mutate := s.mutate
 		s.mutate = nil
 		mutate()
 	}
-	return s.Repository.SettleTask(ctx, eventID, taskID, revision, status, summary, assessment...)
+	return s.Repository.SettleTask(ctx, eventID, taskID, revision, settlement)
 }
 
 func newRunningTaskCallback(t *testing.T) (*sqlite.Store, personal.Task, personal.Run, personal.Event) {
@@ -177,7 +177,7 @@ func TestRuntimeOldCallbackCannotTouchSameRevisionContinuation(t *testing.T) {
 				if err != nil || replacementCallback == nil || replacementCallback.Kind != personal.EventTask {
 					t.Fatalf("claim replacement callback = (%+v, %v)", replacementCallback, err)
 				}
-				if _, err := store.SettleTask(ctx, replacementCallback.ID, task.ID, task.Revision, personal.TaskCompleted, "replacement complete"); err != nil {
+				if _, err := store.SettleTask(ctx, replacementCallback.ID, task.ID, task.Revision, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: "replacement complete", Delivery: personal.DeliveryDraft{Text: "replacement complete"}}); err != nil {
 					t.Fatal(err)
 				}
 				testkit.FinishEvent(t, store, *replacementCallback, personal.TurnOutput{TaskID: task.ID, Silent: true}, nil)

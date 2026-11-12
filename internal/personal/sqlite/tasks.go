@@ -181,6 +181,14 @@ func requireCallback(ctx context.Context, tx *sql.Tx, eventID, taskID, revision 
 	if identity.revision != revision {
 		return errors.New("personal: task callback revision does not match its source run")
 	}
+	var settled int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM personal_delivery_intents
+		WHERE event_id=? AND settlement_task_id=? AND settlement_revision=?)`, eventID, taskID, revision).Scan(&settled); err != nil {
+		return err
+	}
+	if settled != 0 {
+		return errors.New("personal: task callback already committed a settlement")
+	}
 	if state == personal.TaskCallbackContinued {
 		return errors.New("personal: continued task callback cannot mutate this task")
 	}

@@ -12,6 +12,7 @@ import (
 
 type scheduleNotice struct {
 	suggestionID int64
+	scheduleID   int64
 	automatic    bool
 	text         string
 }
@@ -76,22 +77,41 @@ func scheduleNotices(ctx context.Context, tx *sql.Tx, eventID int64, kind person
 			fmt.Fprintf(&text, "原背景：%s\n建议改为：%s\n", r.Old, r.New)
 		}
 		text.WriteString("是否同步此计划背景？可回复建议编号并选择同步或保留。确认前计划背景不变。")
-		notices = append(notices, scheduleNotice{suggestionID: s.ID, automatic: kind == personal.EventTask, text: text.String()})
+		notices = append(notices, scheduleNotice{suggestionID: s.ID, scheduleID: s.ScheduleID, automatic: kind == personal.EventTask, text: text.String()})
 	}
 	return notices, nil
 }
 
-func enqueueScheduleNotices(ctx context.Context, tx *sql.Tx, eventID int64, part int, notices []scheduleNotice, now string) (int, error) {
+func enqueueScheduleNotices(ctx context.Context, tx *sql.Tx, eventID int64, notices []scheduleNotice, now string) (int, error) {
+	createdAt, err := parseTimestamp(now)
+	if err != nil {
+		return 0, err
+	}
+	var part int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(part),0) FROM personal_outbox WHERE event_id=?`, eventID).Scan(&part); err != nil {
+		return 0, err
+	}
 	for _, n := range notices {
 		chunks, err := channel.PrepareText(n.text)
 		if err != nil {
 			return part, err
 		}
-		for _, chunk := range chunks {
-			part++
-			if _, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,suggestion_id,status,next_attempt_at) VALUES(?,?,?,?,'pending',?)`, eventID, part, chunk, n.suggestionID, now); err != nil {
-				return part, err
-			}
+		intent, err := insertDeliveryIntentTx(ctx, tx, deliveryIntentInsert{
+			eventID: eventID, scheduleID: n.scheduleID, purpose: personal.DeliveryControl,
+			draft: personal.DeliveryDraft{Text: n.text, Attachments: []string{}},
+		}, createdAt)
+		if err != nil {
+			return part, err
+		}
+		part, err = appendDeliveryPartsTx(ctx, tx, eventID, intent.ID, n.text, []channel.Attachment{}, chunks, n.scheduleID, n.suggestionID)
+		if err != nil {
+			return part, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE personal_outbox SET next_attempt_at=? WHERE delivery_id=?`, now, intent.ID); err != nil {
+			return part, err
+		}
+		if err := updateDeliveryIntentRenderedTx(ctx, tx, intent.ID, ""); err != nil {
+			return part, err
 		}
 		if n.automatic {
 			if _, err := tx.ExecContext(ctx, `UPDATE personal_schedule_context_suggestions SET notified_event_id=?,presented_event_id=? WHERE id=? AND notified_event_id IS NULL`, eventID, eventID, n.suggestionID); err != nil {

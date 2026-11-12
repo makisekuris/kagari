@@ -4,8 +4,8 @@ package sqlite
 // attachments, and replies. Feature-specific schema fragments stay beside the
 // code that owns them and are concatenated during NewStore.
 const personalSchema = `
-CREATE TABLE IF NOT EXISTS personal_schema (version INTEGER PRIMARY KEY CHECK(version=4));
-INSERT OR IGNORE INTO personal_schema(version) VALUES(4);
+CREATE TABLE IF NOT EXISTS personal_schema (version INTEGER PRIMARY KEY CHECK(version=5));
+INSERT OR IGNORE INTO personal_schema(version) VALUES(5);
 CREATE TABLE IF NOT EXISTS personal_meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -93,11 +93,15 @@ CREATE TABLE IF NOT EXISTS personal_history (
 	id INTEGER PRIMARY KEY,
 	schedule_id INTEGER REFERENCES personal_schedules(id),
 	event_id INTEGER NOT NULL REFERENCES personal_events(id),
+	delivery_id INTEGER REFERENCES personal_delivery_intents(id) ON DELETE CASCADE,
 	role TEXT NOT NULL,
 	text TEXT NOT NULL,
-	attachments TEXT NOT NULL DEFAULT '[]'
+	attachments TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(attachments)),
+	CHECK(role<>'assistant' OR delivery_id IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS personal_history_event ON personal_history(event_id,id);
+CREATE INDEX IF NOT EXISTS personal_history_delivery ON personal_history(delivery_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS personal_history_one_delivery ON personal_history(delivery_id) WHERE delivery_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS personal_requests (
 	event_id INTEGER NOT NULL REFERENCES personal_events(id),
 	request_key TEXT NOT NULL,
@@ -138,7 +142,9 @@ CREATE TABLE IF NOT EXISTS personal_outbox (
 	id INTEGER PRIMARY KEY,
 	suggestion_id INTEGER REFERENCES personal_schedule_context_suggestions(id),
 	event_id INTEGER NOT NULL REFERENCES personal_events(id),
+	delivery_id INTEGER NOT NULL REFERENCES personal_delivery_intents(id) ON DELETE CASCADE,
 	part INTEGER NOT NULL CHECK(part>0),
+	delivery_part INTEGER NOT NULL CHECK(delivery_part>0),
 	text TEXT NOT NULL,
 	attachment_id TEXT REFERENCES personal_attachments(id),
 	status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','uncertain')),
@@ -149,7 +155,9 @@ CREATE TABLE IF NOT EXISTS personal_outbox (
 	receipt_conversation TEXT NOT NULL DEFAULT '',
 	receipt_message_id TEXT NOT NULL DEFAULT '',
 	detail TEXT NOT NULL DEFAULT '',
-	UNIQUE(event_id,part)
+	UNIQUE(event_id,part),
+	UNIQUE(delivery_id,delivery_part)
 );
 CREATE INDEX IF NOT EXISTS personal_outbox_claim ON personal_outbox(status,next_attempt_at,id);
+CREATE INDEX IF NOT EXISTS personal_outbox_delivery ON personal_outbox(delivery_id,delivery_part);
 `

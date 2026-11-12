@@ -102,7 +102,7 @@ func TestRuntimePublishesSavedResultDespiteReplyKind(t *testing.T) {
 				t.Fatal(err)
 			}
 			fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
-				testkit.ResponseTool("settle_task", map[string]any{"task_id": task.ID, "expected_revision": task.Revision, "status": personal.TaskCompleted, "summary": "页面确认月费17元。"}, "settle"),
+				testkit.ResponseTool("settle_task", map[string]any{"task_id": task.ID, "expected_revision": task.Revision, "status": personal.TaskCompleted, "summary": "页面确认月费17元。", "delivery": personal.DeliveryDraft{Text: "页面确认月费17元。", Attachments: []string{}}}, "settle"),
 				policyResponse("我会继续处理，有结果再回复。", kind),
 			}}
 			r := testRuntime(s)

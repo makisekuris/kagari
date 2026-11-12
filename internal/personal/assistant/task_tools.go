@@ -169,9 +169,11 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 				return taskActionToolError(a.ActionID, err), nil
 			}
 			if a.ExtendBudget {
+				p.callbackFailure = p.callbackContinuationFailure(a.TaskID)
 				return taskActionToolError(a.ActionID, fmt.Errorf("task callbacks cannot extend the budget")), nil
 			}
 			if task := p.taskByID(a.TaskID); task != nil && (task.Status == personal.TaskWaitingBudget || task.BudgetMS > 0 && task.UsedMS >= task.BudgetMS) {
+				p.callbackFailure = p.callbackContinuationFailure(a.TaskID)
 				return taskActionToolError(a.ActionID, fmt.Errorf("task budget is exhausted; ask the user to continue")), nil
 			}
 		default:
@@ -180,6 +182,9 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 		fail := func(err error) (personalToolReply, error) {
 			if tracking {
 				return p.failTaskAction(attempt, err), nil
+			}
+			if p.event.Kind == personal.EventTask {
+				p.callbackFailure = p.callbackContinuationFailure(a.TaskID)
 			}
 			return taskActionToolError(a.ActionID, err), nil
 		}
@@ -202,6 +207,8 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 		p.addTaskID(task.ID)
 		if tracking {
 			p.succeedTaskAction(attempt)
+		} else if p.event.Kind == personal.EventTask {
+			p.callbackFailure = nil
 		}
 		return personalToolReply{ActionID: replyActionID, OK: true, Queued: run.Status == personal.RunQueued, Task: &task, Run: &run}, nil
 	})
@@ -209,17 +216,48 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	settleTask, err := utils.InferTool("settle_task", "结束当前任务回调的任务。status 只能为 completed、waiting_input 或 failed。summary 将直接发给用户：写实际结论、失败原因或必要问题及来源链接，不复制内部编号、工具调用或检查点日志。", func(ctx context.Context, a settleTaskArgs) (personalToolReply, error) {
+	settleTask, err := utils.InferTool("settle_task", "在同一事务中结束当前任务并保存交付意图。status 只能为 completed、waiting_input 或 failed。summary 是保存在任务上的内部成果摘要，必须与 delivery 分开填写。delivery.text 是面向用户的结案消息，写实际结论、失败原因或必要问题及来源链接；delivery.attachments 必须显式提供有序文件 ID 列表，无附件时传 []。仅附件交付可将 text 设为空，但 summary 仍不能为空。先显式选择要发送的文件；保存过的文件不会自动成为交付物。此操作保存生成意图，不代表渠道已接受发送。", func(ctx context.Context, a settleTaskArgs) (personalToolReply, error) {
 		if err := p.ownTask(a.TaskID); err != nil {
 			return toolError(err), nil
 		}
 		if a.ExpectedRevision <= 0 || strings.TrimSpace(a.Summary) == "" {
-			return toolError(fmt.Errorf("expected_revision and summary are required")), nil
+			return toolError(fmt.Errorf("expected_revision and a nonblank task summary are required")), nil
 		}
 		if a.Status != personal.TaskCompleted && a.Status != personal.TaskWaitingInput && a.Status != personal.TaskFailed {
 			return toolError(fmt.Errorf("status must be completed, waiting_input or failed")), nil
 		}
-		task, err := p.store.SettleTask(ctx, p.event.ID, a.TaskID, a.ExpectedRevision, a.Status, a.Summary, a.Assessment)
+		if a.Delivery.Attachments == nil {
+			return toolError(fmt.Errorf("delivery.attachments is required; pass [] when no files should be sent")), nil
+		}
+		deliveryText := a.Delivery.Text
+		if required := p.requiredTaskReply(); required != "" {
+			if strings.TrimSpace(deliveryText) == "" {
+				deliveryText = required
+			} else {
+				deliveryText += "\n\n" + required
+			}
+		}
+		if strings.TrimSpace(deliveryText) == "" {
+			if len(a.Delivery.Attachments) == 0 {
+				return toolError(fmt.Errorf("delivery needs text or at least one selected attachment")), nil
+			}
+			deliveryText = ""
+		}
+		files, err := agentctx.ResolveAttachments(ctx, p.store, a.Delivery.Attachments)
+		if err != nil {
+			return toolError(fmt.Errorf("delivery attachment: %w", err)), nil
+		}
+		deliveryAttachments := make([]string, 0, len(files))
+		for _, file := range files {
+			deliveryAttachments = append(deliveryAttachments, file.ID)
+		}
+		settlement := personal.TaskSettlement{
+			Status:     a.Status,
+			Summary:    a.Summary,
+			Delivery:   personal.DeliveryDraft{Text: deliveryText, Attachments: deliveryAttachments},
+			Assessment: a.Assessment,
+		}
+		task, err := p.store.SettleTask(ctx, p.event.ID, a.TaskID, a.ExpectedRevision, settlement)
 		if err != nil {
 			return toolError(err), nil
 		}
@@ -228,6 +266,9 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 		}
 		p.addTaskID(task.ID)
 		p.mustNotify = true
+		draft := settlement.Delivery
+		draft.Attachments = append([]string{}, settlement.Delivery.Attachments...)
+		p.settledDelivery = &draft
 		return personalToolReply{OK: true, Task: &task}, nil
 	})
 	if err != nil {

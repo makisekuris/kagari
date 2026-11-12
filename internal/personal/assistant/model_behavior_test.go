@@ -47,7 +47,7 @@ func TestThinkContinuesOnlyCallbackTaskAndCanBeSilent(t *testing.T) {
 
 func TestThinkSettlesItsOwnTaskAndNotifiesOnCompletion(t *testing.T) {
 	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
-		testkit.ResponseTool("settle_task", map[string]any{"task_id": 7, "expected_revision": 2, "status": personal.TaskCompleted, "summary": "The original comparison is complete."}, "settle-own-task"),
+		testkit.ResponseTool("settle_task", settleTaskArgs{TaskID: 7, ExpectedRevision: 2, Status: personal.TaskCompleted, Summary: "The original comparison is complete.", Delivery: personal.DeliveryDraft{Text: "The original comparison is complete.", Attachments: []string{}}}, "settle-own-task"),
 		testkit.ResponseText(`{"text":"任务已完成：比较结果已保存。","reply_kind":"silent","attachments":[]}`),
 	}}
 	repo := newToolRepo()
@@ -59,7 +59,7 @@ func TestThinkSettlesItsOwnTaskAndNotifiesOnCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output.Silent || output.TaskID != 7 || len(repo.settled) != 1 || repo.settled[0].status != personal.TaskCompleted {
+	if output.Silent || output.TaskID != 7 || len(repo.settled) != 1 || repo.settled[0].settlement.Status != personal.TaskCompleted {
 		t.Fatalf("settlement output=%+v settled=%+v", output, repo.settled)
 	}
 	assertPersonalToolMode(t, fixture.Requests[0], personal.EventTask)
@@ -74,7 +74,7 @@ func TestThinkCallbackCannotMutateOtherTasksOrMemory(t *testing.T) {
 		testkit.ResponseText(`{"text":"我不能从任务回调中创建任务、改记忆或继续其他任务。","reply_kind":"silent","attachments":[]}`),
 	}}
 	repo := newToolRepo()
-	repo.tasks[7] = personal.Task{ID: 7, Goal: "Only this task", Revision: 1, Status: personal.TaskAwaitingReview, BudgetMS: 1000}
+	repo.tasks[7] = personal.Task{ID: 7, Title: "Only this task", Goal: "Only this task", Revision: 1, Status: personal.TaskAwaitingReview, BudgetMS: 1000}
 	input := personal.TurnInput{Event: personal.Event{ID: 21, Kind: personal.EventTask, TaskID: 7, Text: "callback"}, Tasks: []personal.Task{repo.tasks[7]}}
 	output, err := newMainAgent(t, fixture, repo).Think(context.Background(), input)
 	if err != nil {
@@ -88,7 +88,7 @@ func TestThinkCallbackCannotMutateOtherTasksOrMemory(t *testing.T) {
 			t.Fatalf("tool failure %d was not returned to model: %s", i, testkit.RequestInput(fixture.Requests[i+1]))
 		}
 	}
-	if !output.Silent || output.TaskID != 7 {
+	if output.Silent || output.TaskID != 7 || !strings.Contains(output.Text, "「Only this task」未能继续执行") {
 		t.Fatalf("callback output=%+v", output)
 	}
 }

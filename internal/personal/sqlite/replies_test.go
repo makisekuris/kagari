@@ -514,7 +514,7 @@ func TestSuppressStaleWaitAfterTaskStops(t *testing.T) {
 	}
 }
 
-func TestAppendReplyPartsUsesNextPart(t *testing.T) {
+func TestAppendDeliveryPartsUsesNextPart(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Minute)
 	event := openUserEvent(t, s, 1, 1, "你好")
@@ -523,8 +523,20 @@ func TestAppendReplyPartsUsesNextPart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		part, err := appendReplyPartsTx(ctx, tx, event.ID, "完整回复", nil, chunks, 0)
+		intent, err := insertDeliveryIntentTx(ctx, tx, deliveryIntentInsert{
+			eventID: event.ID, purpose: personal.DeliveryResult,
+			draft: personal.DeliveryDraft{Text: "完整回复", Attachments: []string{}},
+		}, time.Now().UTC())
 		if err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		part, err := appendDeliveryPartsTx(ctx, tx, event.ID, intent.ID, "完整回复", nil, chunks, 0, 0)
+		if err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := updateDeliveryIntentRenderedTx(ctx, tx, intent.ID, ""); err != nil {
 			tx.Rollback()
 			t.Fatal(err)
 		}

@@ -64,6 +64,8 @@ type Message struct {
 
 type Outgoing struct {
 	ID           int64
+	DeliveryID   int64
+	DeliveryPart int
 	EventID      int64
 	TaskID       int64
 	Text         string

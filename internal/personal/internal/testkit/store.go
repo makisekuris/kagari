@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"kagari/internal/channel"
 	"kagari/internal/personal"
 	"kagari/internal/personal/sqlite"
 )
@@ -66,7 +67,29 @@ func CreateTask(t *testing.T, s *sqlite.Store, event personal.Event, key, title,
 
 func FinishEvent(t *testing.T, s *sqlite.Store, event personal.Event, output personal.TurnOutput, chunks []string) {
 	t.Helper()
-	if err := s.CompleteEvent(context.Background(), event.ID, output, chunks); err != nil {
+	ctx := context.Background()
+	intents, err := s.EventDeliveries(ctx, event.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intents) == 0 && !output.Silent && output.Text != "" && chunks == nil {
+		chunks, err = channel.PrepareText(output.Text)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var renders []personal.RenderedDelivery
+	for _, intent := range intents {
+		var parts []string
+		if intent.Draft.Text != "" {
+			parts, err = channel.PrepareText(intent.Draft.Text)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		renders = append(renders, personal.RenderedDelivery{DeliveryID: intent.ID, Text: intent.Draft.Text, Chunks: parts})
+	}
+	if err := s.CompleteEvent(ctx, event.ID, output, chunks, renders...); err != nil {
 		t.Fatal(err)
 	}
 }

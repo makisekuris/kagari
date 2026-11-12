@@ -99,7 +99,7 @@ func TestRecoveredContextDefersLateInputsAndRefreshesMemoryOnNextRun(t *testing.
 	if err != nil || callback == nil || callback.Kind != personal.EventTask {
 		t.Fatalf("recovered stage callback=%+v err=%v", callback, err)
 	}
-	if _, err := s.SettleTask(ctx, callback.ID, run.TaskID, run.Revision, personal.TaskCompleted, "Premature completion"); err == nil {
+	if _, err := s.SettleTask(ctx, callback.ID, run.TaskID, run.Revision, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: "Premature completion", Delivery: personal.DeliveryDraft{Text: "Premature completion"}}); err == nil {
 		t.Fatal("pending late input did not block completion")
 	}
 	_, next, err := s.ContinueTask(ctx, callback.ID, "read-late-input", run.TaskID, run.Revision, "Use the additional observation", false)
@@ -139,7 +139,7 @@ func TestRecoveredContextDefersLateInputsAndRefreshesMemoryOnNextRun(t *testing.
 	if err != nil || callback == nil || callback.Kind != personal.EventTask {
 		t.Fatalf("final callback=%+v err=%v", callback, err)
 	}
-	completed, err := s.SettleTask(ctx, callback.ID, run.TaskID, run.Revision, personal.TaskCompleted, result.Summary)
+	completed, err := s.SettleTask(ctx, callback.ID, run.TaskID, run.Revision, personal.TaskSettlement{Status: personal.TaskCompleted, Summary: result.Summary, Delivery: personal.DeliveryDraft{Text: result.Summary}})
 	if err != nil || completed.Status != personal.TaskCompleted {
 		t.Fatalf("completion after applying input=%+v err=%v", completed, err)
 	}

@@ -21,7 +21,7 @@ FinishStage 保存阶段结果并产生回调，不等于整个 Task 完成。�
 
 ## 2. 持久化契约
 
-定时计划原实现使用 schema 3；与上下文管理、回复和输入关联整合后统一使用 schema 4，默认路径为 `data/kagari-context.db`。旧库拒绝启动但不删除，使用新的 storage.path；不编写迁移脚本。定时计划的触发、检查区间、成功进度和背景建议规则保持不变。
+定时计划原实现使用 schema 3；与上下文管理、回复和输入关联整合后使用 schema 4。2026-11-13 的[交付意图迭代](V2-TEMPORAL-WATCH-ROADMAP.md)升级到 schema 5，将完整交付意图与结案、检查进度一起保存。旧库拒绝启动但不删除，需显式使用新的 `storage.path`；不编写迁移脚本。定时计划的触发、检查区间、成功进度和背景建议规则保持不变。
 
 字段与约束对应 `personal/sqlite/schedule_schema.go`、`personal/sqlite/schema.go` 和 `personal/schedule_suggestion.go`；验证结果以本文件末尾的记录为准。沿用现有 ID、UTC 时间文本和 JSON 存储方式。
 

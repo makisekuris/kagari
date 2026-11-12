@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -40,24 +39,33 @@ CREATE INDEX IF NOT EXISTS personal_reply_tasks_task ON personal_reply_tasks(tas
 
 func deletePendingReplyWaitTx(ctx context.Context, tx *sql.Tx, outboxID int64, historyID sql.NullInt64) error {
 	var status string
-	err := tx.QueryRowContext(ctx, `SELECT status FROM personal_outbox WHERE id=?`, outboxID).Scan(&status)
+	var deliveryID int64
+	err := tx.QueryRowContext(ctx, `SELECT status,delivery_id FROM personal_outbox WHERE id=?`, outboxID).Scan(&status, &deliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if err != nil || status != "pending" {
 		return err
 	}
+	var hasSettledPart bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM personal_outbox WHERE delivery_id=? AND status<>'pending')`, deliveryID).Scan(&hasSettledPart); err != nil {
+		return err
+	}
+	if hasSettledPart {
+		return nil
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_reply_groups SET wait_outbox_id=NULL,wait_history_id=NULL
 		WHERE wait_outbox_id=? OR wait_history_id=?`, outboxID, nullableID(historyID.Int64)); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM personal_outbox WHERE id=? AND status='pending'`, outboxID); err != nil {
+	res, err := tx.ExecContext(ctx, `DELETE FROM personal_delivery_intents WHERE id=? AND state='rendered'`, deliveryID)
+	if err != nil {
 		return err
 	}
-	if historyID.Valid {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM personal_history WHERE id=?`, historyID.Int64); err != nil {
-			return err
-		}
+	if changed, err := res.RowsAffected(); err != nil {
+		return err
+	} else if changed != 1 {
+		return errors.New("personal: pending reply wait has no rendered delivery intent")
 	}
 	return nil
 }
@@ -181,30 +189,52 @@ func (s *Store) QueueWaitingReply(ctx context.Context, now time.Time, delay time
 				message = "我正在处理这条消息，稍后回复。"
 			}
 		}
-		attachmentJSON, err := json.Marshal([]channel.Attachment{})
+		scopes := make([]personal.DeliveryScope, 0, candidate.taskCount)
+		if candidate.taskCount > 0 {
+			taskRows, err := tx.QueryContext(ctx, `SELECT t.id,t.revision,COALESCE((
+				SELECT r.id FROM personal_runs r WHERE r.task_id=t.id AND r.revision=t.revision AND r.kind='task' ORDER BY r.id DESC LIMIT 1
+			),0) FROM personal_reply_tasks rt JOIN personal_tasks t ON t.id=rt.task_id
+				WHERE rt.group_id=? ORDER BY t.id`, candidate.id)
+			if err != nil {
+				return false, err
+			}
+			for taskRows.Next() {
+				var scope personal.DeliveryScope
+				if err := taskRows.Scan(&scope.TaskID, &scope.Revision, &scope.RunID); err != nil {
+					taskRows.Close()
+					return false, err
+				}
+				scopes = append(scopes, scope)
+			}
+			if err := taskRows.Err(); err != nil {
+				taskRows.Close()
+				return false, err
+			}
+			if err := taskRows.Close(); err != nil {
+				return false, err
+			}
+		}
+		intent, err := insertDeliveryIntentTx(ctx, tx, deliveryIntentInsert{
+			eventID: candidate.id, purpose: personal.DeliveryStatus,
+			draft: personal.DeliveryDraft{Text: message, Attachments: []string{}}, scopes: scopes,
+		}, now)
 		if err != nil {
 			return false, err
 		}
-		var part int
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(part),0)+1 FROM personal_outbox WHERE event_id=?`, candidate.id).Scan(&part); err != nil {
+		if _, err := appendDeliveryPartsTx(ctx, tx, candidate.id, intent.ID, message, []channel.Attachment{}, []string{message}, 0, 0); err != nil {
 			return false, err
 		}
-		history, err := tx.ExecContext(ctx, `INSERT INTO personal_history(event_id,role,text,attachments) VALUES(?,'assistant',?,?)`,
-			candidate.id, message, string(attachmentJSON))
-		if err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE personal_outbox SET next_attempt_at=? WHERE delivery_id=?`, timestamp(now.UTC()), intent.ID); err != nil {
 			return false, err
 		}
-		historyID, err := history.LastInsertId()
-		if err != nil {
+		if err := updateDeliveryIntentRenderedTx(ctx, tx, intent.ID, ""); err != nil {
 			return false, err
 		}
-		outbox, err := tx.ExecContext(ctx, `INSERT INTO personal_outbox(event_id,part,text,status,next_attempt_at) VALUES(?,?,?,'pending',?)`,
-			candidate.id, part, message, timestamp(now.UTC()))
-		if err != nil {
+		var historyID, outboxID int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM personal_history WHERE delivery_id=?`, intent.ID).Scan(&historyID); err != nil {
 			return false, err
 		}
-		outboxID, err := outbox.LastInsertId()
-		if err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM personal_outbox WHERE delivery_id=? ORDER BY delivery_part LIMIT 1`, intent.ID).Scan(&outboxID); err != nil {
 			return false, err
 		}
 		updated, err := tx.ExecContext(ctx, `UPDATE personal_reply_groups SET wait_notified=1,wait_outbox_id=?,wait_history_id=? WHERE id=? AND wait_notified=0 AND has_content=0 AND closed=0`, outboxID, historyID, candidate.id)

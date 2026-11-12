@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -73,6 +74,19 @@ func createTask(t *testing.T, s *Store, event personal.Event, key, title, goal, 
 	return task, run
 }
 
+func testTaskSettlement(status personal.TaskStatus, summary string, assessment ...*personal.CheckAssessment) personal.TaskSettlement {
+	text := summary
+	if strings.TrimSpace(text) == "" {
+		text = "Task result"
+	}
+	settlement := personal.TaskSettlement{Status: status, Summary: summary,
+		Delivery: personal.DeliveryDraft{Text: text, Attachments: []string{}}}
+	if len(assessment) > 0 {
+		settlement.Assessment = assessment[0]
+	}
+	return settlement
+}
+
 func createRunningTask(t *testing.T, s *Store, key string, input personal.TaskInput) personal.Run {
 	t.Helper()
 	ctx := context.Background()
@@ -91,7 +105,27 @@ func createRunningTask(t *testing.T, s *Store, key string, input personal.TaskIn
 
 func finishEvent(t *testing.T, s *Store, event personal.Event, output personal.TurnOutput, chunks []string) {
 	t.Helper()
-	if err := s.CompleteEvent(context.Background(), event.ID, output, chunks); err != nil {
+	ctx := context.Background()
+	if !output.Silent && output.Text != "" && chunks == nil {
+		var err error
+		chunks, err = channel.PrepareText(output.Text)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	intents, err := s.EventDeliveries(ctx, event.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renders := make([]personal.RenderedDelivery, 0, len(intents))
+	for _, intent := range intents {
+		prepared, err := channel.PrepareText(intent.Draft.Text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		renders = append(renders, personal.RenderedDelivery{DeliveryID: intent.ID, Text: intent.Draft.Text, Chunks: prepared})
+	}
+	if err := s.CompleteEvent(ctx, event.ID, output, chunks, renders...); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -475,7 +509,7 @@ func TestTaskCallbackAuthorityRevisionCancelAndExplicitContinue(t *testing.T) {
 	if _, _, err := s.ReviseTask(ctx, callbackA.ID, "revise", taskB.ID, 1, personal.TaskInput{Goal: "arbitrary", Context: ""}); err == nil {
 		t.Fatal("callback revised a task goal")
 	}
-	if _, err := s.SettleTask(ctx, callbackA.ID, taskB.ID, 1, personal.TaskCompleted, "wrong"); err == nil {
+	if _, err := s.SettleTask(ctx, callbackA.ID, taskB.ID, 1, testTaskSettlement(personal.TaskCompleted, "wrong")); err == nil {
 		t.Fatal("callback settled another task")
 	}
 	userRevision := openUserEvent(t, s, 2, 202, "Revise alpha")
@@ -520,10 +554,10 @@ func TestTaskCallbackAuthorityRevisionCancelAndExplicitContinue(t *testing.T) {
 	if err != nil || callbackB == nil || callbackB.TaskID != taskB.ID {
 		t.Fatalf("callback B = (%+v,%v)", callbackB, err)
 	}
-	if _, err := s.SettleTask(ctx, callbackB.ID, taskA.ID, 3, personal.TaskCompleted, "wrong"); err == nil {
+	if _, err := s.SettleTask(ctx, callbackB.ID, taskA.ID, 3, testTaskSettlement(personal.TaskCompleted, "wrong")); err == nil {
 		t.Fatal("callback B settled task A")
 	}
-	if _, err := s.SettleTask(ctx, callbackB.ID, taskB.ID, 1, personal.TaskCompleted, "B done"); err != nil {
+	if _, err := s.SettleTask(ctx, callbackB.ID, taskB.ID, 1, testTaskSettlement(personal.TaskCompleted, "B done")); err != nil {
 		t.Fatal(err)
 	}
 	finishEvent(t, s, *callbackB, personal.TurnOutput{}, nil)
@@ -952,8 +986,8 @@ func TestCancelTaskIdempotenceAndLateStageNoop(t *testing.T) {
 func TestPersonalSchemaKeepsChannelTablesWithoutDerivedColumns(t *testing.T) {
 	s := testStore(t, ":memory:", time.Minute)
 	var tables int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'personal_%'`).Scan(&tables); err != nil || tables != 24 {
-		t.Fatalf("personal tables = (%d,%v), want 24", tables, err)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'personal_%'`).Scan(&tables); err != nil || tables != 26 {
+		t.Fatalf("personal tables = (%d,%v), want 26", tables, err)
 	}
 	for _, field := range []struct{ table, column string }{
 		{"personal_runs", "remaining_ms"},

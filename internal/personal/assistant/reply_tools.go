@@ -48,7 +48,11 @@ func (p *personalTools) replyTools() ([]tool.BaseTool, error) {
 
 func (p *personalTools) requiredTaskReply() string {
 	var parts []string
-	for _, failure := range p.unresolvedTaskActions() {
+	failures := p.unresolvedTaskActions()
+	if p.callbackFailure != nil {
+		failures = append(failures, *p.callbackFailure)
+	}
+	for _, failure := range failures {
 		operation := "创建任务"
 		switch failure.Operation {
 		case "update_task":

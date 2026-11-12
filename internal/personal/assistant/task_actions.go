@@ -240,6 +240,18 @@ func (p *personalTools) taskActionName(taskID int64) string {
 	return ""
 }
 
+func (p *personalTools) callbackContinuationFailure(taskID int64) *taskActionFailure {
+	target := p.taskActionName(taskID)
+	if target == "" {
+		target = "该任务"
+	}
+	return &taskActionFailure{
+		Operation: "continue_task",
+		TaskID:    taskID,
+		Target:    target,
+	}
+}
+
 func taskActionTarget(title string) string {
 	if title = strings.TrimSpace(title); title != "" {
 		return title

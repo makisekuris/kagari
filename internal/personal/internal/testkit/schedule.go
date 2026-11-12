@@ -124,7 +124,7 @@ func FinishSuggestionCallback(t *testing.T, s *sqlite.Store, callback personal.E
 	if err != nil || task == nil {
 		t.Fatalf("callback task = (%+v, %v)", task, err)
 	}
-	if _, err := s.SettleTask(ctx, callback.ID, task.ID, task.Revision, personal.TaskFailed, "The scheduled review ended with a result."); err != nil {
+	if _, err := s.SettleTask(ctx, callback.ID, task.ID, task.Revision, personal.TaskSettlement{Status: personal.TaskFailed, Summary: "The scheduled review ended with a result.", Delivery: personal.DeliveryDraft{Text: "The scheduled review ended with a result."}}); err != nil {
 		t.Fatal(err)
 	}
 	output := personal.TurnOutput{TaskID: task.ID, Text: "The scheduled review ended with a result.", Silent: silent}

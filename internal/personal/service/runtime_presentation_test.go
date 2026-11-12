@@ -277,7 +277,7 @@ func TestRuntimePresentationRespectsReplyKindAndTerminalCallback(t *testing.T) {
 			t.Fatal(err)
 		}
 		callbackFixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
-			testkit.ResponseTool("settle_task", map[string]any{"task_id": task.ID, "expected_revision": task.Revision, "status": personal.TaskCompleted, "summary": "页面确认月费为 17 元。"}, "settle"),
+			testkit.ResponseTool("settle_task", map[string]any{"task_id": task.ID, "expected_revision": task.Revision, "status": personal.TaskCompleted, "summary": "页面确认月费为 17 元。", "delivery": personal.DeliveryDraft{Text: "页面确认月费为 17 元。", Attachments: []string{}}}, "settle"),
 			testkit.ResponseText(`{"text":"已收到，后台会继续处理。","reply_kind":"receipt","attachments":[]}`),
 		}}
 		r.Think = testMainAgent(t, callbackFixture, s).Think

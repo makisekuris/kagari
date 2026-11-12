@@ -34,7 +34,7 @@ func TestMainAgentScheduleReplyDoesNotInheritAnUnrelatedTask(t *testing.T) {
 				t.Fatal(err)
 			}
 			callback := testkit.FinishRun(t, store, run)
-			if _, err := store.SettleTask(ctx, callback.ID, run.TaskID, run.Revision, personal.TaskWaitingInput, "Need input"); err != nil {
+			if _, err := store.SettleTask(ctx, callback.ID, run.TaskID, run.Revision, personal.TaskSettlement{Status: personal.TaskWaitingInput, Summary: "Need input", Delivery: personal.DeliveryDraft{Text: "Need input"}}); err != nil {
 				t.Fatal(err)
 			}
 			testkit.FinishEvent(t, store, callback, personal.TurnOutput{TaskID: run.TaskID, Text: "Need input"}, []string{"Need input"})

@@ -148,13 +148,15 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 	if err != nil {
 		return personal.TurnOutput{}, err
 	}
-	files, err := agentctx.ResolveAttachments(ctx, a.Store, response.Attachments)
-	if err != nil {
-		return personal.TurnOutput{}, fmt.Errorf("reply attachment is unavailable: %w", err)
-	}
-	response.Attachments = response.Attachments[:0]
-	for _, file := range files {
-		response.Attachments = append(response.Attachments, file.ID)
+	if tools.settledDelivery == nil {
+		files, err := agentctx.ResolveAttachments(ctx, a.Store, response.Attachments)
+		if err != nil {
+			return personal.TurnOutput{}, fmt.Errorf("reply attachment is unavailable: %w", err)
+		}
+		response.Attachments = response.Attachments[:0]
+		for _, file := range files {
+			response.Attachments = append(response.Attachments, file.ID)
+		}
 	}
 	notify := response.ReplyKind != personal.ReplySilent
 	if tools.mustNotify || taskOutcomeRequiresNotification(input) {

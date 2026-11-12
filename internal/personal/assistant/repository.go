@@ -21,7 +21,7 @@ type Repository interface {
 	ReviseTask(context.Context, int64, string, int64, int64, personal.TaskInput) (personal.Task, personal.Run, error)
 	CancelTask(context.Context, int64, int64, int64) (personal.Task, error)
 	ContinueTask(context.Context, int64, string, int64, int64, string, bool) (personal.Task, personal.Run, error)
-	SettleTask(context.Context, int64, int64, int64, personal.TaskStatus, string, ...*personal.CheckAssessment) (personal.Task, error)
+	SettleTask(context.Context, int64, int64, int64, personal.TaskSettlement) (personal.Task, error)
 	QueryTasks(context.Context, personal.ReadScope, personal.TaskQuery) (personal.TaskPage, error)
 	Task(context.Context, int64) (*personal.Task, error)
 	WriteMemory(context.Context, int64, string, personal.MemoryChange) (personal.Memory, error)

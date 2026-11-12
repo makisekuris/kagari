@@ -88,8 +88,7 @@ type continueRecord struct {
 
 type settleRecord struct {
 	taskID, revision int64
-	status           personal.TaskStatus
-	summary          string
+	settlement       personal.TaskSettlement
 }
 
 func newToolRepo() *toolRepo {
@@ -135,10 +134,10 @@ func (r *toolRepo) ContinueTask(_ context.Context, _ int64, key string, taskID, 
 	return task, run, nil
 }
 
-func (r *toolRepo) SettleTask(_ context.Context, _, taskID, revision int64, status personal.TaskStatus, summary string, _ ...*personal.CheckAssessment) (personal.Task, error) {
-	r.settled = append(r.settled, settleRecord{taskID: taskID, revision: revision, status: status, summary: summary})
+func (r *toolRepo) SettleTask(_ context.Context, _, taskID, revision int64, settlement personal.TaskSettlement) (personal.Task, error) {
+	r.settled = append(r.settled, settleRecord{taskID: taskID, revision: revision, settlement: settlement})
 	task := r.tasks[taskID]
-	task.Status, task.Summary = status, summary
+	task.Status, task.Summary = settlement.Status, settlement.Summary
 	r.tasks[taskID] = task
 	return task, nil
 }

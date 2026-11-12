@@ -243,7 +243,7 @@ func TestAddTaskInputsRejectsIneligibleSourcesAndTerminalTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SettleTask(ctx, current.ID, completed.ID, completed.Revision, personal.TaskCompleted, "done"); err != nil {
+	if _, err := s.SettleTask(ctx, current.ID, completed.ID, completed.Revision, testTaskSettlement(personal.TaskCompleted, "done")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AddTaskInputs(ctx, current.ID, "completed", completed.ID, completed.Revision, []int64{current.ID}); err == nil {
@@ -359,7 +359,7 @@ func TestAddTaskInputsLeavesActiveRunAndFeedsNextStage(t *testing.T) {
 	if err != nil || callback == nil || callback.Kind != personal.EventTask || callback.TaskID != task.ID {
 		t.Fatalf("task callback=(%+v,%v)", callback, err)
 	}
-	if _, err := s.SettleTask(ctx, callback.ID, task.ID, task.Revision, personal.TaskCompleted, "old result is complete"); err == nil {
+	if _, err := s.SettleTask(ctx, callback.ID, task.ID, task.Revision, testTaskSettlement(personal.TaskCompleted, "old result is complete")); err == nil {
 		t.Fatal("task with not-yet-included inputs was completed")
 	}
 	_, nextRun, err := s.ContinueTask(ctx, callback.ID, "continue-with-input", task.ID, task.Revision, "Use the newly authorized source", false)
