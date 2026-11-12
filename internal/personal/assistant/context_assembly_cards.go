@@ -162,7 +162,7 @@ func historyPriority(input personal.TurnInput, protected map[int]bool) []int {
 			continue
 		}
 		message := input.History[i]
-		if message.TaskID == input.Event.TaskID && input.Event.TaskID != 0 || containsInt64(input.ReferencedTaskIDs, message.TaskID) {
+		if historyMessageRelatedToTask(message, input.Event.TaskID) || historyMessageRelatedToAnyTask(message, input.ReferencedTaskIDs) {
 			related = append(related, i)
 		} else {
 			unrelated = append(unrelated, i)
@@ -171,27 +171,123 @@ func historyPriority(input personal.TurnInput, protected map[int]bool) []int {
 	return append(related, unrelated...)
 }
 
-func orderedHistory(history []personal.Message, selected map[int]bool) []personal.Message {
+func orderedHistory(history []personal.Message, selected, cards map[int]bool) []personal.Message {
 	out := make([]personal.Message, 0, len(selected))
 	for i, message := range history {
 		if selected[i] {
+			if cards[i] {
+				message = compactDeliveryHistoryMessage(message)
+			}
 			out = append(out, message)
 		}
 	}
 	return out
 }
 
+func deliveryHistoryExpansionOrder(input personal.TurnInput, candidates map[int]int, explicit map[int]bool) []int {
+	var replied, related, unrelated []int
+	for i := len(input.History) - 1; i >= 0; i-- {
+		if _, ok := candidates[i]; !ok {
+			continue
+		}
+		if explicit[i] {
+			replied = append(replied, i)
+		} else if historyMessageRelatedToTask(input.History[i], input.Event.TaskID) || historyMessageRelatedToAnyTask(input.History[i], input.ReferencedTaskIDs) {
+			related = append(related, i)
+		} else {
+			unrelated = append(unrelated, i)
+		}
+	}
+	out := append(replied, related...)
+	return append(out, unrelated...)
+}
+
 func isExplicitReply(input personal.TurnInput, message personal.Message) bool {
 	if input.RepliedMessage != nil {
 		replied := input.RepliedMessage
-		if replied.HistoryID > 0 && message.HistoryID == replied.HistoryID {
-			return true
+		if replied.HistoryID > 0 {
+			return message.HistoryID == replied.HistoryID
 		}
-		if replied.EventID > 0 && message.EventID == replied.EventID && message.Role == replied.Role {
+		if replied.OutboxID > 0 {
+			return messageContainsOutbox(message, replied.OutboxID)
+		}
+		if replied.Delivery != nil && replied.Delivery.ID > 0 {
+			return message.Delivery != nil && message.Delivery.ID == replied.Delivery.ID
+		}
+		if replied.MessageID != "" {
+			return messageContainsReceipt(message, replied.MessageID, replied.Channel, replied.Account, replied.Sender)
+		}
+		if replied.EventID > 0 {
+			return message.EventID == replied.EventID && message.Role == replied.Role
+		}
+	}
+	return input.Event.ReplyToID != "" && messageContainsReceipt(message, input.Event.ReplyToID, input.Event.Channel, input.Event.Account, input.Event.Sender)
+}
+
+func messageContainsOutbox(message personal.Message, outboxID int64) bool {
+	if message.OutboxID == outboxID {
+		return true
+	}
+	if message.Delivery == nil || message.Delivery.Progress == nil {
+		return false
+	}
+	for _, item := range message.Delivery.Progress.Items {
+		if item.OutboxID == outboxID {
 			return true
 		}
 	}
-	return input.Event.ReplyToID != "" && message.MessageID == input.Event.ReplyToID
+	return false
+}
+
+func messageContainsReceipt(message personal.Message, messageID, channel, account, conversation string) bool {
+	if message.MessageID == messageID && replySourceMatches(channel, account, conversation, message.Channel, message.Account, message.Sender) {
+		return true
+	}
+	if message.Delivery == nil || message.Delivery.Progress == nil {
+		return false
+	}
+	for _, item := range message.Delivery.Progress.Items {
+		if item.Receipt != nil && item.Receipt.MessageID == messageID &&
+			replySourceMatches(channel, account, conversation, item.Receipt.Channel, item.Receipt.Account, item.Receipt.Conversation) {
+			return true
+		}
+	}
+	return false
+}
+
+func replySourceMatches(channel, account, conversation, candidateChannel, candidateAccount, candidateConversation string) bool {
+	return knownReplySourceMatches(channel, candidateChannel) &&
+		knownReplySourceMatches(account, candidateAccount) &&
+		knownReplySourceMatches(conversation, candidateConversation)
+}
+
+func knownReplySourceMatches(left, right string) bool {
+	return left == "" || right == "" || left == right
+}
+
+func historyMessageRelatedToTask(message personal.Message, taskID int64) bool {
+	return taskID > 0 && (message.TaskID == taskID || messageDeliveryHasTask(message, taskID))
+}
+
+func historyMessageRelatedToAnyTask(message personal.Message, taskIDs []int64) bool {
+	for _, taskID := range taskIDs {
+		if historyMessageRelatedToTask(message, taskID) {
+			return true
+		}
+	}
+	return false
+}
+
+func messageDeliveryHasTask(message personal.Message, taskID int64) bool {
+	if message.Delivery == nil {
+		return false
+	}
+	for _, scope := range message.Delivery.Scopes {
+		if scope.TaskID == taskID {
+			return true
+		}
+	}
+	return false
 }
 
 func replyMessageID(message personal.Message) string {

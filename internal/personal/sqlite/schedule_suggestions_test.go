@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"kagari/internal/channel"
 	"kagari/internal/personal"
 )
 
@@ -217,15 +218,44 @@ func TestSettledScheduleSuggestionUsesSeparateDeliveryGroups(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(DISTINCT delivery_id) FROM personal_history WHERE event_id=? AND role='assistant'`, callback1.ID).Scan(&distinctHistoryDeliveries); err != nil || distinctHistoryDeliveries != 2 {
 		t.Fatalf("assistant History delivery groups=%d, want 2: %v", distinctHistoryDeliveries, err)
 	}
-	var outboxID int64
-	if err := s.db.QueryRow(`SELECT id FROM personal_outbox WHERE suggestion_id=? ORDER BY id LIMIT 1`, suggestion.ID).Scan(&outboxID); err != nil {
+	var outboxID, suggestionDeliveryID int64
+	if err := s.db.QueryRow(`SELECT id,delivery_id FROM personal_outbox WHERE suggestion_id=? ORDER BY id LIMIT 1`, suggestion.ID).Scan(&outboxID, &suggestionDeliveryID); err != nil {
 		t.Fatal(err)
+	}
+	var scopeTaskID, scopeRevision, scopeRunID, originRevision int64
+	if err := s.db.QueryRow(`SELECT task_id,revision,COALESCE(run_id,0) FROM personal_delivery_scopes WHERE delivery_id=?`, suggestionDeliveryID).
+		Scan(&scopeTaskID, &scopeRevision, &scopeRunID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT revision FROM personal_runs WHERE id=?`, callback1.RunID).Scan(&originRevision); err != nil {
+		t.Fatal(err)
+	}
+	if scopeTaskID != callback1.TaskID || scopeRevision != originRevision || scopeRunID != callback1.RunID {
+		t.Fatalf("suggestion scope=(task %d, revision %d, run %d), want its origin callback (%d, %d, %d)",
+			scopeTaskID, scopeRevision, scopeRunID, callback1.TaskID, originRevision, callback1.RunID)
 	}
 	if items, err := s.ReplyScheduleSuggestions(ctx, outboxID); err != nil || len(items) != 0 {
 		t.Fatalf("pending suggestion outbox was treated as a sent reply: (%+v, %v)", items, err)
 	}
-	if _, err := s.db.Exec(`UPDATE personal_outbox SET status='sent' WHERE id=?`, outboxID); err != nil {
-		t.Fatal(err)
+	var suggestionTaskID int64
+	for {
+		delivery, err := s.ClaimDelivery(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if delivery == nil {
+			break
+		}
+		if delivery.DeliveryID == suggestionDeliveryID {
+			suggestionTaskID = delivery.TaskID
+		}
+		receipt := channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner", MessageID: fmt.Sprintf("suggestion-%d", delivery.ID)}
+		if err := s.UpdateDelivery(ctx, delivery.ID, "sent", receipt, "", time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if suggestionTaskID != callback1.TaskID {
+		t.Fatalf("schedule suggestion scope TaskID=%d, want callback Task %d", suggestionTaskID, callback1.TaskID)
 	}
 	items, err := s.ReplyScheduleSuggestions(ctx, outboxID)
 	if err != nil || len(items) != 1 || items[0].ID != suggestion.ID {

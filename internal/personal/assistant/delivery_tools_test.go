@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"kagari/internal/channel"
 	"kagari/internal/personal"
 	"kagari/internal/personal/internal/testkit"
 )
@@ -308,13 +309,49 @@ func TestCancelTaskDoesNotInvokeDeliveryStopAndUsesStoreConfirmation(t *testing.
 	repo := newDeliveryToolRepository()
 	task := personal.Task{ID: 7, Title: "Report", Goal: "Generate report", Revision: 2}
 	repo.tasks[task.ID] = task
+	repo.addIntent(personal.DeliveryIntent{ID: 100, EventID: 26, Purpose: personal.DeliveryControl, Draft: personal.DeliveryDraft{Text: "Earlier control confirmation."}})
 	p, tools := newTaskActionTools(t, repo, personal.Event{ID: 26, Kind: personal.EventUser}, personal.TurnInput{Tasks: []personal.Task{task}})
 	reply := invokeActionTool(t, tools, "cancel_task", cancelTaskArgs{TaskID: task.ID, ExpectedRevision: task.Revision})
 	if !reply.OK || repo.cancelCalls != 1 || len(repo.controlCalls) != 0 {
 		t.Fatalf("cancel task incorrectly invoked delivery stop: reply=%+v cancels=%d controls=%+v", reply, repo.cancelCalls, repo.controlCalls)
 	}
-	if !p.persistedControl || len(p.controlDeliveries) != 1 || p.controlDeliveries[0].Draft.Text != "Store-confirmed task cancellation." {
+	if !p.persistedControl || len(p.controlDeliveries) != 2 || p.controlDeliveries[1].Draft.Text != "Store-confirmed task cancellation." {
 		t.Fatalf("cancel task did not retain Store confirmation: persisted=%t deliveries=%+v", p.persistedControl, p.controlDeliveries)
+	}
+	if reply.Deliveries == nil || len(reply.Deliveries.Items) != 2 || reply.Deliveries.Items[0].ID != 101 || reply.Deliveries.Items[1].ID != 100 {
+		t.Fatalf("cancel result did not return this event's control confirmations in descending ID order: %+v", reply.Deliveries)
+	}
+}
+
+func TestListDeliveriesReturnsCardsWithoutMutatingRepositorySnapshot(t *testing.T) {
+	receipt := &channel.Receipt{Channel: "telegram", Account: "bot", Conversation: "owner", MessageID: "accepted-remote-id"}
+	repo := newDeliveryToolRepository()
+	repo.queryPage = personal.DeliveryPage{Items: []personal.DeliveryIntent{{
+		ID: 44, EventID: 30, Purpose: personal.DeliveryResult,
+		Draft:  personal.DeliveryDraft{Text: "full draft body", Attachments: []string{"file-1"}},
+		Scopes: []personal.DeliveryScope{{TaskID: 7, Revision: 3}},
+		Progress: &personal.DeliveryProgress{AcceptedItems: 1, Items: []personal.DeliveryItem{{
+			OutboxID: 90, DeliveryPart: 0, Text: "accepted text item", Status: "sent", Receipt: receipt, Attempts: 1,
+		}}},
+	}}}
+	p, tools := newTaskActionTools(t, repo, personal.Event{ID: 30, Kind: personal.EventUser}, personal.TurnInput{})
+	reply := invokeActionTool(t, tools, "list_deliveries", personal.DeliveryQuery{})
+	if !reply.OK || reply.Deliveries == nil || len(reply.Deliveries.Items) != 1 {
+		t.Fatalf("list delivery query reply=%+v", reply)
+	}
+	card := reply.Deliveries.Items[0]
+	if !card.ContentOmitted || card.Draft.Text != "" || card.Progress == nil || card.Progress.Items[0].Text != "" {
+		t.Fatalf("list did not return a compact delivery card: %+v", card)
+	}
+	if card.ID != 44 || card.Scopes[0] != (personal.DeliveryScope{TaskID: 7, Revision: 3}) || card.Progress.Items[0].OutboxID != 90 || card.Progress.Items[0].Status != "sent" || card.Progress.Items[0].Receipt == nil || card.Progress.Items[0].Receipt.MessageID != "accepted-remote-id" {
+		t.Fatalf("delivery card dropped progress identity or receipt: %+v", card)
+	}
+	original := repo.queryPage.Items[0]
+	if original.Draft.Text != "full draft body" || original.Progress.Items[0].Text != "accepted text item" || original.Progress.Items[0].Receipt == nil || original.Progress.Items[0].Receipt.MessageID != "accepted-remote-id" {
+		t.Fatalf("list card mutated the Repository snapshot: %+v", original)
+	}
+	if !p.deliveryQueried {
+		t.Fatal("successful list query was not recorded")
 	}
 }
 

@@ -77,17 +77,21 @@ func (s *Store) ScheduleOccurrences(ctx context.Context, id, beforeID int64, lim
 	if limit > personal.MaxSchedulePageSize {
 		limit = personal.MaxSchedulePageSize
 	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	query := `SELECT ` + occurrenceColumns + ` FROM personal_schedule_occurrences WHERE schedule_id=?`
 	if beforeID > 0 {
 		query += ` AND id<?`
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
 	var rows *sql.Rows
-	var err error
 	if beforeID > 0 {
-		rows, err = s.db.QueryContext(ctx, query, id, beforeID, limit)
+		rows, err = tx.QueryContext(ctx, query, id, beforeID, limit)
 	} else {
-		rows, err = s.db.QueryContext(ctx, query, id, limit)
+		rows, err = tx.QueryContext(ctx, query, id, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -108,9 +112,12 @@ func (s *Store) ScheduleOccurrences(ctx context.Context, id, beforeID int64, lim
 		return nil, err
 	}
 	for i := range occurrences {
-		if err := s.occurrenceTaskState(ctx, &occurrences[i]); err != nil {
+		if err := s.occurrenceTaskState(ctx, tx, &occurrences[i]); err != nil {
 			return nil, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return occurrences, nil
 }
@@ -119,43 +126,39 @@ func (s *Store) ScheduleForTask(ctx context.Context, taskID int64) (*personal.Sc
 	if taskID <= 0 {
 		return nil, nil
 	}
-	occurrence, err := scanScheduleOccurrence(s.db.QueryRowContext(ctx, `SELECT `+occurrenceColumns+` FROM personal_schedule_occurrences WHERE task_id=?`, taskID))
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	occurrence, err := scanScheduleOccurrence(tx.QueryRowContext(ctx, `SELECT `+occurrenceColumns+` FROM personal_schedule_occurrences WHERE task_id=?`, taskID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	schedule, err := scanSchedule(s.db.QueryRowContext(ctx, `SELECT `+scheduleColumns+` FROM personal_schedules WHERE id=?`, occurrence.ScheduleID))
+	schedule, err := scanSchedule(tx.QueryRowContext(ctx, `SELECT `+scheduleColumns+` FROM personal_schedules WHERE id=?`, occurrence.ScheduleID))
 	if err != nil {
 		return nil, err
 	}
-	if err := s.occurrenceTaskState(ctx, occurrence); err != nil {
+	if err := s.occurrenceTaskState(ctx, tx, occurrence); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return &personal.ScheduleContext{Schedule: *schedule, Occurrence: *occurrence}, nil
 }
 
-func (s *Store) occurrenceTaskState(ctx context.Context, o *personal.ScheduleOccurrence) error {
+func (s *Store) occurrenceTaskState(ctx context.Context, tx *sql.Tx, o *personal.ScheduleOccurrence) error {
 	if o.TaskID == 0 {
 		return nil
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT status,summary FROM personal_tasks WHERE id=?`, o.TaskID).Scan(&o.TaskStatus, &o.TaskSummary); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT status,summary FROM personal_tasks WHERE id=?`, o.TaskID).Scan(&o.TaskStatus, &o.TaskSummary); err != nil {
 		return err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT d.status,COUNT(*) FROM personal_outbox d JOIN personal_events e ON e.id=d.event_id WHERE e.task_id=? GROUP BY d.status`, o.TaskID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	o.DeliveryStates = make(map[string]int)
-	for rows.Next() {
-		var state string
-		var count int
-		if err := rows.Scan(&state, &count); err != nil {
-			return err
-		}
-		o.DeliveryStates[state] = count
-	}
-	return rows.Err()
+	states, err := loadTaskDeliveryStatesTx(ctx, tx, o.TaskID)
+	o.DeliveryStates = states
+	return err
 }

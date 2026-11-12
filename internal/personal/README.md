@@ -19,6 +19,8 @@
 
 工具查询遇到缺失记录时使用 `personal.ErrRecordNotFound`，SQL 错误的转换由 `sqlite` 负责；`Task`、`Run` 等可选查询仍以 `nil, nil` 表示不存在。工具记录的调用 ID 由 `agentctx` 从模型消息中提取，`sqlite` 接收正文及元数据，不解析模型框架的消息类型。
 
+`DeliveryProgress` 是从 outbox 派生的只读快照，不另存可变汇总。History、交付查询和诊断复用同一快照；准确回复关联使用发送项所属的交付身份。`DeliveryCard` 可省略正文，但保留全部发送项及其状态和回执，供上下文压缩和默认 CLI 诊断复用。
+
 执行摘要是完整结果的读取投影。裁剪摘要不修改已保存的结果；较大的进展和输入处理记录通过 `read_progress`、`read_run` 读取，文件路径与附件 ID 保持完整。
 
 改动时按实际职责定位：调整回复决策看 `assistant`，调整阶段执行看 `execution`，调整 worker 生命周期看 `service`，调整原子状态转换看 `sqlite`。共用逻辑放在拥有其规则的包中，调用者复用该实现。

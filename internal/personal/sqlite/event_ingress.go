@@ -191,17 +191,19 @@ func replyAssociation(ctx context.Context, tx *sql.Tx, input channel.Input) (int
 	if input.ReplyToID == "" {
 		return 0, 0, 0, nil
 	}
-	var taskID, scheduleID sql.NullInt64
+	var deliveryID, scheduleID sql.NullInt64
 	var outboxID int64
-	err := tx.QueryRowContext(ctx, `SELECT e.task_id,e.schedule_id,d.id FROM personal_outbox d JOIN personal_events e ON e.id=d.event_id
+	err := tx.QueryRowContext(ctx, `SELECT d.delivery_id,i.schedule_id,d.id FROM personal_outbox d JOIN personal_delivery_intents i ON i.id=d.delivery_id
 		WHERE d.receipt_channel=? AND d.receipt_account=? AND d.receipt_conversation=? AND d.receipt_message_id=?
-		AND d.status='sent' ORDER BY d.id DESC LIMIT 1`, input.Channel, input.Account, input.Sender, input.ReplyToID).Scan(&taskID, &scheduleID, &outboxID)
+		AND d.status='sent' ORDER BY d.id DESC LIMIT 1`, input.Channel, input.Account, input.Sender, input.ReplyToID).Scan(&deliveryID, &scheduleID, &outboxID)
 	if err == nil {
-		return taskID.Int64, scheduleID.Int64, outboxID, nil
+		taskID, err := loadDeliveryTaskIDTx(ctx, tx, deliveryID.Int64)
+		return taskID, scheduleID.Int64, outboxID, err
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, 0, err
 	}
+	var taskID sql.NullInt64
 	err = tx.QueryRowContext(ctx, `SELECT task_id,schedule_id FROM personal_events WHERE channel=? AND account=? AND sender=? AND message_id=?
 		AND kind IN ('user','material') ORDER BY id DESC LIMIT 1`, input.Channel, input.Account, input.Sender, input.ReplyToID).Scan(&taskID, &scheduleID)
 	if errors.Is(err, sql.ErrNoRows) {

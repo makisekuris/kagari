@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -42,7 +43,7 @@ func deliveryPageLimit(limit int) (int, error) {
 }
 
 func (p *personalTools) deliveryTools() ([]tool.BaseTool, error) {
-	list, err := utils.InferTool("list_deliveries", "查询生成的交付草案、用途、来源版本及生成/抑制状态；默认 20 条，最多 100 条，可按 task_id 筛选并用 before_id 向前翻页。生成状态不表示渠道已接受发送。仅直接用户事件可查询。", func(ctx context.Context, query personal.DeliveryQuery) (personalToolReply, error) {
+	list, err := utils.InferTool("list_deliveries", "查询交付用途、来源版本和逐项投递进度；返回省略正文的紧凑卡片，含每个 outbox 项的 ID、文字段/附件 ID、状态、失败原因、尝试次数、下次重试时间及已知回执。sent 回执只证明渠道接受了该项，不证明用户已阅读；部分成功只适用于具体已 sent 项。默认 20 条，最多 100 条，可按 task_id 筛选并用 before_id 向前翻页。仅直接用户事件可查询。", func(ctx context.Context, query personal.DeliveryQuery) (personalToolReply, error) {
 		if err := p.directUserMutation(); err != nil {
 			return toolError(err), nil
 		}
@@ -65,13 +66,18 @@ func (p *personalTools) deliveryTools() ([]tool.BaseTool, error) {
 			p.addSupplementalTask(query.TaskID, personal.DeliveryControl)
 		}
 		p.addDeliveryPageTaskIDs(page)
+		cards := make([]personal.DeliveryIntent, len(page.Items))
+		for i, intent := range page.Items {
+			cards[i] = personal.DeliveryCard(intent)
+		}
+		page.Items = cards
 		return personalToolReply{OK: true, Deliveries: &page}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	get, err := utils.InferTool("get_delivery", "按交付 ID 查看草案、所选附件、来源 Task 版本及生成/抑制状态；这表示内容已生成，不代表渠道已接受发送。仅直接用户事件可查询。", func(ctx context.Context, args getDeliveryArgs) (personalToolReply, error) {
+	get, err := utils.InferTool("get_delivery", "按交付 ID 查看生成的完整草案、所选附件、来源 Task 版本及逐项投递进度。每项 sent 回执表示渠道接受了该项，不表示用户已阅读；部分成功只证明具体已 sent 项。仅直接用户事件可查询。", func(ctx context.Context, args getDeliveryArgs) (personalToolReply, error) {
 		if err := p.directUserMutation(); err != nil {
 			return toolError(err), nil
 		}
@@ -205,6 +211,12 @@ func (p *personalTools) captureTaskCancellationDeliveries(ctx context.Context) e
 		return fmt.Errorf("task cancellation has no saved control delivery")
 	}
 	return nil
+}
+
+func (p *personalTools) cancellationDeliveryPage() personal.DeliveryPage {
+	items := append([]personal.DeliveryIntent(nil), p.controlDeliveries...)
+	sort.Slice(items, func(i, j int) bool { return items[i].ID > items[j].ID })
+	return personal.DeliveryPage{Items: items, StoppedTaskIDs: []int64{}}
 }
 
 func (p *personalTools) loadDelivery(ctx context.Context, deliveryID int64) (*personal.DeliveryIntent, error) {

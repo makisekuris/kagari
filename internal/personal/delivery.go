@@ -69,6 +69,9 @@ type DeliveryIntent struct {
 	Detail             string              `json:"detail,omitempty"`
 	PreparationError   string              `json:"preparation_error,omitempty"`
 	CreatedAt          time.Time           `json:"created_at"`
+	// Progress is a read snapshot derived from outbox rows, never persisted here.
+	Progress       *DeliveryProgress `json:"progress,omitempty"`
+	ContentOmitted bool              `json:"content_omitted,omitempty"`
 }
 
 // RenderedDelivery can change presentation, never the persisted file selection.

@@ -28,7 +28,7 @@ func (s *Store) Delivery(ctx context.Context, scope personal.ReadScope, id int64
 	if err := requireDeliveryReadTx(ctx, tx, scope); err != nil {
 		return nil, err
 	}
-	intents, err := loadDeliveryIntentsTx(ctx, tx, `SELECT `+deliveryIntentColumns+` FROM personal_delivery_intents WHERE id=?`, id)
+	intents, err := loadDeliverySnapshotsTx(ctx, tx, `SELECT `+deliveryIntentColumns+` FROM personal_delivery_intents WHERE id=?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func (s *Store) QueryDeliveries(ctx context.Context, scope personal.ReadScope, q
 			return page, recordNotFound(err)
 		}
 	}
-	page.Items, err = loadDeliveryIntentsTx(ctx, tx, `SELECT `+deliveryIntentColumns+` FROM personal_delivery_intents
+	page.Items, err = loadDeliverySnapshotsTx(ctx, tx, `SELECT `+deliveryIntentColumns+` FROM personal_delivery_intents
 		WHERE (?=0 OR id<?) AND (?=0 OR EXISTS(SELECT 1 FROM personal_delivery_scopes s
 			WHERE s.delivery_id=personal_delivery_intents.id AND s.task_id=?))
 		ORDER BY id DESC LIMIT ?`, query.BeforeID, query.BeforeID, query.TaskID, query.TaskID, limit+1)

@@ -13,6 +13,7 @@ import (
 type scheduleNotice struct {
 	suggestionID int64
 	scheduleID   int64
+	scope        personal.DeliveryScope
 	automatic    bool
 	text         string
 }
@@ -71,15 +72,35 @@ func scheduleNotices(ctx context.Context, tx *sql.Tx, eventID int64, kind person
 		if !valid {
 			continue
 		}
+		scope, err := scheduleSuggestionDeliveryScopeTx(ctx, tx, s)
+		if err != nil {
+			return nil, err
+		}
 		var text strings.Builder
 		fmt.Fprintf(&text, "建议 #%d（版本 %d）· 计划 #%d：\n", s.ID, s.Revision, s.ScheduleID)
 		for _, r := range s.Replacements {
 			fmt.Fprintf(&text, "原背景：%s\n建议改为：%s\n", r.Old, r.New)
 		}
 		text.WriteString("是否同步此计划背景？可回复建议编号并选择同步或保留。确认前计划背景不变。")
-		notices = append(notices, scheduleNotice{suggestionID: s.ID, scheduleID: s.ScheduleID, automatic: kind == personal.EventTask, text: text.String()})
+		notices = append(notices, scheduleNotice{suggestionID: s.ID, scheduleID: s.ScheduleID, scope: scope, automatic: kind == personal.EventTask, text: text.String()})
 	}
 	return notices, nil
+}
+
+func scheduleSuggestionDeliveryScopeTx(ctx context.Context, tx *sql.Tx, suggestion personal.ScheduleSuggestion) (personal.DeliveryScope, error) {
+	var scope personal.DeliveryScope
+	var runTaskID int64
+	var runKind personal.RunKind
+	if err := tx.QueryRowContext(ctx, `SELECT r.id,r.revision,r.task_id,r.kind FROM personal_events e
+		JOIN personal_runs r ON r.id=e.run_id WHERE e.id=? AND e.kind='task'`, suggestion.OriginEventID).
+		Scan(&scope.RunID, &scope.Revision, &runTaskID, &runKind); err != nil {
+		return scope, err
+	}
+	if suggestion.TaskID <= 0 || runTaskID != suggestion.TaskID || runKind != personal.RunTask {
+		return scope, fmt.Errorf("personal: schedule suggestion %d source event %d does not own Task %d", suggestion.ID, suggestion.OriginEventID, suggestion.TaskID)
+	}
+	scope.TaskID = suggestion.TaskID
+	return scope, nil
 }
 
 func enqueueScheduleNotices(ctx context.Context, tx *sql.Tx, eventID int64, notices []scheduleNotice, now string) (int, error) {
@@ -98,7 +119,7 @@ func enqueueScheduleNotices(ctx context.Context, tx *sql.Tx, eventID int64, noti
 		}
 		intent, err := insertDeliveryIntentTx(ctx, tx, deliveryIntentInsert{
 			eventID: eventID, scheduleID: n.scheduleID, purpose: personal.DeliveryControl,
-			draft: personal.DeliveryDraft{Text: n.text, Attachments: []string{}},
+			draft: personal.DeliveryDraft{Text: n.text, Attachments: []string{}}, scopes: []personal.DeliveryScope{n.scope},
 		}, createdAt)
 		if err != nil {
 			return part, err

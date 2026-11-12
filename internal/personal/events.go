@@ -47,6 +47,8 @@ type Event struct {
 }
 
 type Message struct {
+	Delivery    *DeliveryIntent      `json:"delivery,omitempty"`
+	TextOmitted bool                 `json:"text_omitted,omitempty"`
 	OutboxID    int64                `json:"outbox_id,omitempty"`
 	HistoryID   int64                `json:"history_id"`
 	ScheduleID  int64                `json:"schedule_id,omitempty"`

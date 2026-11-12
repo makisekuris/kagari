@@ -50,6 +50,10 @@ func assembleTurn(ctx context.Context, input personal.TurnInput, instruction str
 	assembled.Memories = nil // Memory is selected and injected as a separately tagged message.
 	assembled.History = []personal.Message{}
 	assembled.Tasks = currentTurnTasks(input)
+	if assembled.RepliedMessage != nil && assembled.RepliedMessage.Delivery != nil {
+		intent := personal.DeliveryCard(*assembled.RepliedMessage.Delivery)
+		assembled.RepliedMessage.Delivery = &intent
+	}
 	for i, event := range input.PendingInputs {
 		assembled.PendingInputs[i] = pendingEventReference(event)
 	}
@@ -57,9 +61,22 @@ func assembleTurn(ctx context.Context, input personal.TurnInput, instruction str
 		assembled.PendingTaskInputs[i] = pendingEventReference(event)
 	}
 	protectedHistory := make(map[int]bool)
+	deliveryHistoryCards := make(map[int]bool)
+	explicitHistory := make(map[int]bool)
+	deliveryHistoryPositions := make(map[int]int)
 	for i, message := range input.History {
-		if isExplicitReply(input, message) {
+		explicit := isExplicitReply(input, message)
+		if message.Delivery != nil {
 			protectedHistory[i] = true
+			deliveryHistoryCards[i] = true
+			explicitHistory[i] = explicit
+			deliveryHistoryPositions[i] = len(assembled.History)
+			assembled.History = append(assembled.History, compactDeliveryHistoryMessage(message))
+			continue
+		}
+		if explicit {
+			protectedHistory[i] = true
+			explicitHistory[i] = true
 			assembled.History = append(assembled.History, message)
 		}
 	}
@@ -103,7 +120,14 @@ func assembleTurn(ctx context.Context, input personal.TurnInput, instruction str
 	}
 	for i, message := range input.History {
 		if protectedHistory[i] {
-			selected = append(selected, assemblyTraceItem{Kind: "replied_history", ID: historyMessageID(message), Bytes: historyMessageBytes(message)})
+			kind := "delivery_history_body"
+			if deliveryHistoryCards[i] {
+				kind = "delivery_history_card"
+				message = compactDeliveryHistoryMessage(message)
+			} else if explicitHistory[i] && message.Delivery == nil {
+				kind = "replied_history"
+			}
+			selected = append(selected, assemblyTraceItem{Kind: kind, ID: historyMessageID(message), Bytes: historyMessageBytes(message)})
 		}
 	}
 	for _, event := range input.PendingInputs {
@@ -125,7 +149,6 @@ func assembleTurn(ctx context.Context, input personal.TurnInput, instruction str
 		logAssembly(ctx, withToolEstimate(selected, baseEstimate.ToolsBytes), omitted, baseEstimate, limits)
 		return personal.TurnInput{}, agentctx.AssemblyLimitError(baseEstimate, limits)
 	}
-
 	selectedTasks := taskIDSet(assembled.Tasks)
 	selectedCards := map[int64]bool{}
 	addTaskCard := func(task personal.Task, reason string) error {
@@ -239,6 +262,27 @@ func assembleTurn(ctx context.Context, input personal.TurnInput, instruction str
 		logAssembly(ctx, withToolEstimate(selected, estimate.ToolsBytes), omitted, estimate, limits)
 		return personal.TurnInput{}, agentctx.AssemblyLimitError(estimate, limits)
 	}
+	// Keep every delivery's compact outcome card. Restore full History text only
+	// when it fits the ordinary target budget, after task and run context is set.
+	for _, i := range deliveryHistoryExpansionOrder(input, deliveryHistoryPositions, explicitHistory) {
+		message := input.History[i]
+		if message.Text == "" {
+			continue
+		}
+		position := deliveryHistoryPositions[i]
+		card := assembled.History[position]
+		assembled.History[position] = message
+		estimate, err := estimateTurn(ctx, assembled, instruction, toolInfos)
+		if err != nil {
+			return personal.TurnInput{}, err
+		}
+		if estimate.TotalBytes <= limits.Target {
+			deliveryHistoryCards[i] = false
+			continue
+		}
+		assembled.History[position] = card
+		omitted = append(omitted, assemblyTraceItem{Kind: "delivery_history_body", ID: historyMessageID(message), Bytes: historyMessageBytes(message), Reason: "target"})
+	}
 
 	historyOrder := historyPriority(input, protectedHistory)
 	selectedHistory := make(map[int]bool, len(protectedHistory))
@@ -247,14 +291,14 @@ func assembleTurn(ctx context.Context, input personal.TurnInput, instruction str
 	}
 	for _, index := range historyOrder {
 		selectedHistory[index] = true
-		assembled.History = orderedHistory(input.History, selectedHistory)
+		assembled.History = orderedHistory(input.History, selectedHistory, deliveryHistoryCards)
 		estimate, err := estimateTurn(ctx, assembled, instruction, toolInfos)
 		if err != nil {
 			return personal.TurnInput{}, err
 		}
 		if estimate.TotalBytes > limits.Target {
 			delete(selectedHistory, index)
-			assembled.History = orderedHistory(input.History, selectedHistory)
+			assembled.History = orderedHistory(input.History, selectedHistory, deliveryHistoryCards)
 			message := input.History[index]
 			omitted = append(omitted, assemblyTraceItem{Kind: "history", ID: historyMessageID(message), Bytes: historyMessageBytes(message), Reason: "target"})
 			continue

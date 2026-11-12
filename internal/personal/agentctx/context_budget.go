@@ -57,6 +57,7 @@ func BudgetHandler(ctx context.Context, m model.AgenticModel, store BudgetReposi
 	}
 	return inputbudget.NewAgenticHandler(ctx, inputbudget.HandlerConfig{
 		Limits: bounded.Limits(), SummaryModel: bounded, RequiredPrefix: func(messages []*schema.AgenticMessage) int { return min(2, len(messages)) },
+		ExcludeFromSummaryTools: deliveryFactTools[:],
 		ValidateSummary: func(ctx context.Context, text string) error {
 			for _, id := range personal.MaterialReferences(text) {
 				if _, err := store.ReadMaterial(ctx, scope, id, "metadata", textpage.Request{Limit: 1}); err != nil {
@@ -119,6 +120,18 @@ func reduceToolRound(ctx context.Context, store BudgetRepository, scope personal
 			copyBlock := *block
 			if block.FunctionToolResult != nil {
 				result := *block.FunctionToolResult
+				if isDeliveryFactTool(result.Name) && len(result.Content) == 1 && result.Content[0] != nil && result.Content[0].Text != nil {
+					compacted, ok, err := compactDeliveryToolResult(result.Name, result.Content[0].Text.Text, archived)
+					if err != nil {
+						return nil, err
+					}
+					if ok {
+						result.Content = []*schema.FunctionToolResultContentBlock{{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: compacted}}}
+						copyBlock.FunctionToolResult = &result
+						copyMessage.ContentBlocks[j] = &copyBlock
+						continue
+					}
+				}
 				ref := references[result.CallID]
 				if ref == "" {
 					ref = archived

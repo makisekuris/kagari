@@ -214,7 +214,7 @@ func (s *Store) Diagnostic(ctx context.Context, eventID, taskID int64) (Diagnost
 		}
 	}
 	eventList := inspectionIDs(eventIDs)
-	result.DeliveryIntents, err = loadDeliveryIntentsTx(ctx, tx, `SELECT DISTINCT `+deliveryIntentColumns+`
+	result.DeliveryIntents, err = loadDeliverySnapshotsTx(ctx, tx, `SELECT DISTINCT `+deliveryIntentColumns+`
 		FROM personal_delivery_intents d LEFT JOIN personal_delivery_scopes s ON s.delivery_id=d.id
 		WHERE d.event_id IN (`+eventList+`) OR s.task_id IN (`+taskList+`) ORDER BY d.id`)
 	if err != nil {

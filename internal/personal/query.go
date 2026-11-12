@@ -41,11 +41,12 @@ type RecordRequest struct {
 }
 
 type RecordText struct {
-	Kind     string        `json:"kind"`
-	ID       int64         `json:"id"`
-	Section  string        `json:"section"`
-	Revision int64         `json:"revision,omitempty"`
-	Page     textpage.Page `json:"page"`
+	Delivery *DeliveryIntent `json:"delivery,omitempty"`
+	Kind     string          `json:"kind"`
+	ID       int64           `json:"id"`
+	Section  string          `json:"section"`
+	Revision int64           `json:"revision,omitempty"`
+	Page     textpage.Page   `json:"page"`
 }
 
 // TaskCard and RunCard return bounded records safe for tool responses.

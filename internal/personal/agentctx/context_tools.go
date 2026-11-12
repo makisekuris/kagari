@@ -255,10 +255,42 @@ func (c *readTools) build() ([]tool.BaseTool, error) {
 func (c *readTools) readRecord(ctx context.Context, r personal.RecordRequest) (personal.RecordText, error) {
 	out, err := c.store.ReadRecord(ctx, c.scope, r)
 	if err == nil {
-		_, err = textpage.EncodeBounded(&out, textpage.MaxBytes(ctx), out.Page.Shrink)
+		pageShrunk := false
+		_, err = textpage.EncodeBounded(&out, textpage.MaxBytes(ctx), func() bool {
+			if !pageShrunk {
+				pageShrunk = true
+				if out.Page.Shrink() {
+					return true
+				}
+			}
+			if out.Delivery != nil && deliveryHasText(*out.Delivery) {
+				card := personal.DeliveryCard(*out.Delivery)
+				out.Delivery = &card
+				return true
+			}
+			if out.Page.Shrink() {
+				return true
+			}
+			return false
+		})
 	}
 	return out, err
 }
+
+func deliveryHasText(intent personal.DeliveryIntent) bool {
+	if intent.Draft.Text != "" {
+		return true
+	}
+	if intent.Progress != nil {
+		for _, item := range intent.Progress.Items {
+			if item.Text != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (c *readTools) validateResource(ctx context.Context, u personal.ReadCheckpointUpdate) error {
 	switch u.ResourceKind {
 	case "file":

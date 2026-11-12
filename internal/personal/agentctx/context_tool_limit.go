@@ -45,6 +45,12 @@ func (t boundedContextTool) InvokableRun(ctx context.Context, args string, optio
 }
 func shrinkToolValue(value map[string]any) bool {
 	// Cards retain complete identities; canonical text remains accessible through field readers.
+	if delivery, ok := value["delivery"].(map[string]any); ok && shrinkDeliveryIntentValue(delivery) {
+		return true
+	}
+	if page, ok := value["deliveries"].(map[string]any); ok && shrinkDeliveryPageValue(page) {
+		return true
+	}
 	if _, ok := value["id"]; ok {
 		for _, field := range []string{"context", "input", "context_manifest", "result"} {
 			if text, ok := value[field].(string); ok && text != "" {
@@ -95,6 +101,57 @@ func shrinkToolValue(value map[string]any) bool {
 	}
 	return false
 }
+
+func shrinkDeliveryIntentValue(value map[string]any) bool {
+	if draft, ok := value["draft"].(map[string]any); ok {
+		if text, ok := draft["text"].(string); ok && text != "" {
+			draft["text"] = ""
+			value["content_omitted"] = true
+			return true
+		}
+	}
+	if progress, ok := value["progress"].(map[string]any); ok {
+		if items, ok := progress["items"].([]any); ok {
+			for _, raw := range items {
+				if item, ok := raw.(map[string]any); ok {
+					if text, ok := item["text"].(string); ok && text != "" {
+						item["text"] = ""
+						value["content_omitted"] = true
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func shrinkDeliveryPageValue(value map[string]any) bool {
+	items, ok := value["items"].([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range items {
+		if intent, ok := raw.(map[string]any); ok && shrinkDeliveryIntentValue(intent) {
+			return true
+		}
+	}
+	if len(items) <= 1 {
+		return false
+	}
+	last, ok := items[len(items)-2].(map[string]any)
+	if !ok {
+		return false
+	}
+	beforeID, ok := last["id"]
+	if !ok {
+		return false
+	}
+	value["items"] = items[:len(items)-1]
+	value["next_before_id"] = beforeID
+	return true
+}
+
 func appendField(old any, field string) []any {
 	fields, _ := old.([]any)
 	for _, v := range fields {

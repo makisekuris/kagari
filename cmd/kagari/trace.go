@@ -14,6 +14,7 @@ import (
 
 	"kagari/internal/config"
 	"kagari/internal/logging"
+	"kagari/internal/personal"
 	"kagari/internal/personal/sqlite"
 )
 
@@ -78,6 +79,9 @@ func inspectTrace(ctx context.Context, cfg config.Config, args []string, out io.
 		}
 		for i := range state.Deliveries {
 			state.Deliveries[i].Text = ""
+		}
+		for i := range state.DeliveryIntents {
+			state.DeliveryIntents[i] = personal.DeliveryCard(state.DeliveryIntents[i])
 		}
 		for i := range state.Memories {
 			state.Memories[i].Value = ""

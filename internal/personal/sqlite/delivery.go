@@ -66,14 +66,17 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*personal.Outgoing, error) {
 		return nil, errors.New("personal: delivery claim lost")
 	}
 	var out personal.Outgoing
-	var taskID sql.NullInt64
 	var attachmentID sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT d.id,d.delivery_id,d.delivery_part,d.event_id,e.task_id,d.text,d.attachment_id,d.attempts
-		FROM personal_outbox d JOIN personal_events e ON e.id=d.event_id WHERE d.id=?`, id).
-		Scan(&out.ID, &out.DeliveryID, &out.DeliveryPart, &out.EventID, &taskID, &out.Text, &attachmentID, &out.Attempts); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id,delivery_id,delivery_part,event_id,text,attachment_id,attempts
+		FROM personal_outbox WHERE id=?`, id).
+		Scan(&out.ID, &out.DeliveryID, &out.DeliveryPart, &out.EventID, &out.Text, &attachmentID, &out.Attempts); err != nil {
 		return nil, err
 	}
-	out.TaskID, out.AttachmentID = taskID.Int64, attachmentID.String
+	out.TaskID, err = loadDeliveryTaskIDTx(ctx, tx, out.DeliveryID)
+	if err != nil {
+		return nil, err
+	}
+	out.AttachmentID = attachmentID.String
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}

@@ -81,7 +81,12 @@ func (s *Store) History(ctx context.Context, eventID int64, limit int) ([]person
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT h.id,h.event_id,h.role,h.text,e.task_id,e.channel,e.account,e.sender,e.message_id,e.reply_to_id,h.attachments,h.schedule_id
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT h.id,h.event_id,h.delivery_id,h.role,h.text,e.task_id,e.channel,e.account,e.sender,e.message_id,e.reply_to_id,h.attachments,h.schedule_id
 		FROM personal_history h JOIN personal_events e ON e.id=h.event_id
 		WHERE h.event_id<? ORDER BY h.event_id DESC,h.id DESC LIMIT ?`, eventID, limit)
 	if err != nil {
@@ -89,14 +94,23 @@ func (s *Store) History(ctx context.Context, eventID int64, limit int) ([]person
 	}
 	defer rows.Close()
 	messages := make([]personal.Message, 0, limit)
+	messageDeliveryIDs := make([]int64, 0, limit)
 	for rows.Next() {
 		var m personal.Message
-		var taskID, scheduleID sql.NullInt64
+		var taskID, deliveryID, scheduleID sql.NullInt64
 		var attachments string
-		if err := rows.Scan(&m.HistoryID, &m.EventID, &m.Role, &m.Text, &taskID, &m.Channel, &m.Account, &m.Sender, &m.MessageID, &m.ReplyToID, &attachments, &scheduleID); err != nil {
+		if err := rows.Scan(&m.HistoryID, &m.EventID, &deliveryID, &m.Role, &m.Text, &taskID, &m.Channel, &m.Account, &m.Sender, &m.MessageID, &m.ReplyToID, &attachments, &scheduleID); err != nil {
 			return nil, err
 		}
 		m.TaskID, m.ScheduleID = taskID.Int64, scheduleID.Int64
+		if deliveryID.Valid {
+			messageDeliveryIDs = append(messageDeliveryIDs, deliveryID.Int64)
+		} else {
+			messageDeliveryIDs = append(messageDeliveryIDs, 0)
+		}
+		if m.Role == "assistant" {
+			m.MessageID, m.ReplyToID = "", ""
+		}
 		if err := json.Unmarshal([]byte(attachments), &m.Attachments); err != nil {
 			return nil, fmt.Errorf("personal: decode history attachments: %w", err)
 		}
@@ -111,13 +125,40 @@ func (s *Store) History(ctx context.Context, eventID int64, limit int) ([]person
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	deliveryIDs := uniqueIDs(messageDeliveryIDs)
+	if len(deliveryIDs) > 0 {
+		intents, err := loadDeliverySnapshotsTx(ctx, tx, `SELECT `+deliveryIntentColumns+` FROM personal_delivery_intents
+			WHERE id IN (`+inspectionIDs(deliveryIDs)+`) ORDER BY id`)
+		if err != nil {
+			return nil, err
+		}
+		byID := make(map[int64]*personal.DeliveryIntent, len(intents))
+		for i := range intents {
+			byID[intents[i].ID] = &intents[i]
+		}
+		for i := range messages {
+			deliveryID := messageDeliveryIDs[i]
+			if deliveryID == 0 {
+				continue
+			}
+			intent, ok := byID[deliveryID]
+			if !ok {
+				return nil, fmt.Errorf("personal: history %d references missing delivery %d", messages[i].HistoryID, deliveryID)
+			}
+			messages[i].Delivery = intent
+			messages[i].TaskID = uniqueDeliveryTaskID(intent.Scopes)
+		}
+	}
 	for i := range messages {
-		if err := s.refreshAttachments(ctx, s.db, messages[i].Attachments); err != nil {
+		if err := s.refreshAttachments(ctx, tx, messages[i].Attachments); err != nil {
 			return nil, err
 		}
 	}
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
 		messages[i], messages[j] = messages[j], messages[i]
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return messages, nil
 }

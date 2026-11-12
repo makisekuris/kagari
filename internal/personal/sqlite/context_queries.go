@@ -9,19 +9,53 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"kagari/internal/channel"
 	"kagari/internal/personal"
 	"kagari/internal/textpage"
 )
 
 func (s *Store) RepliedMessage(ctx context.Context, id int64) (*personal.Message, error) {
 	m := &personal.Message{OutboxID: id, Role: "assistant"}
-	var task, schedule sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT o.event_id,o.text,e.task_id,e.schedule_id,COALESCE((SELECT id FROM personal_history h WHERE h.event_id=e.id AND h.role='assistant' ORDER BY h.id LIMIT 1),0) FROM personal_outbox o JOIN personal_events e ON e.id=o.event_id WHERE o.id=? AND o.status='sent'`, id).Scan(&m.EventID, &m.Text, &task, &schedule, &m.HistoryID)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var deliveryID int64
+	var attachmentID sql.NullString
+	var scheduleID sql.NullInt64
+	var receipt channel.Receipt
+	err = tx.QueryRowContext(ctx, `SELECT o.event_id,o.delivery_id,o.text,o.attachment_id,
+		o.receipt_channel,o.receipt_account,o.receipt_conversation,o.receipt_message_id,h.id,h.schedule_id
+		FROM personal_outbox o JOIN personal_history h ON h.delivery_id=o.delivery_id
+		WHERE o.id=? AND o.status='sent'`, id).Scan(&m.EventID, &deliveryID, &m.Text, &attachmentID,
+		&receipt.Channel, &receipt.Account, &receipt.Conversation, &receipt.MessageID, &m.HistoryID, &scheduleID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	m.TaskID, m.ScheduleID = task.Int64, schedule.Int64
-	return m, err
+	if err != nil {
+		return nil, err
+	}
+	intent, err := loadDeliverySnapshotTx(ctx, tx, deliveryID)
+	if err != nil {
+		return nil, err
+	}
+	if intent == nil {
+		return nil, fmt.Errorf("personal: outbox item %d references missing delivery %d", id, deliveryID)
+	}
+	m.Delivery, m.TaskID = intent, uniqueDeliveryTaskID(intent.Scopes)
+	m.ScheduleID = scheduleID.Int64
+	if attachmentID.Valid {
+		m.Attachments = []channel.Attachment{{ID: attachmentID.String}}
+		if err := s.refreshAttachments(ctx, tx, m.Attachments); err != nil {
+			return nil, err
+		}
+	}
+	m.MessageID, m.Channel, m.Account, m.Sender = receipt.MessageID, receipt.Channel, receipt.Account, receipt.Conversation
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 func authorizeTaskRead(ctx context.Context, q attachmentQuery, scope personal.ReadScope, id int64) error {
@@ -162,48 +196,63 @@ func queryPageKey(p personal.ListPage, query any) (string, error) {
 }
 func (s *Store) ReadRecord(ctx context.Context, scope personal.ReadScope, r personal.RecordRequest) (personal.RecordText, error) {
 	out := personal.RecordText{Kind: r.Kind, ID: r.ID, Section: r.Section}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback()
 	var body string
-	var err error
+	var deliveryID sql.NullInt64
 	mutable := false
 	if r.ID <= 0 {
 		return out, errors.New("personal: record ID must be positive")
 	}
 	switch r.Kind {
 	case "task":
-		if err = authorizeTaskRead(ctx, s.db, scope, r.ID); err != nil {
+		if err = authorizeTaskRead(ctx, tx, scope, r.ID); err != nil {
 			return out, recordNotFound(err)
 		}
 		if r.Section != "goal" && r.Section != "context" && r.Section != "checkpoint" {
 			return out, errors.New("personal: unsupported task section")
 		}
-		err = s.db.QueryRowContext(ctx, `SELECT `+r.Section+`,revision FROM personal_tasks WHERE id=?`, r.ID).Scan(&body, &out.Revision)
+		err = tx.QueryRowContext(ctx, `SELECT `+r.Section+`,revision FROM personal_tasks WHERE id=?`, r.ID).Scan(&body, &out.Revision)
 		mutable = true
 	case "run":
 		if r.Section != "input" && r.Section != "result" && r.Section != "context_manifest" {
 			return out, errors.New("personal: unsupported run section")
 		}
-		if err = authorizeRead(ctx, s.db, scope, r.ID, r.Section != "result"); err != nil {
+		if err = authorizeRead(ctx, tx, scope, r.ID, r.Section != "result"); err != nil {
 			return out, recordNotFound(err)
 		}
-		err = s.db.QueryRowContext(ctx, `SELECT `+r.Section+`,revision FROM personal_runs WHERE id=?`, r.ID).Scan(&body, &out.Revision)
+		err = tx.QueryRowContext(ctx, `SELECT `+r.Section+`,revision FROM personal_runs WHERE id=?`, r.ID).Scan(&body, &out.Revision)
 		mutable = true
 	case "event", "message":
 		if scope.RunID > 0 {
 			return out, errors.New("personal: raw conversation is not task-authorized")
 		}
-		if err = authorizeRead(ctx, s.db, scope, 0, true); err != nil {
+		if err = authorizeRead(ctx, tx, scope, 0, true); err != nil {
 			return out, recordNotFound(err)
 		}
 		table := "personal_events"
 		if r.Kind == "message" {
-			table = "personal_history"
+			err = tx.QueryRowContext(ctx, `SELECT text,delivery_id FROM personal_history WHERE id=?`, r.ID).Scan(&body, &deliveryID)
+			break
 		}
-		err = s.db.QueryRowContext(ctx, `SELECT text FROM `+table+` WHERE id=?`, r.ID).Scan(&body)
+		err = tx.QueryRowContext(ctx, `SELECT text FROM `+table+` WHERE id=?`, r.ID).Scan(&body)
 	default:
 		return out, errors.New("personal: unknown record kind")
 	}
 	if err != nil {
 		return out, recordNotFound(err)
+	}
+	if deliveryID.Valid {
+		out.Delivery, err = loadDeliverySnapshotTx(ctx, tx, deliveryID.Int64)
+		if err != nil {
+			return out, err
+		}
+		if out.Delivery == nil {
+			return out, fmt.Errorf("personal: history %d references missing delivery %d", r.ID, deliveryID.Int64)
+		}
 	}
 	version := textpage.Version(body)
 	if r.Kind == "task" {
@@ -219,5 +268,8 @@ func (s *Store) ReadRecord(ctx context.Context, scope personal.ReadScope, r pers
 	req.Version = ""
 	out.Page, err = textpage.Read(body, req, false)
 	out.Page.Version = version
+	if err == nil {
+		err = tx.Commit()
+	}
 	return out, err
 }

@@ -154,7 +154,7 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	cancelTask, err := utils.InferTool("cancel_task", "由直接用户事件取消任务执行并保留已生成成果及待发交付。取消计算不等于停止投递；用户明确要求不要再发送时另用 stop_delivery。", func(ctx context.Context, a cancelTaskArgs) (personalToolReply, error) {
+	cancelTask, err := utils.InferTool("cancel_task", "由直接用户事件取消任务执行并保留已生成成果及待发交付。取消计算不等于停止投递；用户明确要求不要再发送时另用 stop_delivery。结果中的 deliveries 是本事件已保存的全部控制确认，可能包含同轮其他控制操作；不要假定其中某一项专属于取消任务。", func(ctx context.Context, a cancelTaskArgs) (personalToolReply, error) {
 		if err := p.directUserMutation(); err != nil {
 			return toolError(err), nil
 		}
@@ -175,7 +175,8 @@ func (p *personalTools) taskTools() ([]tool.BaseTool, error) {
 		if err := p.captureTaskCancellationDeliveries(ctx); err != nil {
 			return toolError(err), nil
 		}
-		return personalToolReply{OK: true, Task: &task}, nil
+		deliveries := p.cancellationDeliveryPage()
+		return personalToolReply{OK: true, Task: &task, Deliveries: &deliveries}, nil
 	})
 	if err != nil {
 		return nil, err
