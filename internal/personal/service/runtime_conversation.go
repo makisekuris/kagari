@@ -34,6 +34,32 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 			log.Info("conversation.finished", append(fields, zap.String("outcome", outcome))...)
 		}
 	}()
+	if event.Kind == personal.EventTask {
+		state, err := r.taskCallbackState(ctx, *event)
+		if err != nil {
+			return true, err
+		}
+		switch state {
+		case personal.TaskCallbackStale:
+			outcome = "stale"
+			return true, r.completeStaleTaskCallback(ctx, *event)
+		case personal.TaskCallbackContinued:
+			// The callback already committed its child Run. Recover that exact
+			// handoff without assembling context or asking the model again.
+			task, err := r.Store.Task(ctx, event.TaskID)
+			if err != nil {
+				return true, err
+			}
+			if task == nil {
+				return true, fmt.Errorf("personal: continued callback task %d is missing", event.TaskID)
+			}
+			if task.Status == personal.TaskWaitingBudget {
+				return true, r.publish(ctx, *event, personal.TurnOutput{TaskID: task.ID, Text: taskBudgetText(task)})
+			}
+			outcome = "continued"
+			return true, r.Store.CompleteEvent(ctx, event.ID, personal.TurnOutput{TaskID: event.TaskID, Silent: true}, nil)
+		}
+	}
 	input, err := r.context(ctx, *event)
 	if err != nil {
 		return true, err
@@ -46,7 +72,7 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 		}
 		if input.CurrentRun == nil || task == nil || input.CurrentRun.Revision != task.Revision || task.Status == personal.TaskCancelled {
 			outcome = "stale"
-			return true, r.Store.CompleteEvent(ctx, event.ID, personal.TurnOutput{}, nil)
+			return true, r.completeStaleTaskCallback(ctx, *event)
 		}
 		if task.Status == personal.TaskWaitingBudget {
 			return true, r.publish(ctx, *event, personal.TurnOutput{TaskID: task.ID, Text: taskBudgetText(task)})
@@ -99,6 +125,17 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 	if ctx.Err() != nil {
 		return true, ctx.Err()
 	}
+	callbackState := personal.TaskCallbackCurrent
+	if event.Kind == personal.EventTask {
+		callbackState, err = r.taskCallbackState(ctx, *event)
+		if err != nil {
+			return true, err
+		}
+		if callbackState == personal.TaskCallbackStale {
+			outcome = "stale"
+			return true, r.completeStaleTaskCallback(ctx, *event)
+		}
+	}
 	if thinkErr == nil && event.Kind == personal.EventUser && output.Silent {
 		deferred, err := r.Store.CanDeferReply(ctx, event.ID)
 		if err != nil {
@@ -129,13 +166,28 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 		if err != nil {
 			return true, err
 		}
-		if current != nil && current.Status == personal.TaskAwaitingReview {
+		if current == nil {
+			return true, fmt.Errorf("personal: task %d disappeared during callback", task.ID)
+		}
+		if callbackState == personal.TaskCallbackContinued {
+			// This callback may finish its own handoff, but the child Run now
+			// owns any further Task decision.
+			if current.Status == personal.TaskWaitingBudget {
+				output.Text = taskBudgetText(current)
+				output.TaskID = task.ID
+				output.Silent = false
+			}
+		} else if current.Status == personal.TaskAwaitingReview {
 			pending, err := r.Store.PendingTaskInputs(ctx, task.ID)
 			if err != nil {
 				return true, err
 			}
 			if len(pending) > 0 {
 				_, _, err = r.Store.ContinueTask(ctx, event.ID, "pending-inputs", task.ID, current.Revision, "Read the owner's additional material within the existing goal; build on the previous findings and report additions or corrections.", false)
+				if errors.Is(err, personal.ErrStaleTaskCallback) {
+					outcome = "stale"
+					return true, r.completeStaleTaskCallback(ctx, *event)
+				}
 				if err != nil {
 					return true, err
 				}
@@ -143,6 +195,10 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 			} else {
 				// An incomplete planning turn must not strand work without a visible state.
 				settled, err := r.Store.SettleTask(ctx, event.ID, task.ID, current.Revision, personal.TaskWaitingInput, current.Summary)
+				if errors.Is(err, personal.ErrStaleTaskCallback) {
+					outcome = "stale"
+					return true, r.completeStaleTaskCallback(ctx, *event)
+				}
 				if err != nil {
 					return true, err
 				}
@@ -150,11 +206,11 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 				output.TaskID = task.ID
 				output.Silent = false
 			}
-		} else if current != nil && current.Status == personal.TaskWaitingBudget {
+		} else if current.Status == personal.TaskWaitingBudget {
 			output.Text = taskBudgetText(current)
 			output.TaskID = task.ID
 			output.Silent = false
-		} else if current != nil && (current.Status == personal.TaskCompleted || current.Status == personal.TaskFailed || current.Status == personal.TaskWaitingInput) {
+		} else if current.Status == personal.TaskCompleted || current.Status == personal.TaskFailed || current.Status == personal.TaskWaitingInput {
 			output.Text = taskClosingText(current, personal.SummarizeRunResult(*input.CurrentRun).Sources)
 			output.TaskID = task.ID
 			output.Silent = false
@@ -173,6 +229,23 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 	return true, r.publish(ctx, *event, output)
 }
 
+func (r *Runtime) taskCallbackState(ctx context.Context, event personal.Event) (personal.TaskCallbackState, error) {
+	state, err := r.Store.TaskCallbackState(ctx, event.ID)
+	if err != nil {
+		return "", err
+	}
+	switch state {
+	case personal.TaskCallbackCurrent, personal.TaskCallbackContinued, personal.TaskCallbackStale:
+		return state, nil
+	default:
+		return "", fmt.Errorf("personal: event %d has unknown task callback state %q", event.ID, state)
+	}
+}
+
+func (r *Runtime) completeStaleTaskCallback(ctx context.Context, event personal.Event) error {
+	return r.Store.CompleteEvent(ctx, event.ID, personal.TurnOutput{Silent: true}, nil)
+}
+
 // A restarted model could paraphrase an already committed tool call and create a second task.
 func (r *Runtime) recoverTurn(ctx context.Context, event personal.Event, task *personal.Task) error {
 	output := personal.TurnOutput{ScheduleID: event.ScheduleID, Text: "处理上一条消息时服务中断了。已提交的任务、计划和记忆操作仍保留，可以查询；尚未提交的部分请重新告诉我。"}
@@ -182,6 +255,9 @@ func (r *Runtime) recoverTurn(ctx context.Context, event personal.Event, task *p
 		}
 		if task.Status == personal.TaskAwaitingReview {
 			if _, err := r.Store.SettleTask(ctx, event.ID, task.ID, task.Revision, personal.TaskWaitingInput, task.Summary); err != nil {
+				if errors.Is(err, personal.ErrStaleTaskCallback) {
+					return r.completeStaleTaskCallback(ctx, event)
+				}
 				return err
 			}
 			output.Text = fmt.Sprintf("「%s」的阶段成果已保存，但后续安排被中断。请告诉我是否继续。\n\n%s", task.Title, textclip.Excerpt(task.Summary, 6000))
@@ -190,10 +266,28 @@ func (r *Runtime) recoverTurn(ctx context.Context, event personal.Event, task *p
 		}
 		output.TaskID = task.ID
 	}
+	if event.Kind == personal.EventTask {
+		state, err := r.taskCallbackState(ctx, event)
+		if err != nil {
+			return err
+		}
+		if state == personal.TaskCallbackStale {
+			return r.completeStaleTaskCallback(ctx, event)
+		}
+	}
 	return r.publish(ctx, event, output)
 }
 
 func (r *Runtime) publish(ctx context.Context, event personal.Event, output personal.TurnOutput) error {
+	if event.Kind == personal.EventTask {
+		state, err := r.taskCallbackState(ctx, event)
+		if err != nil {
+			return err
+		}
+		if state == personal.TaskCallbackStale {
+			return r.completeStaleTaskCallback(ctx, event)
+		}
+	}
 	if output.Silent {
 		return r.Store.CompleteEvent(ctx, event.ID, personal.TurnOutput{TaskID: output.TaskID, ScheduleID: output.ScheduleID, Silent: true}, nil)
 	}

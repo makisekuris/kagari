@@ -23,24 +23,25 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output persona
 	defer tx.Rollback()
 	var kind personal.EventKind
 	var status personal.EventStatus
-	var callbackTaskID, callbackRunID sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT kind,status,task_id,run_id FROM personal_events WHERE id=?`, eventID).
-		Scan(&kind, &status, &callbackTaskID, &callbackRunID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT kind,status FROM personal_events WHERE id=?`, eventID).
+		Scan(&kind, &status); err != nil {
 		return err
 	}
 	if status != personal.EventRunning {
 		return fmt.Errorf("personal: cannot complete event %d in state %q", eventID, status)
 	}
 	discardedStaleCallback := false
+	var callbackTaskID, callbackRunID int64
 	if kind == personal.EventTask {
-		current, err := currentTaskCallback(ctx, tx, eventID, callbackTaskID.Int64, callbackRunID.Int64)
+		state, identity, err := taskCallbackStateTx(ctx, tx, eventID)
 		if err != nil {
 			return err
 		}
-		if !current {
+		callbackTaskID, callbackRunID = identity.taskID, identity.runID
+		if state == personal.TaskCallbackStale {
 			output, chunks = personal.TurnOutput{Silent: true}, nil
 			discardedStaleCallback = true
-		} else if output.TaskID != 0 && output.TaskID != callbackTaskID.Int64 {
+		} else if output.TaskID != 0 && output.TaskID != callbackTaskID {
 			return errors.New("personal: task callback cannot link its reply to another task")
 		}
 	}
@@ -84,7 +85,13 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output persona
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_events SET status='completed',task_id=?,schedule_id=? WHERE id=? AND status='running'`, nullableID(taskID), nullableID(scheduleID), eventID); err != nil {
+	persistedTaskID := nullableID(taskID)
+	if kind == personal.EventTask && callbackTaskID > 0 {
+		// Keep the callback's source task available for diagnostics even when its
+		// output is discarded or intentionally carries no task link.
+		persistedTaskID = callbackTaskID
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE personal_events SET status='completed',task_id=?,schedule_id=? WHERE id=? AND status='running'`, persistedTaskID, nullableID(scheduleID), eventID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_history SET schedule_id=? WHERE event_id=?`, nullableID(scheduleID), eventID); err != nil {
@@ -126,38 +133,15 @@ func (s *Store) CompleteEvent(ctx context.Context, eventID int64, output persona
 	}
 	if err := commitStoreOutcome(ctx, tx, "event.complete", outcome, nil,
 		zap.Int64("event_id", eventID), zap.String("event_kind", string(kind)),
-		zap.Int64("task_id", taskID), zap.Int64("run_id", callbackRunID.Int64),
+		zap.Int64("task_id", taskID), zap.Int64("run_id", callbackRunID),
 		zap.String("event_status", string(personal.EventCompleted)), zap.Bool("silent", output.Silent), zap.Int("reply_part_count", replyParts)); err != nil {
 		return err
 	}
 	if replyParts > 0 {
 		logging.FromContext(ctx).Info("conversation.reply_queued", zap.Int64("event_id", eventID), zap.Int64("task_id", taskID),
-			zap.Int64("run_id", callbackRunID.Int64), zap.Int("parts", replyParts), zap.Any("payload", output.Text), zap.Any("attachments", output.Attachments))
+			zap.Int64("run_id", callbackRunID), zap.Int("parts", replyParts), zap.Any("payload", output.Text), zap.Any("attachments", output.Attachments))
 	}
 	return nil
-}
-
-func currentTaskCallback(ctx context.Context, tx *sql.Tx, eventID, taskID, runID int64) (bool, error) {
-	if taskID <= 0 || runID <= 0 {
-		return false, nil
-	}
-	var runTaskID, runRevision int64
-	if err := tx.QueryRowContext(ctx, `SELECT task_id,revision FROM personal_runs WHERE id=? AND kind='task'`, runID).Scan(&runTaskID, &runRevision); err != nil {
-		return false, err
-	}
-	var taskRevision int64
-	var taskStatus personal.TaskStatus
-	if err := tx.QueryRowContext(ctx, `SELECT revision,status FROM personal_tasks WHERE id=?`, taskID).Scan(&taskRevision, &taskStatus); err != nil {
-		return false, err
-	}
-	if runTaskID != taskID || runRevision != taskRevision || taskStatus == personal.TaskCancelled {
-		return false, nil
-	}
-	var latestID, latestRevision, latestEventID int64
-	if err := tx.QueryRowContext(ctx, `SELECT id,revision,event_id FROM personal_runs WHERE task_id=? ORDER BY id DESC LIMIT 1`, taskID).Scan(&latestID, &latestRevision, &latestEventID); err != nil {
-		return false, err
-	}
-	return latestRevision == taskRevision && (latestID == runID || latestEventID == eventID), nil
 }
 
 func (s *Store) Recover(ctx context.Context) error {

@@ -261,9 +261,8 @@ func (s *Store) AccountEvent(ctx context.Context, eventID int64, elapsed time.Du
 	defer tx.Rollback()
 	var kind personal.EventKind
 	var status personal.EventStatus
-	var taskID, runID, savedElapsed int64
-	if err := tx.QueryRowContext(ctx, `SELECT kind,status,task_id,run_id,elapsed_ms FROM personal_events WHERE id=?`, eventID).
-		Scan(&kind, &status, &taskID, &runID, &savedElapsed); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT kind,status FROM personal_events WHERE id=?`, eventID).
+		Scan(&kind, &status); err != nil {
 		return err
 	}
 	if kind != personal.EventTask {
@@ -272,26 +271,18 @@ func (s *Store) AccountEvent(ctx context.Context, eventID int64, elapsed time.Du
 	if status != personal.EventRunning {
 		return nil
 	}
-	var revision, runRevision, latest, latestRevision, latestEventID int64
-	var taskStatus personal.TaskStatus
-	var runStatus personal.RunStatus
-	if err := tx.QueryRowContext(ctx, `SELECT revision,status FROM personal_tasks WHERE id=?`, taskID).Scan(&revision, &taskStatus); err != nil {
+	callbackState, identity, err := taskCallbackStateTx(ctx, tx, eventID)
+	if err != nil {
 		return err
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT revision,status FROM personal_runs WHERE id=? AND task_id=?`, runID, taskID).Scan(&runRevision, &runStatus); err != nil {
-		return err
+	if callbackState == personal.TaskCallbackStale {
+		return nil
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT id,revision,event_id FROM personal_runs WHERE task_id=? ORDER BY id DESC LIMIT 1`, taskID).
-		Scan(&latest, &latestRevision, &latestEventID); err != nil {
-		return err
-	}
-	if runRevision != revision || latestRevision != revision || runStatus == personal.RunCancelled || taskStatus == personal.TaskCancelled || (runID != latest && latestEventID != eventID) {
-		return tx.Commit()
-	}
+	savedElapsed := identity.savedElapsed
 	if elapsedMS < savedElapsed {
 		elapsedMS = savedElapsed
 	}
-	task, err := scanTask(tx.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM personal_tasks WHERE id=?`, taskID))
+	task, err := scanTask(tx.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM personal_tasks WHERE id=?`, identity.taskID))
 	if err != nil {
 		return err
 	}
@@ -303,17 +294,17 @@ func (s *Store) AccountEvent(ctx context.Context, eventID int64, elapsed time.Du
 	if _, err := tx.ExecContext(ctx, `UPDATE personal_events SET elapsed_ms=? WHERE id=? AND status='running'`, elapsedMS, eventID); err != nil {
 		return err
 	}
-	newTaskStatus := taskStatus
-	if taskStatus != personal.TaskCompleted && task.UsedMS >= task.BudgetMS {
+	newTaskStatus := identity.taskStatus
+	if identity.taskStatus != personal.TaskCompleted && task.UsedMS >= task.BudgetMS {
 		newTaskStatus = personal.TaskWaitingBudget
-		if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='cancelled' WHERE task_id=? AND revision=? AND status='queued'`, taskID, revision); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE personal_runs SET status='cancelled' WHERE task_id=? AND revision=? AND status='queued'`, identity.taskID, identity.revision); err != nil {
 			return err
 		}
 		if err := releaseTerminalTaskInputsTx(ctx, tx); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET used_ms=?,status=?,updated_at=? WHERE id=? AND revision=?`, task.UsedMS, newTaskStatus, timestamp(time.Now()), taskID, revision); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE personal_tasks SET used_ms=?,status=?,updated_at=? WHERE id=? AND revision=?`, task.UsedMS, newTaskStatus, timestamp(time.Now()), identity.taskID, identity.revision); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -423,10 +424,17 @@ func TestBudgetExtensionRequiresExplicitUserContinuation(t *testing.T) {
 	if err != nil || callback == nil {
 		t.Fatalf("callback = (%+v,%v)", callback, err)
 	}
-	if _, _, err := s.ContinueTask(ctx, callback.ID, "automatic-extension", task.ID, 1, "next", false); err == nil {
+	state, err := s.TaskCallbackState(ctx, callback.ID)
+	if err != nil || state != personal.TaskCallbackCurrent {
+		t.Fatalf("budget-waiting callback state = (%q,%v), want current", state, err)
+	}
+	if _, _, err := s.ContinueTask(ctx, callback.ID, "automatic-extension", task.ID, 1, "next", false); err == nil || errors.Is(err, personal.ErrStaleTaskCallback) {
 		t.Fatal("task callback continued a budget-waiting task")
 	}
-	finishEvent(t, s, *callback, personal.TurnOutput{TaskID: task.ID}, nil)
+	finishEvent(t, s, *callback, personal.TurnOutput{TaskID: task.ID, Text: "budget exhausted"}, []string{"budget exhausted"})
+	if delivery, err := s.ClaimDelivery(ctx); err != nil || delivery == nil || delivery.Text != "budget exhausted" {
+		t.Fatalf("budget-waiting callback could not notify: (%+v,%v)", delivery, err)
+	}
 	user := openUserEvent(t, s, 2, 132, "continue with another grant")
 	continued, next, err := s.ContinueTask(ctx, user.ID, "extend", task.ID, 1, "next", true)
 	if err != nil {
@@ -461,7 +469,7 @@ func TestTaskCallbackAuthorityRevisionCancelAndExplicitContinue(t *testing.T) {
 	if err != nil || callbackA == nil || callbackA.TaskID != taskA.ID {
 		t.Fatalf("callback A = (%+v,%v)", callbackA, err)
 	}
-	if _, _, err := s.ContinueTask(ctx, callbackA.ID, "wrong-task", taskB.ID, 1, "change B", false); err == nil {
+	if _, _, err := s.ContinueTask(ctx, callbackA.ID, "wrong-task", taskB.ID, 1, "change B", false); err == nil || errors.Is(err, personal.ErrStaleTaskCallback) {
 		t.Fatal("callback changed another task")
 	}
 	if _, _, err := s.ReviseTask(ctx, callbackA.ID, "revise", taskB.ID, 1, personal.TaskInput{Goal: "arbitrary", Context: ""}); err == nil {

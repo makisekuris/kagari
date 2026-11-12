@@ -12,6 +12,7 @@ import (
 type Repository interface {
 	Recover(context.Context) error
 	ClaimEvent(context.Context) (*personal.Event, error)
+	TaskCallbackState(context.Context, int64) (personal.TaskCallbackState, error)
 	History(context.Context, int64, int) ([]personal.Message, error)
 	CompleteEvent(context.Context, int64, personal.TurnOutput, []string) error
 	CanDeferReply(context.Context, int64) (bool, error)

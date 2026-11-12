@@ -165,34 +165,27 @@ func requireUserEvent(ctx context.Context, tx *sql.Tx, eventID int64, allowCompl
 }
 
 func requireCallback(ctx context.Context, tx *sql.Tx, eventID, taskID, revision int64) error {
-	var kind personal.EventKind
-	var status personal.EventStatus
-	var eventTaskID, runTaskID int64
-	var runRevision int64
-	var runStatus personal.RunStatus
-	var runID int64
-	if err := tx.QueryRowContext(ctx, `SELECT kind,status,task_id,run_id FROM personal_events WHERE id=?`, eventID).
-		Scan(&kind, &status, &eventTaskID, &runID); err != nil {
+	state, identity, err := taskCallbackStateTx(ctx, tx, eventID)
+	if err != nil {
 		return err
 	}
-	if kind != personal.EventTask || status != personal.EventRunning || eventTaskID != taskID || runID <= 0 {
+	if identity.eventStatus != personal.EventRunning {
+		return errors.New("personal: task callback mutation requires an active source event")
+	}
+	if identity.taskID != taskID {
 		return errors.New("personal: task callback cannot mutate this task")
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT task_id,revision,status FROM personal_runs WHERE id=?`, runID).
-		Scan(&runTaskID, &runRevision, &runStatus); err != nil {
-		return err
+	if state == personal.TaskCallbackStale {
+		return personal.ErrStaleTaskCallback
 	}
-	var currentRevision, latestRun int64
-	var taskStatus personal.TaskStatus
-	if err := tx.QueryRowContext(ctx, `SELECT revision,status FROM personal_tasks WHERE id=?`, taskID).Scan(&currentRevision, &taskStatus); err != nil {
-		return err
+	if identity.revision != revision {
+		return errors.New("personal: task callback revision does not match its source run")
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM personal_runs WHERE task_id=?`, taskID).Scan(&latestRun); err != nil {
-		return err
+	if state == personal.TaskCallbackContinued {
+		return errors.New("personal: continued task callback cannot mutate this task")
 	}
-	if runTaskID != taskID || runRevision != revision || currentRevision != revision || runID != latestRun ||
-		(runStatus != personal.RunCompleted && runStatus != personal.RunFailed) || taskStatus == personal.TaskCancelled || taskStatus == personal.TaskWaitingBudget {
-		return errors.New("personal: stale or unauthorized task callback")
+	if identity.taskStatus == personal.TaskWaitingBudget {
+		return errors.New("personal: task callback cannot mutate a budget-waiting task")
 	}
 	return nil
 }
