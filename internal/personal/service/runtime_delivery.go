@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -11,6 +12,19 @@ import (
 	"kagari/internal/logging"
 	"kagari/internal/personal"
 )
+
+const deliveryPersistenceTimeout = 5 * time.Second
+
+type deliveryPersistenceError struct {
+	deliveryID int64
+	err        error
+}
+
+func (e *deliveryPersistenceError) Error() string {
+	return fmt.Sprintf("personal: persist delivery %d outcome: %v", e.deliveryID, e.err)
+}
+
+func (e *deliveryPersistenceError) Unwrap() error { return e.err }
 
 func (r *Runtime) deliver(ctx context.Context) (worked bool, deliveryErrResult error) {
 	if r.Ready != nil {
@@ -38,11 +52,8 @@ func (r *Runtime) deliver(ctx context.Context) (worked bool, deliveryErrResult e
 	if sendErr == nil {
 		log.Info("delivery.remote_accepted", zap.Any("receipt", receipt))
 	}
-	if ctx.Err() != nil {
-		return true, ctx.Err()
-	}
 	if sendErr == nil {
-		return true, r.Store.UpdateDelivery(ctx, message.ID, "sent", receipt, "", time.Time{})
+		return true, r.persistDeliveryOutcome(ctx, message.ID, "sent", receipt, "", time.Time{})
 	}
 	status, reason, delay := "uncertain", "send outcome unknown", time.Second
 	var deliveryErr *channel.SendError
@@ -68,5 +79,14 @@ func (r *Runtime) deliver(ctx context.Context) (worked bool, deliveryErrResult e
 		fields = append(fields, zap.Bool("uncertain", deliveryErr.Uncertain), zap.Bool("waiting", deliveryErr.Waiting))
 	}
 	log.Warn("delivery.remote_incomplete", fields...)
-	return true, r.Store.UpdateDelivery(ctx, message.ID, status, receipt, reason, time.Now().Add(delay))
+	return true, r.persistDeliveryOutcome(ctx, message.ID, status, receipt, reason, time.Now().Add(delay))
+}
+
+func (r *Runtime) persistDeliveryOutcome(ctx context.Context, deliveryID int64, status string, receipt channel.Receipt, reason string, nextAttempt time.Time) error {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deliveryPersistenceTimeout)
+	defer cancel()
+	if err := r.Store.UpdateDelivery(persistCtx, deliveryID, status, receipt, reason, nextAttempt); err != nil {
+		return &deliveryPersistenceError{deliveryID: deliveryID, err: err}
+	}
+	return nil
 }

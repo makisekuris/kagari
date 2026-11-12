@@ -50,6 +50,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 	}
 	ctx = logging.WithLogger(ctx, r.Log)
 	if err := r.Store.Recover(ctx); err != nil {
+		if ctx.Err() != nil && onlyCancellationError(err, ctx.Err()) {
+			return nil
+		}
 		return err
 	}
 	r.Log.Info("service.ready", zap.Int("task_concurrency", r.TaskConcurrency))
@@ -62,14 +65,18 @@ func (r *Runtime) Run(ctx context.Context) error {
 		go func() {
 			defer group.Done()
 			err := fn(ctx)
-			if ctx.Err() == nil {
-				if err == nil {
-					err = errors.New("personal worker stopped unexpectedly")
+			if err == nil {
+				if ctx.Err() != nil {
+					return
 				}
-				r.Log.Error("service.worker.failed", append(logging.ErrorFields(err), zap.String("worker", name))...)
-				failures <- err
-				cancel()
+				err = errors.New("personal worker stopped unexpectedly")
 			}
+			if ctx.Err() != nil && !isDeliveryPersistenceError(err) && onlyCancellationError(err, ctx.Err()) {
+				return
+			}
+			r.Log.Error("service.worker.failed", append(logging.ErrorFields(err), zap.String("worker", name))...)
+			failures <- err
+			cancel()
 		}()
 	}
 	start("schedule", func(ctx context.Context) error { return r.loop(ctx, r.schedule) })
@@ -85,12 +92,42 @@ func (r *Runtime) Run(ctx context.Context) error {
 	}
 	<-ctx.Done()
 	group.Wait()
-	select {
-	case err := <-failures:
-		return err
-	default:
-		return nil
+	close(failures)
+	var workerErrors []error
+	for err := range failures {
+		workerErrors = append(workerErrors, err)
 	}
+	return errors.Join(workerErrors...)
+}
+
+func isDeliveryPersistenceError(err error) bool {
+	var persistErr *deliveryPersistenceError
+	return errors.As(err, &persistErr)
+}
+
+func onlyCancellationError(err, cancellation error) bool {
+	if err == nil || cancellation == nil {
+		return false
+	}
+	if err == cancellation {
+		return true
+	}
+	if multiple, ok := err.(interface{ Unwrap() []error }); ok {
+		unwrapped := multiple.Unwrap()
+		if len(unwrapped) == 0 {
+			return false
+		}
+		for _, child := range unwrapped {
+			if !onlyCancellationError(child, cancellation) {
+				return false
+			}
+		}
+		return true
+	}
+	if single, ok := err.(interface{ Unwrap() error }); ok {
+		return onlyCancellationError(single.Unwrap(), cancellation)
+	}
+	return false
 }
 
 func (r *Runtime) loop(ctx context.Context, step func(context.Context) (bool, error)) error {
