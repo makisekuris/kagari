@@ -15,7 +15,7 @@ import (
 
 	"github.com/skip2/go-qrcode"
 	"kagari/internal/config"
-	"kagari/internal/personal"
+	"kagari/internal/personal/sqlite"
 	"kagari/internal/weixin"
 )
 
@@ -51,7 +51,7 @@ func runChannelCommand(ctx context.Context, cfg config.Config, args []string, in
 		}
 		defer unlock()
 	}
-	store, err := personal.NewStore(cfg.Storage.Path, cfg.Personal.TaskBudget)
+	store, err := sqlite.NewStore(cfg.Storage.Path, cfg.Personal.TaskBudget)
 	if err != nil {
 		return err
 	}
@@ -167,14 +167,14 @@ func showLoginQR(out io.Writer, content string, pngFile *os.File) error {
 	return pngFile.Sync()
 }
 
-func checkWeixinBinding(ctx context.Context, store *personal.Store, old, next weixin.Credentials, rebind bool) error {
+func checkWeixinBinding(ctx context.Context, store *sqlite.Store, old, next weixin.Credentials, rebind bool) error {
 	if old.UserID != "" && old.UserID != next.UserID && !rebind {
 		return errors.New("微信扫码用户与已保存凭证不同；请使用 weixin rebind 明确换绑")
 	}
 	return store.CheckChannelBinding(ctx, "weixin", next.AccountID, next.UserID, rebind)
 }
 
-func commitWeixinBinding(ctx context.Context, store *personal.Store, path string, old, next weixin.Credentials, rebind bool) error {
+func commitWeixinBinding(ctx context.Context, store *sqlite.Store, path string, old, next weixin.Credentials, rebind bool) error {
 	if err := store.BindChannel(ctx, "weixin", next.AccountID, next.UserID, rebind); err != nil {
 		var restoreErr error
 		if old.Token != "" {

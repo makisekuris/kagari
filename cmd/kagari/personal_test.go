@@ -12,6 +12,7 @@ import (
 
 	"kagari/internal/config"
 	"kagari/internal/personal"
+	"kagari/internal/personal/sqlite"
 )
 
 func TestPersonalInspectionDoesNotRecoverServiceWork(t *testing.T) {
@@ -19,7 +20,7 @@ func TestPersonalInspectionDoesNotRecoverServiceWork(t *testing.T) {
 	var cfg config.Config
 	cfg.Storage.Path = filepath.Join(t.TempDir(), "personal.db")
 	cfg.Personal.TaskBudget = time.Minute
-	s, err := personal.NewStore(cfg.Storage.Path, cfg.Personal.TaskBudget)
+	s, err := sqlite.NewStore(cfg.Storage.Path, cfg.Personal.TaskBudget)
 	if err != nil {
 		t.Fatal(err)
 	}

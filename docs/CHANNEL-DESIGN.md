@@ -24,7 +24,7 @@ flowchart LR
     A <--> Y[Task 工作目录]
 ```
 
-图中的两个适配器可选，启动时只运行其中一个。统一协议以进程内的共享消息类型实现，沿用现有 `personal.Runtime`、Store 和 Task 调用链。
+图中的两个适配器可选，启动时只运行其中一个。统一协议以进程内的共享消息类型实现，沿用 `service.Runtime`、`sqlite.Store` 和 Task 调用链。
 
 | 边界 | 职责 |
 | --- | --- |

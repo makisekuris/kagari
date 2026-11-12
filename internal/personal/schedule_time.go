@@ -8,13 +8,13 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-const defaultScheduleTimezone = "Asia/Shanghai"
+const DefaultScheduleTimezone = "Asia/Shanghai"
 
 var scheduleParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 
-func parseSchedule(expression, timezone string) (cron.Schedule, error) {
+func ParseSchedule(expression, timezone string) (cron.Schedule, error) {
 	if timezone == "" {
-		timezone = defaultScheduleTimezone
+		timezone = DefaultScheduleTimezone
 	}
 	if timezone == "Local" {
 		return nil, fmt.Errorf("schedule timezone must be an IANA location, not Local")
@@ -35,11 +35,11 @@ func parseSchedule(expression, timezone string) (cron.Schedule, error) {
 	return schedule, nil
 }
 
-func nextScheduleTime(expression, timezone string, after time.Time) (time.Time, error) {
+func NextScheduleTime(expression, timezone string, after time.Time) (time.Time, error) {
 	if after.IsZero() {
 		return time.Time{}, fmt.Errorf("schedule start time must not be zero")
 	}
-	schedule, err := parseSchedule(expression, timezone)
+	schedule, err := ParseSchedule(expression, timezone)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -50,7 +50,7 @@ func nextScheduleTime(expression, timezone string, after time.Time) (time.Time, 
 	return next.UTC(), nil
 }
 
-func previousScheduleTime(schedule cron.Schedule, before time.Time) (time.Time, error) {
+func PreviousScheduleTime(schedule cron.Schedule, before time.Time) (time.Time, error) {
 	if schedule == nil {
 		return time.Time{}, fmt.Errorf("schedule must not be nil")
 	}

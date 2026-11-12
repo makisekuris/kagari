@@ -191,7 +191,7 @@ make run CONFIG=config.yaml
 
 三个问题的回归测试也已通过：超长摘要不再阻止阶段结果保存；等待同一 Task 的旧阶段退出时不累计执行时间；长来源正文不会挤掉回调结果中的文件路径。相关检查包括 `make check`、`go test -race ./internal/personal ./internal/workspace` 和 CLI 构建。
 
-可单独运行报告回归测试：`go test ./internal/personal -run '^TestTaskWorkspaceReportContinuesAfterRestart$' -count=1 -v`。真实模型测试使用下方的 opt-in 环境变量；只验证工作区时，将 `-run` 设为 `'^TestLivePersonalTaskWorkspace$'`。
+可单独运行报告回归测试：`go test ./internal/personal/... -run '^TestTaskWorkspaceReportContinuesAfterRestart$' -count=1 -v`。真实模型测试使用下方的 opt-in 环境变量；只验证工作区时，将 `-run` 设为 `'^TestLivePersonalTaskWorkspace$'`。
 
 真实评估发现当前模型端点同时收到工具和严格输出 Schema 时，会只回复文字而不调用工具。因此主对话与阅读阶段不再附加该输出约束，最终内容仍由程序校验。主对话回复格式不合格时，额外进行一次无工具的严格格式整理，保留操作状态、不重复执行操作。纯记忆提取继续使用严格 Schema。
 
@@ -199,7 +199,7 @@ make run CONFIG=config.yaml
 
 ```sh
 KAGARI_LIVE_EVAL=1 KAGARI_EVAL_CONFIG_DIR="$PWD" \
-  go test ./internal/personal -run '^TestLivePersonal' -count=1 -v
+  go test ./internal/personal/... -run '^TestLivePersonal' -count=1 -v
 ```
 
 后续实际使用从 `make run` 和 Telegram 私聊开始；先确认唯一 owner 配置正确。

@@ -13,7 +13,7 @@
 | `agent/session.go` 的 `add/read` 只保存内存来源，ID 来自 URL/backend 并在会话内去重 | 统一接入持久化回调；观察 ID 不再依赖 URL 或进程内序号 |
 | `agent/engine.go` 的 `RunTaskStage`、`taskInput` | 转发正文与工具采集都先记录；初始输入和工具结果只展开有界内容，去掉转发正文的重复注入 |
 | 当前 URL 由模型通过 `read_url/browse_url` 按需读取 | 不增加执行前批量抓取；已保存材料续读不触发网络调用 |
-| `personal/executor.go` 复制 Engine 后绑定工具、读取记忆 | 同处绑定 Run 身份与来源保存回调；共享 Engine 上不保存某个 Run 的可变状态 |
+| `personal/execution/executor.go` 复制 Engine 后绑定工具、读取记忆 | 同处绑定 Run 身份与来源保存回调；共享 Engine 上不保存某个 Run 的可变状态 |
 | `StageResult.Sources` 当前为完整 `domain.Source` | 改为持久引用；`domain.Source` 仍用于采集和进程内处理，不以清空 Content 伪造引用 |
 | Store 使用单连接、事务、revision 检查；`Recover` 重排同一 Run | 在这些规则内保存材料；重跑产生新观察，原观察保留 |
 | `get_run/list_runs`、`read_attachment/read_file/ls` 可返回大内容 | 模型工具改成有界视图；内部 Store 查询不因分页丢失数据 |
@@ -304,12 +304,12 @@ trace 增加 `context.assembled`、`context.reduced`、`context.limit`，记录�
 
 | 批次 | 文件与调用方 | 交付边界 |
 | --- | --- | --- |
-| 1A 材料保存 | 新增 `personal/store_materials.go` 及 schema；`domain/types.go`、`personal/types.go`、`agent/session.go`、`agent/engine.go`、`personal/executor.go` | 逐次保存、不可变引用、失败传播；StageResult 改引用，CLI 导出显式展开；阶段内中断可发现材料 |
-| 1B 查询与续读 | 从 `personal/tools.go` 拆查询工具；`store_events.go`、`store_tasks.go`；`attachment_tools.go`、`executor_workspace.go`、`workspace` | 有界列表/全文页/搜索，跨 Task 关联，阅读 checkpoint；更新两类提示词及模型 fixture |
-| 2 组装与容量 | `personal/context.go`、`runtime_conversation.go`、`model.go`、`model_result.go`、`model_format.go`、`memory_model.go`、`executor.go`；`inputbudget`、config、CLI 装配 | Memory 版本与遗忘、manifest；收拢重复裁剪；所有模型入口硬检查；尚无摘要时超限明确停止 |
-| 3 累计交接 | `store_tasks.go`、Run 结果与进展工具、上下文组装 | 复用稳定材料引用和阅读 note，按原计划原子更新累计进展 |
-| 4 运行内压缩 | `agent`/`personal` handlers、inputbudget、Store 工具记录与 logging | 确定性缩减、Eino 摘要、失败路径；不重放模型执行栈 |
-| 5 新输入交接 | 输入关联 Store、`runtime_tasks.go`、完成事务 | 待处理输入交接与 completed 并发检查，按原计划交付 |
+| 1A 材料保存 | `personal/sqlite/materials.go` 及 schema；`domain/types.go`、`personal/tasks.go`、`agent/session.go`、`agent/engine.go`、`personal/execution` | 逐次保存、不可变引用、失败传播；StageResult 改引用，CLI 导出显式展开；阶段内中断可发现材料 |
+| 1B 查询与续读 | `personal/assistant` 的任务和记忆工具；`personal/agentctx` 的材料与附件读取；`personal/sqlite` 的查询；`personal/execution` 的工作区；`workspace` | 有界列表/全文页/搜索，跨 Task 关联，阅读 checkpoint；更新两类提示词及模型 fixture |
+| 2 组装与容量 | `personal/assistant`、`personal/agentctx`、`personal/execution`、`personal/run_result.go`；`inputbudget`、config、CLI 装配 | Memory 版本与遗忘、manifest；收拢重复裁剪；所有模型入口硬检查；尚无摘要时超限明确停止 |
+| 3 累计交接 | `personal/sqlite` 的任务事务、`personal/agentctx` 的进展工具、对话与执行上下文 | 复用稳定材料引用和阅读 note，按原计划原子更新累计进展 |
+| 4 运行内压缩 | `agent`/`personal/agentctx` handlers、inputbudget、Store 工具记录与 logging | 确定性缩减、Eino 摘要、失败路径；不重放模型执行栈 |
+| 5 新输入交接 | `personal/sqlite` 的输入交接和事件完成事务；`personal/service` 的任务调度 | 待处理输入交接与 completed 并发检查，按原计划交付 |
 
 配置同步范围包括 config 类型、默认值/Validate、config.example.yaml、README/V2 运行说明及 cmd 装配。类型同步范围包括 Repository 的测试替身、StageResult fixture、来源摘要/通知/诊断导出，以及 RunTaskStage 的所有调用点。不能只改主流程而让 live-eval 绕过 recorder 或预算检查。
 
@@ -326,7 +326,7 @@ trace 增加 `context.assembled`、`context.reduced`、`context.limit`，记录�
 | 压缩 | 不割裂工具配对；摘要只一次且自身有界；空摘要/超时保留原记录；仍超 H 则停止；不把附件/记忆复制成绕过删除的材料；格式化失败不重做写操作 |
 | 集成 | 定时 Run 用最新冻结 Input；专用 CheckAssessment 保留；新库拒绝旧 schema；旧文件保留；恢复不声称执行恰好一次 |
 
-实现后按改动运行 `go test ./internal/personal ./internal/agent ./internal/workspace ./internal/config ./internal/inputbudget`；事务与状态改动跑 personal 的 race 检查，再完成仓库完整检查。真实端点验收记录模型窗口配置、实际 usage、估算偏差、分页次数、摘要次数、任务质量与耗时，不预先承诺 token 节省比例。
+实现后按改动运行 `go test ./internal/personal/... ./internal/agent ./internal/workspace ./internal/config ./internal/inputbudget`；事务与状态改动跑 personal 的 race 检查，再完成仓库完整检查。真实端点验收记录模型窗口配置、实际 usage、估算偏差、分页次数、摘要次数、任务质量与耗时，不预先承诺 token 节省比例。
 
 设计阶段曾将本文 DDL 原样放入内存 SQLite，配合最小父表验证外键、重复 capture key（包括 run_id 为 NULL）、元数据 JSON、字节长度、seq 高水位分页、revision 关联及续读位置 CAS 原型；已用 Python 原型验证中文/emoji/NUL/JSON 转义的无损分页、整包上限与容量公式示例，并检查两份设计文档的相对链接和空白。当时尚未运行新 Go 实现、真实模型或完整应用事务测试；这些原型检查不作为运行时实现的验收证据。
 
@@ -337,11 +337,11 @@ trace 增加 `context.assembled`、`context.reduced`、`context.limit`，记录�
 
 | 迭代 | 实现入口 | 验收证据 |
 | --- | --- | --- |
-| 1 材料与回查 | `store_materials.go`、`store_context_queries.go`、`context_tools.go`、`textpage`、`workspace/pages.go` | 材料提交后恢复、capture 冲突、窄授权与非传递关联、Unicode/NUL、重叠搜索、51 个旧任务查询、文件版本变化、附件删除、checkpoint CAS |
-| 2 组装与来源 | `context_assembly.go`、`executor_context.go`、`context_memory.go`、`store_run_memory.go` | 保留当前要求和具体回复对象、整体 schema 计数、必需内容超限拒绝、初始 manifest 先保存、普通更正冻结、同 Run 恢复、forget 后重新保存仍不返回旧值 |
-| 3 累计进展 | `store_progress.go`、`progress_tools.go` | 跨阶段累计、历史版本与高水位分页、正文回查、纠正 CAS、证据授权、事务回滚、并发增量合并、长进展不阻塞阶段交接 |
-| 4 运行内压缩 | `inputbudget`、`context_budget.go` | Generate/Stream 硬检查、已有来源引用复用、未知工具结果先持久化、工具配对与近期轮次保留、Eino 摘要有界且同前缀只尝试一次、摘要失败及无效引用处理 |
-| 5 新输入交接 | `store_task_inputs.go`、`task_input_tools.go`、`store_task_input_lifecycle.go` | 原事件分页、assigned 不等于 applied、成功阶段才应用处理报告、未报告项归还、失败与恢复、迟到输入隔离、revision 重分配、取消后不自动唤醒、待处理项阻止 completed |
+| 1 材料与回查 | `personal/sqlite` 的材料和上下文查询、`personal/agentctx` 的读取工具、`textpage`、`workspace/pages.go` | 材料提交后恢复、capture 冲突、窄授权与非传递关联、Unicode/NUL、重叠搜索、51 个旧任务查询、文件版本变化、附件删除、checkpoint CAS |
+| 2 组装与来源 | `personal/assistant/context_assembly.go`、`personal/execution/executor_context.go`、`personal/agentctx/context_memory.go`、`personal/sqlite/run_memory.go` | 保留当前要求和具体回复对象、整体 schema 计数、必需内容超限拒绝、初始 manifest 先保存、普通更正冻结、同 Run 恢复、forget 后重新保存仍不返回旧值 |
+| 3 累计进展 | `personal/sqlite/progress.go`、`personal/agentctx/progress_tools.go` | 跨阶段累计、历史版本与高水位分页、正文回查、纠正 CAS、证据授权、事务回滚、并发增量合并、长进展不阻塞阶段交接 |
+| 4 运行内压缩 | `inputbudget`、`personal/agentctx/context_budget.go` | Generate/Stream 硬检查、已有来源引用复用、未知工具结果先持久化、工具配对与近期轮次保留、Eino 摘要有界且同前缀只尝试一次、摘要失败及无效引用处理 |
+| 5 新输入交接 | `personal/sqlite` 的输入事务与生命周期、`personal/assistant/task_input_tools.go`、`personal/execution/task_input_tools.go` | 原事件分页、assigned 不等于 applied、成功阶段才应用处理报告、未报告项归还、失败与恢复、迟到输入隔离、revision 重分配、取消后不自动唤醒、待处理项阻止 completed |
 
 使用 `GOCACHE=/tmp/kagari-go-cache` 运行以下工程检查，均通过：
 
@@ -364,7 +364,7 @@ trace 增加 `context.assembled`、`context.reduced`、`context.limit`，记录�
 
 该样本未触发摘要（0 次）；摘要成功、失败、无效引用及超限行为由模拟模型测试覆盖，未做真实端点压缩前后性能比较。验收期间真实模型曾提交非法进展状态；现已在工具 schema 声明枚举，并在 submit_progress 阶段给出校验反馈，FinishStage 复用同一规则。测试同时覆盖非法状态修正后成功保存。
 
-运行真实用例时设置 `KAGARI_LIVE_EVAL=1`、`KAGARI_EVAL_CONFIG_DIR`，执行 `go test ./internal/personal -run '^TestLivePersonalTaskInputPagingAndAcknowledgment$' -count=1 -v`。该测试在进程内设置上述窗口容量，不改用户配置。未执行旧库迁移、真实渠道发送或长期运行压测。
+运行真实用例时设置 `KAGARI_LIVE_EVAL=1`、`KAGARI_EVAL_CONFIG_DIR`，执行 `go test ./internal/personal/... -run '^TestLivePersonalTaskInputPagingAndAcknowledgment$' -count=1 -v`。该测试在进程内设置上述窗口容量，不改用户配置。未执行旧库迁移、真实渠道发送或长期运行压测。
 
 ## 8. 分批复核与业务衔接（2026-11-07）
 
@@ -400,7 +400,7 @@ trace 增加 `context.assembled`、`context.reduced`、`context.limit`，记录�
 测试入口为 `TestLivePersonalContextCompressionComparison`，普通测试默认跳过真实端点调用。运行命令：
 
 ```sh
-KAGARI_LIVE_EVAL=1 KAGARI_EVAL_CONFIG_DIR=/path/to/config GOCACHE=/tmp/kagari-go-cache go test ./internal/personal -run '^TestLivePersonalContextCompressionComparison$' -count=1 -v
+KAGARI_LIVE_EVAL=1 KAGARI_EVAL_CONFIG_DIR=/path/to/config GOCACHE=/tmp/kagari-go-cache go test ./internal/personal/... -run '^TestLivePersonalContextCompressionComparison$' -count=1 -v
 ```
 
 测试进程固定使用本地窗口预算 32,768、输出预算 2,500，得 H=28,629、S=22,903；这只是实验设置，不声明端点的标称容量，也不写入本地配置文件。原始历史估算 26,424 字节，先缩减早期工具结果后为 23,903，仍超过 S，因而实际触发摘要。当前本地配置缺少 model.context_window，部署服务仍须按实际端点填写。

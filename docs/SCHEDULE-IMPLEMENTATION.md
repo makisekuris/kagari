@@ -23,7 +23,7 @@ FinishStage 保存阶段结果并产生回调，不等于整个 Task 完成。�
 
 定时计划原实现使用 schema 3；与上下文管理、回复和输入关联整合后统一使用 schema 4，默认路径为 `data/kagari-context.db`。旧库拒绝启动但不删除，使用新的 storage.path；不编写迁移脚本。定时计划的触发、检查区间、成功进度和背景建议规则保持不变。
 
-字段与约束对应 `store_schedule_schema.go` 和 `schedule_suggestion.go`；验证结果以本文件末尾的记录为准。沿用现有 ID、UTC 时间文本和 JSON 存储方式。
+字段与约束对应 `personal/sqlite/schedule_schema.go`、`personal/sqlite/schema.go` 和 `personal/schedule_suggestion.go`；验证结果以本文件末尾的记录为准。沿用现有 ID、UTC 时间文本和 JSON 存储方式。
 
 ### 2.1 personal_schedules
 
@@ -318,15 +318,15 @@ Task 回调 ScheduleID 从 occurrence 得出，EventSchedule 不进入主模型�
 
 | 文件或模块 | 职责 |
 | --- | --- |
-| schedule.go、schedule_time.go | 类型、输入与时间计算 |
-| store_schedule_schema.go | 三张新表、约束、索引 |
-| store_schedules.go | 用户写事务、请求快照、列表查询 |
-| store_schedule_dispatch.go | 到期事务、忙碌判断、故障暂停 |
-| store_schedule_execution.go | 首次执行、取消未开始 Task、检查进度记账 |
-| store_schedule_suggestions.go | 建议持久化、去重与确认 |
-| schedule_tools.go、runtime_schedules.go | 对话入口与运行循环 |
-| store_tasks.go、store_events.go | 共享入队、Trigger、审查与消息关联 |
-| types/model/prompt/executor/inspection | 类型传播、固定背景优先、检查区间、只读查询 |
+| personal/schedule.go、personal/schedule_time.go | 类型、输入与时间计算 |
+| personal/sqlite/schedule_schema.go | 三张新表、约束、索引 |
+| personal/sqlite 的 schedules、schedule_lifecycle、schedule_queries | 用户写事务、请求快照、列表查询 |
+| personal/sqlite/schedule_dispatch.go | 到期事务、忙碌判断、故障暂停 |
+| personal/sqlite/schedule_execution.go | 首次执行、取消未开始 Task、检查进度记账 |
+| personal/sqlite 的 schedule_suggestions、schedule_suggestion_flow | 建议持久化、去重与确认 |
+| personal/assistant/schedule_tools.go、personal/service/runtime_schedules.go | 对话入口与运行循环 |
+| personal/sqlite 的任务与事件事务 | 共享入队、Trigger、审查与消息关联 |
+| personal、personal/assistant、personal/execution、personal/sqlite/inspection.go | 类型传播、固定背景优先、检查区间、只读查询 |
 | internal/config、cmd/kagari | 默认时区、启动接线、独立 CLI FlagSet |
 | tests、README、相关 V2 文档 | 调用者、接口替身、样本、使用约定 |
 
@@ -356,11 +356,11 @@ Task 回调 ScheduleID 从 occurrence 得出，EventSchedule 不进入主模型�
 
 回滚测试可在临时 SQLite 中用 trigger 抛出插入错误，验证原子性，不向生产代码增加故障注入开关。时间使用固定 now 和模拟执行器，不实际等待一天。
 
-实现阶段按迭代运行受影响包测试；集成后运行 go test ./...、go vet ./...、go test -race ./internal/personal ./cmd/kagari 和 go build ./cmd/kagari。真实模型另验收少量登记、检查完整性判定、背景候选与过期确认，不把模拟测试称为真实模型验收。
+实现阶段按迭代运行受影响包测试；集成后运行 go test ./...、go vet ./...、go test -race ./internal/personal/... ./cmd/kagari 和 go build ./cmd/kagari。真实模型另验收少量登记、检查完整性判定、背景候选与过期确认，不把模拟测试称为真实模型验收。
 
 2026-11-06 验收记录：四个迭代全部通过。使用 `GOCACHE=/tmp/kagari-go-cache` 完成 `go test ./... -count=1`、`go vet ./...`、`go test -race ./internal/personal ./cmd/kagari`，并以 `go build -o /tmp/kagari-schedule ./cmd/kagari` 构建成功。旧库拒绝且数据保留、CLI 只读和双方并行功能的接口回归均通过。
 
-真实模型使用隔离临时库及虚构项目，两个 `TestLivePersonalSchedule*` 样本在同次运行中通过：普通/连续计划正确登记；人工核对回执包含时区、首次触发时间与每次预算；部分来源失败不记检查进度；模型发现 Go/Rust 背景冲突并持久化候选；记忆改为 Kotlin 后，旧确认只生成待确认的新候选，计划仍保留 Go；outbox 展示与存储一致的具体差异。运行方式为设置 `KAGARI_LIVE_EVAL=1` 和 `KAGARI_EVAL_CONFIG_DIR` 后执行 `go test ./internal/personal -run '^TestLivePersonalSchedule' -count=1 -v`。
+真实模型使用隔离临时库及虚构项目，两个 `TestLivePersonalSchedule*` 样本在同次运行中通过：普通/连续计划正确登记；人工核对回执包含时区、首次触发时间与每次预算；部分来源失败不记检查进度；模型发现 Go/Rust 背景冲突并持久化候选；记忆改为 Kotlin 后，旧确认只生成待确认的新候选，计划仍保留 Go；outbox 展示与存储一致的具体差异。运行方式为设置 `KAGARI_LIVE_EVAL=1` 和 `KAGARI_EVAL_CONFIG_DIR` 后执行 `go test ./internal/personal/... -run '^TestLivePersonalSchedule' -count=1 -v`。
 
 验收中修正了背景证据来源与个人记忆写入证据的混淆，以及过期确认被误选为 keep 的指令歧义；定时回调指令单独要求完成背景比较和结果审查。候选识别仍依赖模型，小样本通过不代表能发现所有语义冲突。未连接真实渠道发送通知；渠道与 outbox 使用已有模拟接口验收。早期两表 DDL 的原型检查不作为本方案的验证证据。
 
@@ -368,13 +368,13 @@ Task 回调 ScheduleID 从 occurrence 得出，EventSchedule 不进入主模型�
 
 | 范围 | 测试文件与行为 |
 | --- | --- |
-| 日历与时区 | `schedule_time_test.go`：五段规则、日/月/闰日、DST、Previous 有界查找、无有效时间 |
-| 用户操作与授权 | `store_schedules_test.go`：暂停/恢复、scope、内容更新、旧请求重放、拒绝非用户授权、事务回滚与分页 |
-| 调度与检查 | `store_schedule_execution_test.go`：授权完成边界、合并漏跑、忙碌跳过、首次开始、冻结区间、来源集合、原子记账与旧库保护 |
-| 运行边界 | `store_schedule_acceptance_test.go`：人工并行乱序完成、已接纳凭据保留、预算隔离、开始后暂停、故障与逐次失败通知 |
-| 背景建议 | `store_schedule_suggestions_test.go`：证据引用、去重与重放、原子应用、过期刷新及回滚、二次确认、保留原设置 |
-| 端到端关联 | `runtime_schedule_test.go`：等锁期间取消、数据库重开、提交后中断恢复、精确通知分段、附件替代回复、人工改目标后的历史区间 |
-| 模型与执行器 | `schedule_model_test.go`、`schedule_executor_test.go`、`schedule_live_eval_test.go`：工具调用、固定输入、真实模型登记与回调判定 |
+| 日历与时区 | `personal/schedule_time_test.go`：五段规则、日/月/闰日、DST、Previous 有界查找、无有效时间 |
+| 用户操作与授权 | `personal/sqlite/schedules_test.go`：暂停/恢复、scope、内容更新、旧请求重放、拒绝非用户授权、事务回滚与分页 |
+| 调度与检查 | `personal/sqlite/schedule_execution_test.go`：授权完成边界、合并漏跑、忙碌跳过、首次开始、冻结区间、来源集合、原子记账与旧库保护 |
+| 运行边界 | `personal/sqlite/schedule_acceptance_test.go`：人工并行乱序完成、已接纳凭据保留、预算隔离、开始后暂停、故障与逐次失败通知 |
+| 背景建议 | `personal/sqlite/schedule_suggestions_test.go`：证据引用、去重与重放、原子应用、过期刷新及回滚、二次确认、保留原设置 |
+| 端到端关联 | `personal/service/runtime_schedule_test.go`：等锁期间取消、数据库重开、提交后中断恢复、精确通知分段、附件替代回复、人工改目标后的历史区间 |
+| 模型与执行器 | `personal/assistant`、`personal/execution`、`personal/service` 的计划测试：工具调用、固定输入、真实模型登记与回调判定 |
 | 只读查询 | `cmd/kagari/personal_test.go`：计划及触发历史查询、不建库、不恢复或改写服务工作 |
 
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"kagari/internal/textpage"
 )
@@ -22,31 +23,31 @@ type ProgressUpdate struct {
 	Supersedes  string        `json:"supersedes,omitempty"`
 }
 
-var errInvalidProgress = errors.New("invalid_progress")
+var ErrInvalidProgress = errors.New("invalid_progress")
 
-func invalidProgressInput(message string) error {
-	return fmt.Errorf("%w: %s", errInvalidProgress, message)
+func InvalidProgressError(message string) error {
+	return fmt.Errorf("%w: %s", ErrInvalidProgress, message)
 }
 
-func validateProgressUpdates(updates []ProgressUpdate) error {
+func ValidateProgressUpdates(updates []ProgressUpdate) error {
 	if len(updates) > 50 {
-		return invalidProgressInput("at most 50 entries per stage")
+		return InvalidProgressError("at most 50 entries per stage")
 	}
 	seen := map[string]bool{}
 	for _, u := range updates {
-		if u.ID == "" || runeLen(u.ID) > 128 || seen[u.ID] || strings.TrimSpace(u.Description) == "" || runeLen(u.Description) > 2000 || runeLen(u.Reason) > 2000 || len(u.Evidence) > 50 {
-			return invalidProgressInput("unique nonempty ID (max 128), description (max 2000), reason (max 2000), and at most 50 evidence references required")
+		if u.ID == "" || utf8.RuneCountInString(u.ID) > 128 || seen[u.ID] || strings.TrimSpace(u.Description) == "" || utf8.RuneCountInString(u.Description) > 2000 || utf8.RuneCountInString(u.Reason) > 2000 || len(u.Evidence) > 50 {
+			return InvalidProgressError("unique nonempty ID (max 128), description (max 2000), reason (max 2000), and at most 50 evidence references required")
 		}
 		seen[u.ID] = true
 		if u.Status != "reported" && u.Status != "unresolved" && u.Status != "failed" && u.Status != "superseded" {
-			return invalidProgressInput("status must be reported, unresolved, failed, or superseded")
+			return InvalidProgressError("status must be reported, unresolved, failed, or superseded")
 		}
 		if (u.Status == "failed" || u.Status == "superseded") && strings.TrimSpace(u.Reason) == "" {
-			return invalidProgressInput("failed or superseded entries require a reason")
+			return InvalidProgressError("failed or superseded entries require a reason")
 		}
 		for _, ref := range u.Evidence {
-			if ref.ID == "" || runeLen(ref.ID) > 128 || (ref.Kind != "material" && ref.Kind != "attachment" && ref.Kind != "run_result") {
-				return invalidProgressInput("evidence needs a valid kind and nonempty ID (max 128)")
+			if ref.ID == "" || utf8.RuneCountInString(ref.ID) > 128 || (ref.Kind != "material" && ref.Kind != "attachment" && ref.Kind != "run_result") {
+				return InvalidProgressError("evidence needs a valid kind and nonempty ID (max 128)")
 			}
 		}
 	}
@@ -87,15 +88,3 @@ type ProgressRepository interface {
 	CorrectProgress(context.Context, int64, int64, int64, int64, []ProgressUpdate) (TaskProgress, error)
 	ValidateProgressSubmission(context.Context, Run, []ProgressUpdate, map[string]bool) error
 }
-
-const progressSchema = `
-CREATE TABLE IF NOT EXISTS personal_progress (
- seq INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES personal_tasks(id), task_revision INTEGER NOT NULL,
- version INTEGER NOT NULL, entry_id TEXT NOT NULL, run_id INTEGER NOT NULL REFERENCES personal_runs(id),
- event_id INTEGER REFERENCES personal_events(id), update_json TEXT NOT NULL CHECK(json_valid(update_json)),
- UNIQUE(task_id,task_revision,entry_id,version)
-);
-CREATE INDEX IF NOT EXISTS personal_progress_task ON personal_progress(task_id,task_revision,version);
-CREATE INDEX IF NOT EXISTS personal_progress_cursor ON personal_progress(task_id,seq DESC);
-CREATE INDEX IF NOT EXISTS personal_progress_latest ON personal_progress(task_id,task_revision,entry_id,seq DESC);
-`

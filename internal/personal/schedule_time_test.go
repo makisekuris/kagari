@@ -8,12 +8,12 @@ import (
 )
 
 func TestParseScheduleRequiresFiveFieldsAndSeparateTimezone(t *testing.T) {
-	schedule, err := parseSchedule("0 9 * * 1-5", "")
+	schedule, err := ParseSchedule("0 9 * * 1-5", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := schedule.(*cron.SpecSchedule).Location.String(); got != defaultScheduleTimezone {
-		t.Fatalf("default timezone = %q, want %q", got, defaultScheduleTimezone)
+	if got := schedule.(*cron.SpecSchedule).Location.String(); got != DefaultScheduleTimezone {
+		t.Fatalf("default timezone = %q, want %q", got, DefaultScheduleTimezone)
 	}
 
 	for _, expression := range []string{
@@ -24,16 +24,16 @@ func TestParseScheduleRequiresFiveFieldsAndSeparateTimezone(t *testing.T) {
 		"0 0 * * * echo run",
 	} {
 		t.Run(expression, func(t *testing.T) {
-			if _, err := parseSchedule(expression, "UTC"); err == nil {
-				t.Fatalf("parseSchedule(%q) succeeded", expression)
+			if _, err := ParseSchedule(expression, "UTC"); err == nil {
+				t.Fatalf("ParseSchedule(%q) succeeded", expression)
 			}
 		})
 	}
-	if _, err := parseSchedule("0 0 * * *", "Mars/Olympus"); err == nil {
-		t.Fatal("parseSchedule accepted an invalid timezone")
+	if _, err := ParseSchedule("0 0 * * *", "Mars/Olympus"); err == nil {
+		t.Fatal("ParseSchedule accepted an invalid timezone")
 	}
-	if _, err := parseSchedule("0 0 * * *", "Local"); err == nil {
-		t.Fatal("parseSchedule accepted the machine-local timezone")
+	if _, err := ParseSchedule("0 0 * * *", "Local"); err == nil {
+		t.Fatal("ParseSchedule accepted the machine-local timezone")
 	}
 }
 
@@ -58,15 +58,15 @@ func TestNextScheduleTimeUsesIndependentTimezone(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := nextScheduleTime("0 9 * * *", test.timezone, test.after)
+			got, err := NextScheduleTime("0 9 * * *", test.timezone, test.after)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !got.Equal(test.want) {
-				t.Fatalf("nextScheduleTime() = %s, want %s", got, test.want)
+				t.Fatalf("NextScheduleTime() = %s, want %s", got, test.want)
 			}
 			if got.Location() != time.UTC {
-				t.Fatalf("nextScheduleTime() location = %s, want UTC", got.Location())
+				t.Fatalf("NextScheduleTime() location = %s, want UTC", got.Location())
 			}
 		})
 	}
@@ -100,12 +100,12 @@ func TestScheduleTimeAcrossCalendarBoundaries(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := nextScheduleTime(test.expression, "UTC", test.after)
+			got, err := NextScheduleTime(test.expression, "UTC", test.after)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !got.Equal(test.want) {
-				t.Fatalf("nextScheduleTime() = %s, want %s", got, test.want)
+				t.Fatalf("NextScheduleTime() = %s, want %s", got, test.want)
 			}
 		})
 	}
@@ -133,12 +133,12 @@ func TestScheduleTimeDST(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := nextScheduleTime(test.expression, "America/New_York", test.after)
+			got, err := NextScheduleTime(test.expression, "America/New_York", test.after)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !got.Equal(test.want) {
-				t.Fatalf("nextScheduleTime() = %s, want %s", got, test.want)
+				t.Fatalf("NextScheduleTime() = %s, want %s", got, test.want)
 			}
 		})
 	}
@@ -155,22 +155,22 @@ func (schedule *countingSchedule) Next(after time.Time) time.Time {
 }
 
 func TestPreviousScheduleTimeUsesBoundedSearch(t *testing.T) {
-	schedule, err := parseSchedule("0 0 29 2 *", "UTC")
+	schedule, err := ParseSchedule("0 0 29 2 *", "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
 	counted := &countingSchedule{Schedule: schedule}
 	before := time.Date(2028, time.February, 29, 0, 0, 0, 0, time.UTC)
-	got, err := previousScheduleTime(counted, before)
+	got, err := PreviousScheduleTime(counted, before)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := time.Date(2024, time.February, 29, 0, 0, 0, 0, time.UTC)
 	if !got.Equal(want) {
-		t.Fatalf("previousScheduleTime() = %s, want %s", got, want)
+		t.Fatalf("PreviousScheduleTime() = %s, want %s", got, want)
 	}
 	if counted.calls > 100 {
-		t.Fatalf("previousScheduleTime() called Next %d times, want at most 100", counted.calls)
+		t.Fatalf("PreviousScheduleTime() called Next %d times, want at most 100", counted.calls)
 	}
 }
 
@@ -183,11 +183,11 @@ func TestPreviousScheduleTimeAcrossDST(t *testing.T) {
 		{"fall repeated activation", "30 1 * * *", time.Date(2024, 11, 3, 6, 30, 0, 0, time.UTC), time.Date(2024, 11, 3, 5, 30, 0, 0, time.UTC)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			schedule, err := parseSchedule(test.expression, "America/New_York")
+			schedule, err := ParseSchedule(test.expression, "America/New_York")
 			if err != nil {
 				t.Fatal(err)
 			}
-			previous, err := previousScheduleTime(schedule, test.before)
+			previous, err := PreviousScheduleTime(schedule, test.before)
 			if err != nil || !previous.Equal(test.want) {
 				t.Fatalf("previous activation=%s %v, want %s", previous, err, test.want)
 			}
@@ -196,24 +196,24 @@ func TestPreviousScheduleTimeAcrossDST(t *testing.T) {
 }
 
 func TestScheduleTimeRejectsZeroAndSchedulesWithoutActivations(t *testing.T) {
-	if _, err := nextScheduleTime("0 0 * * *", "UTC", time.Time{}); err == nil {
-		t.Fatal("nextScheduleTime accepted a zero start time")
+	if _, err := NextScheduleTime("0 0 * * *", "UTC", time.Time{}); err == nil {
+		t.Fatal("NextScheduleTime accepted a zero start time")
 	}
-	if _, err := nextScheduleTime("0 0 31 2 *", "UTC", time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)); err == nil {
-		t.Fatal("nextScheduleTime accepted a schedule without an activation")
+	if _, err := NextScheduleTime("0 0 31 2 *", "UTC", time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)); err == nil {
+		t.Fatal("NextScheduleTime accepted a schedule without an activation")
 	}
-	if _, err := previousScheduleTime(nil, time.Now()); err == nil {
-		t.Fatal("previousScheduleTime accepted a nil schedule")
+	if _, err := PreviousScheduleTime(nil, time.Now()); err == nil {
+		t.Fatal("PreviousScheduleTime accepted a nil schedule")
 	}
-	if _, err := previousScheduleTime(cron.ConstantDelaySchedule{}, time.Time{}); err == nil {
-		t.Fatal("previousScheduleTime accepted a zero end time")
+	if _, err := PreviousScheduleTime(cron.ConstantDelaySchedule{}, time.Time{}); err == nil {
+		t.Fatal("PreviousScheduleTime accepted a zero end time")
 	}
 
-	schedule, err := parseSchedule("0 0 31 2 *", "UTC")
+	schedule, err := ParseSchedule("0 0 31 2 *", "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := previousScheduleTime(schedule, time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)); err == nil {
-		t.Fatal("previousScheduleTime accepted a schedule without an activation")
+	if _, err := PreviousScheduleTime(schedule, time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)); err == nil {
+		t.Fatal("PreviousScheduleTime accepted a schedule without an activation")
 	}
 }

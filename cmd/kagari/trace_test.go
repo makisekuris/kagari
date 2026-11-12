@@ -15,6 +15,7 @@ import (
 	"kagari/internal/config"
 	"kagari/internal/logging"
 	"kagari/internal/personal"
+	"kagari/internal/personal/sqlite"
 
 	"go.uber.org/zap"
 )
@@ -26,7 +27,7 @@ func TestTraceReadsLargeCallsAndReportsMissingTail(t *testing.T) {
 	var cfg config.Config
 	cfg.Storage.Path = filepath.Join(t.TempDir(), "personal.db")
 	cfg.Model.APIKey = "configured-secret"
-	s, err := personal.NewStore(cfg.Storage.Path, time.Minute)
+	s, err := sqlite.NewStore(cfg.Storage.Path, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestTraceSeparatesStoreIdentityAndMissingEventHistory(t *testing.T) {
 	ctx := context.Background()
 	var cfg config.Config
 	cfg.Storage.Path = filepath.Join(t.TempDir(), "personal.db")
-	s, err := personal.NewStore(cfg.Storage.Path, time.Minute)
+	s, err := sqlite.NewStore(cfg.Storage.Path, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +191,7 @@ func TestTraceSelectsTaskBeforeSharedSourceEvent(t *testing.T) {
 	ctx := context.Background()
 	var cfg config.Config
 	cfg.Storage.Path = filepath.Join(t.TempDir(), "personal.db")
-	s, err := personal.NewStore(cfg.Storage.Path, time.Minute)
+	s, err := sqlite.NewStore(cfg.Storage.Path, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

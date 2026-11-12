@@ -11,6 +11,7 @@ import (
 
 	"kagari/internal/config"
 	"kagari/internal/personal"
+	"kagari/internal/personal/sqlite"
 )
 
 func inspectSchedules(ctx context.Context, cfg config.Config, args []string, out io.Writer) error {
@@ -34,7 +35,7 @@ func inspectSchedules(ctx context.Context, cfg config.Config, args []string, out
 			return err
 		}
 	}
-	s, err := personal.OpenExisting(ctx, cfg.Storage.Path)
+	s, err := sqlite.OpenExisting(ctx, cfg.Storage.Path)
 	if err != nil {
 		return err
 	}
@@ -88,7 +89,7 @@ func inspectScheduleHistory(ctx context.Context, cfg config.Config, args []strin
 	if err != nil {
 		return err
 	}
-	s, err := personal.OpenExisting(ctx, cfg.Storage.Path)
+	s, err := sqlite.OpenExisting(ctx, cfg.Storage.Path)
 	if err != nil {
 		return err
 	}

@@ -14,7 +14,7 @@ import (
 
 	"kagari/internal/config"
 	"kagari/internal/logging"
-	"kagari/internal/personal"
+	"kagari/internal/personal/sqlite"
 )
 
 func inspectEvents(ctx context.Context, cfg config.Config, args []string, out io.Writer) error {
@@ -26,7 +26,7 @@ func inspectEvents(ctx context.Context, cfg config.Config, args []string, out io
 	if flags.NArg() != 0 {
 		return errors.New("usage: kagari events [-limit N]")
 	}
-	s, err := personal.OpenExisting(ctx, cfg.Storage.Path)
+	s, err := sqlite.OpenExisting(ctx, cfg.Storage.Path)
 	if err != nil {
 		return err
 	}
@@ -52,7 +52,7 @@ func inspectTrace(ctx context.Context, cfg config.Config, args []string, out io.
 	if flags.NArg() != 0 || (*eventID > 0) == (*taskID > 0) || *eventID < 0 || *taskID < 0 {
 		return errors.New("usage: kagari trace (-event ID | -task ID) [-full]")
 	}
-	s, err := personal.OpenExisting(ctx, cfg.Storage.Path)
+	s, err := sqlite.OpenExisting(ctx, cfg.Storage.Path)
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func inspectTrace(ctx context.Context, cfg config.Config, args []string, out io.
 	return err
 }
 
-func traceIDs(state personal.DiagnosticSnapshot) map[string]map[int64]bool {
+func traceIDs(state sqlite.DiagnosticSnapshot) map[string]map[int64]bool {
 	ids := map[string]map[int64]bool{"event_id": {}, "task_id": {}, "run_id": {}, "delivery_id": {}}
 	for _, event := range state.Events {
 		ids["event_id"][event.ID] = true

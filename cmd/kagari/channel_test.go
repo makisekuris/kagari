@@ -12,9 +12,10 @@ import (
 	"time"
 
 	"kagari/internal/personal"
+	"kagari/internal/personal/sqlite"
 )
 
-func acceptTestInput(ctx context.Context, s *personal.Store, text string) (int64, error) {
+func acceptTestInput(ctx context.Context, s *sqlite.Store, text string) (int64, error) {
 	if err := s.BindChannel(ctx, "telegram", "bot", "owner", false); err != nil {
 		return 0, err
 	}
@@ -49,7 +50,7 @@ func TestLoginQRRefresh(t *testing.T) {
 }
 
 func TestWeixinLoginCannotReplaceStoredOwner(t *testing.T) {
-	s, err := personal.NewStore(filepath.Join(t.TempDir(), "personal.db"), time.Minute)
+	s, err := sqlite.NewStore(filepath.Join(t.TempDir(), "personal.db"), time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +69,7 @@ func TestWeixinLoginCannotReplaceStoredOwner(t *testing.T) {
 }
 
 func TestWeixinBindingFailureRestoresCredentials(t *testing.T) {
-	s, err := personal.NewStore(filepath.Join(t.TempDir(), "personal.db"), time.Minute)
+	s, err := sqlite.NewStore(filepath.Join(t.TempDir(), "personal.db"), time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

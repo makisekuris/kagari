@@ -19,6 +19,10 @@ import (
 	"kagari/internal/logging"
 	"kagari/internal/persona"
 	"kagari/internal/personal"
+	"kagari/internal/personal/assistant"
+	"kagari/internal/personal/execution"
+	"kagari/internal/personal/service"
+	"kagari/internal/personal/sqlite"
 	"kagari/internal/telegram"
 	"kagari/internal/weixin"
 
@@ -34,7 +38,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 		return err
 	}
 	defer unlock()
-	s, err := personal.NewStore(cfg.Storage.Path, cfg.Personal.TaskBudget)
+	s, err := sqlite.NewStore(cfg.Storage.Path, cfg.Personal.TaskBudget)
 	if err != nil {
 		return err
 	}
@@ -83,7 +87,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 			return browser.Open(ctx, cfg)
 		}
 	}
-	main := &personal.MainAgent{Store: s, Log: log, Model: engine.Model, Persona: role.Prompt(), Profile: engine.Profile, Timezone: cfg.Personal.Timezone, MaxIterations: cfg.Agent.MaxIterations, Timeout: cfg.Agent.Timeout}
+	main := &assistant.MainAgent{Store: s, Log: log, Model: engine.Model, Persona: role.Prompt(), Profile: engine.Profile, Timezone: cfg.Personal.Timezone, MaxIterations: cfg.Agent.MaxIterations, Timeout: cfg.Agent.Timeout}
 	var client channel.Client
 	if cfg.Personal.Channel == "weixin" {
 		credentials, loadErr := weixin.LoadCredentials(credentialPath(cfg))
@@ -109,8 +113,8 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 	}
 	workspaceDirectory := filepath.Join(cfg.Storage.Path+".workspaces", storeID)
 	main.WorkspaceDirectory = workspaceDirectory
-	runtime := &personal.Runtime{
-		Store: s, Think: main.Think, Execute: personal.TaskExecutor(engine, s, workspaceDirectory), ReviewMemory: main.ReviewMemory, PresentReply: main.PresentReply,
+	runtime := &service.Runtime{
+		Store: s, Think: main.Think, Execute: execution.TaskExecutor(engine, s, workspaceDirectory), ReviewMemory: main.ReviewMemory, PresentReply: main.PresentReply,
 		TaskConcurrency: cfg.Personal.TaskConcurrency, Poll: client.Poll, Log: log,
 		Prepare: channel.PrepareText, Send: client.Send, Ready: client.Ready,
 	}
@@ -133,7 +137,7 @@ func inspectPersonal(ctx context.Context, cfg config.Config, args []string, out 
 			return errors.New("TASK_ID must be a positive integer")
 		}
 	}
-	s, err := personal.OpenExisting(ctx, cfg.Storage.Path)
+	s, err := sqlite.OpenExisting(ctx, cfg.Storage.Path)
 	if err != nil {
 		return err
 	}

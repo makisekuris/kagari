@@ -1,9 +1,6 @@
 package personal
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
 type ScheduleMemoryRef struct {
 	Key      string `json:"key"`
@@ -48,32 +45,3 @@ type ScheduleSuggestionResolution struct {
 	Schedule      *Schedule          `json:"schedule,omitempty"`
 	NeedsProposal bool               `json:"needs_proposal,omitempty"`
 }
-
-type ScheduleSuggestionRepository interface {
-	ProposeScheduleContextUpdate(context.Context, int64, string, int64, ScheduleContextProposal, time.Time) (ScheduleSuggestion, bool, error)
-	ResolveScheduleContextUpdate(context.Context, int64, string, int64, int64, string, time.Time) (ScheduleSuggestionResolution, bool, error)
-	ScheduleSuggestions(context.Context, int64) ([]ScheduleSuggestion, error)
-	ReplyScheduleSuggestions(context.Context, int64) ([]ScheduleSuggestion, error)
-}
-
-const scheduleSuggestionSchema = `
-CREATE TABLE IF NOT EXISTS personal_schedule_context_suggestions (
-	id INTEGER PRIMARY KEY,
-	revision INTEGER NOT NULL CHECK(revision>0),
-	schedule_id INTEGER NOT NULL REFERENCES personal_schedules(id),
-	schedule_revision INTEGER NOT NULL CHECK(schedule_revision>0),
-	origin_event_id INTEGER NOT NULL REFERENCES personal_events(id),
-	task_id INTEGER NOT NULL REFERENCES personal_tasks(id),
-	change_key TEXT NOT NULL,
-	memory_refs_json TEXT NOT NULL,
-	old_context TEXT NOT NULL,
-	new_context TEXT NOT NULL,
-	replacements_json TEXT NOT NULL,
-	status TEXT NOT NULL CHECK(status IN ('pending','applied','dismissed')),
-	notified_event_id INTEGER REFERENCES personal_events(id),
-	presented_event_id INTEGER REFERENCES personal_events(id),
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL,
-	UNIQUE(schedule_id,change_key)
-);
-`

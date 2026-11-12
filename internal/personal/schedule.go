@@ -1,7 +1,6 @@
 package personal
 
 import (
-	"context"
 	"time"
 
 	"kagari/internal/channel"
@@ -9,6 +8,11 @@ import (
 
 type ScheduleStatus string
 type WindowMode string
+
+const (
+	DefaultSchedulePageSize = 20
+	MaxSchedulePageSize     = 100
+)
 
 const (
 	ScheduleActive     ScheduleStatus = "active"
@@ -138,16 +142,4 @@ type ScheduleOccurrence struct {
 type ScheduleContext struct {
 	Schedule   Schedule           `json:"schedule"`
 	Occurrence ScheduleOccurrence `json:"occurrence"`
-}
-
-type ScheduleRepository interface {
-	CreateSchedule(context.Context, int64, string, ScheduleInput, time.Time) (Schedule, bool, error)
-	UpdateSchedule(context.Context, int64, string, int64, int64, SchedulePatch, time.Time) (Schedule, bool, error)
-	CancelSchedule(context.Context, int64, string, int64, int64, time.Time) (Schedule, bool, error)
-	Schedule(context.Context, int64) (*Schedule, error)
-	Schedules(context.Context, bool, int64, int) ([]Schedule, error)
-	ScheduleOccurrences(context.Context, int64, int64, int) ([]ScheduleOccurrence, error)
-	ScheduleForTask(context.Context, int64) (*ScheduleContext, error)
-	DispatchDueSchedule(context.Context, time.Time) (*ScheduleOccurrence, error)
-	BeginScheduledRun(context.Context, int64, time.Time) (*Run, error)
 }

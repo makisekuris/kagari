@@ -67,10 +67,10 @@
 
 主要代码入口：
 
-- [runtime_conversation.go](../internal/personal/runtime_conversation.go)、[model.go](../internal/personal/model.go)、[model_result.go](../internal/personal/model_result.go)：主对话输入及裁剪。
-- [executor.go](../internal/personal/executor.go)、[executor_workspace.go](../internal/personal/executor_workspace.go)：执行器输入、记忆和工作区。
-- [store_tasks.go](../internal/personal/store_tasks.go)、[types.go](../internal/personal/types.go)：Task、Run、checkpoint 与状态事务。
-- [tools.go](../internal/personal/tools.go)、[attachment_tools.go](../internal/personal/attachment_tools.go)、[workspace/tools.go](../internal/workspace/tools.go)：模型读取入口。
+- [service](../internal/personal/service/) 与 [assistant](../internal/personal/assistant/)：主对话输入、上下文选择和回复处理。
+- [execution](../internal/personal/execution/)：执行器输入、阶段执行和工作区。
+- [sqlite](../internal/personal/sqlite/)、[tasks.go](../internal/personal/tasks.go)、[events.go](../internal/personal/events.go)：Task、Run、checkpoint 与原子状态事务；SQLite 连接和附件存储也由 `sqlite` 拥有。
+- [agentctx](../internal/personal/agentctx/)、[assistant](../internal/personal/assistant/) 与 [workspace/tools.go](../internal/workspace/tools.go)：共用读取工具、对话操作工具和工作区工具。
 - [engine.go](../internal/agent/engine.go)、[session.go](../internal/agent/session.go)：本阶段来源、工具循环和模型调用。
 
 外部项目只采用与当前问题直接相关的设计：
@@ -294,14 +294,14 @@ Task 完成继续使用现有 settle_task 规则，不增加证据数量或逐�
 
 | 范围 | 改动位置 |
 | --- | --- |
-| 分页与材料读取 | `personal/tools.go` 拆出查询职责；`attachment_tools.go`；`workspace/tools.go`；`agent/session.go` |
-| 上下文选择与渲染 | `personal/context.go` 等小文件；收拢 `runtime_conversation.go`、`model.go`、`model_result.go`、`executor.go` |
-| 来源记录和累计进展 | `types.go`、`store_tasks.go`；按职责拆出 Store 方法及 schema；`inspection.go` 与现有 trace |
-| 运行内压缩 | `agent` 内的模型调用配置；`personal/model.go`；现有 logging；必要的只读存储和读取工具 |
-| 新输入交接 | `store_events.go`、`store_tasks.go`、`runtime_tasks.go` 与对应工具 |
+| 分页与材料读取 | `personal/assistant` 的任务和记忆工具；`personal/agentctx` 的材料与附件工具；`workspace/tools.go`；`agent/session.go` |
+| 上下文选择与渲染 | `personal/assistant` 的对话组装与回复处理；`personal/agentctx` 的预算和记忆；`personal/execution` 的执行上下文；`personal/run_result.go` 的结果投影 |
+| 来源记录和累计进展 | `personal/tasks.go`、`personal/events.go`、`personal/progress.go`；`personal/sqlite` 的状态事务、材料和诊断查询 |
+| 运行内压缩 | `agent` 内的模型调用配置；`personal/agentctx`；现有 logging；材料读取与工具记录 |
+| 新输入交接 | `personal/sqlite` 的事件完成和输入交接事务；`personal/service` 的任务调度；对话与执行工具 |
 | 调用方和文档 | `cmd/kagari/personal.go`、配置及示例、两类提示词、README、V2 运行说明 |
 
-每个迭代先由主 Agent 固定共享类型、工具 schema、事务规则和验收用例，再按届时有效的 AGENTS.md 分配独立编码任务和选择模型思考强度；例如分页文件工具和固定接口后的读取工具可以分别实现。主 Agent 负责 Store 状态事务、共享文件集成和最终验证。不得让多个 Agent 同时修改 types、store_tasks 或 engine 等共享文件。
+每个迭代先由主 Agent 固定共享类型、工具 schema、事务规则和验收用例，再按届时有效的 AGENTS.md 分配独立编码任务和选择模型思考强度；例如分页文件工具和固定接口后的读取工具可以分别实现。主 Agent 负责 Store 状态事务、共享文件集成和最终验证。不得让多个 Agent 同时修改共享类型、任务事务或 Engine 等共享文件。
 
 ### 与定时计划的集成
 
@@ -326,7 +326,7 @@ Task 完成继续使用现有 settle_task 规则，不增加证据数量或逐�
 5. 新材料或约束在运行期间到达，revision 与输入状态正确。
 6. 工具结果触发压缩，压缩失败或进程中断后仍能读取已保存材料；主对话不重放已提交的 Task/Memory 写操作，执行器重新执行阶段前可检查既有成果。
 
-按改动范围运行 `go test ./internal/personal ./internal/agent ./internal/workspace ./internal/config`；涉及状态并发时对 personal 跑 race 检查；集成完成后运行项目要求的完整检查。真实模型测试沿用现有 live-eval 入口，按所改行为选择样本，不默认调用所有外部服务。
+按改动范围运行 `go test ./internal/personal/... ./internal/agent ./internal/workspace ./internal/config`；涉及状态并发时对 personal 跑 race 检查；集成完成后运行项目要求的完整检查。真实模型测试沿用现有 live-eval 入口，按所改行为选择样本，不默认调用所有外部服务。
 
 记录每组场景的结果正确性、关键引用可读取情况、模型输入用量、重复读取次数、压缩次数与失败原因。最终验收以要求和证据正确、任务能继续为先；token 与耗时必须实测后比较，不预先承诺节省比例。
 
