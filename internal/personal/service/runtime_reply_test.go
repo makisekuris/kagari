@@ -14,9 +14,9 @@ import (
 	"kagari/internal/personal/internal/testkit"
 )
 
-func TestRuntimeDeferredReadingAndWaitingDelivery(t *testing.T) {
-	for _, waiting := range []string{"none", "pending", "sent"} {
-		t.Run(waiting, func(t *testing.T) {
+func TestRuntimeDeferredReadingRepliesOnlyWithResult(t *testing.T) {
+	for _, request := range []string{"https://example.com/article", "请分析这个方案的部署限制：https://example.com/article"} {
+		t.Run(request, func(t *testing.T) {
 			ctx := context.Background()
 			s := testkit.Store(t, filepath.Join(t.TempDir(), "replies.db"), time.Minute)
 			r := testRuntime(s)
@@ -35,32 +35,18 @@ func TestRuntimeDeferredReadingAndWaitingDelivery(t *testing.T) {
 			r.Execute = func(context.Context, personal.Run, func(string) error) (personal.StageResult, error) {
 				return personal.StageResult{Summary: "requires a dedicated server"}, nil
 			}
-			testkit.AcceptInput(t, s, "1", testkit.SourceInput("1", "https://example.com/article"))
+			testkit.AcceptInput(t, s, "1", testkit.SourceInput("1", request))
 			if worked, err := r.turn(ctx); err != nil || !worked {
 				t.Fatalf("initial turn = %v, %v", worked, err)
 			}
 			if message, err := s.ClaimDelivery(ctx); err != nil || message != nil {
 				t.Fatalf("deferred reading sent an acknowledgement: %+v, %v", message, err)
 			}
-			if worked, err := r.waitingReply(ctx); err != nil || worked {
-				t.Fatalf("waiting hint was early: %v, %v", worked, err)
-			}
-			if waiting != "none" {
-				if worked, err := s.QueueWaitingReply(ctx, time.Now(), time.Nanosecond); err != nil || !worked {
-					t.Fatalf("queue waiting hint = %v, %v", worked, err)
-				}
-			}
-			if waiting == "sent" {
-				message, err := s.ClaimDelivery(ctx)
-				if err != nil || message == nil || strings.Contains(message.Text, "#") {
-					t.Fatalf("waiting hint = %+v, %v", message, err)
-				}
-				if err := s.UpdateDelivery(ctx, message.ID, "sent", channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner", MessageID: "wait"}, "", time.Time{}); err != nil {
-					t.Fatal(err)
-				}
-			}
 			if worked, err := r.task(ctx); err != nil || !worked {
 				t.Fatalf("reading stage = %v, %v", worked, err)
+			}
+			if message, err := s.ClaimDelivery(ctx); err != nil || message != nil {
+				t.Fatalf("unfinished reading sent a status message: %+v, %v", message, err)
 			}
 			if worked, err := r.turn(ctx); err != nil || !worked {
 				t.Fatalf("result turn = %v, %v", worked, err)
@@ -71,9 +57,6 @@ func TestRuntimeDeferredReadingAndWaitingDelivery(t *testing.T) {
 			}
 			if err := s.UpdateDelivery(ctx, message.ID, "sent", channel.Receipt{MessageID: "result"}, "", time.Time{}); err != nil {
 				t.Fatal(err)
-			}
-			if worked, err := s.QueueWaitingReply(ctx, time.Now().Add(time.Minute), replyWaitDelay); err != nil || worked {
-				t.Fatalf("completed reading created a late hint: %v, %v", worked, err)
 			}
 			if extra, err := s.ClaimDelivery(ctx); err != nil || extra != nil {
 				t.Fatalf("extra delivery = %+v, %v", extra, err)

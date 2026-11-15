@@ -50,6 +50,124 @@ func TestThinkCanReturnSilentEmptyDirectReply(t *testing.T) {
 	}
 }
 
+func TestThinkSuppressesQueueOnlyReceiptForOrdinaryRequest(t *testing.T) {
+	ctx := context.Background()
+	s := testkit.Store(t, ":memory:", time.Minute)
+	event := testkit.OpenUserEvent(t, s, 1, 1, "请研究这份产品需求中最合适的实现方案。")
+	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+		testkit.ResponseTool("create_task", createTaskArgs{Title: "实现方案研究", Goal: "Research the best implementation for the supplied product request", Context: event.Text}, "research"),
+		testkit.ResponseText(`{"text":"已安排，稍后给你结果。","reply_kind":"receipt","attachments":[]}`),
+	}}
+	output, err := newMainAgent(t, fixture, s).Think(ctx, personal.TurnInput{Event: event})
+	if err != nil || !output.Silent || output.Text != "" {
+		t.Fatalf("ordinary queue receipt was not silenced: output=%+v error=%v", output, err)
+	}
+}
+
+func TestThinkPreservesInputGroundedContentAlongsideQueuedTask(t *testing.T) {
+	ctx := context.Background()
+	s := testkit.Store(t, ":memory:", time.Minute)
+	event := testkit.OpenUserEvent(t, s, 1, 1, "现有系统用了 PostgreSQL 扩展，比较迁移到 MySQL 的成本与运维复杂度，并排一个研究任务。")
+	const insight = "现有系统依赖 PostgreSQL 扩展，因此迁移到 MySQL 时需要先核对这些扩展能否替代，不能只比较数据库的部署成本。"
+	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+		testkit.ResponseTool("create_task", createTaskArgs{Title: "数据库比较", Goal: "Compare PostgreSQL and MySQL migration costs and operational complexity", Context: event.Text}, "research"),
+		testkit.ResponseText(`{"text":"` + insight + `","reply_kind":"content","attachments":[]}`),
+	}}
+	output, err := newMainAgent(t, fixture, s).Think(ctx, personal.TurnInput{Event: event})
+	if err != nil || output.Silent || output.Text != insight {
+		t.Fatalf("input-grounded initial content was not preserved: output=%+v error=%v", output, err)
+	}
+}
+
+func TestThinkPreservesRequiredQuestionAndFailureAlongsideQueueReceipt(t *testing.T) {
+	for _, name := range []string{"required_question", "task_failure"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := testkit.Store(t, ":memory:", time.Minute)
+			event := testkit.OpenUserEvent(t, s, 1, 1, "请研究并整理这项需求。")
+			responses := []testkit.Response{}
+			want := ""
+			if name == "required_question" {
+				want = "这项方案需要只比较开源选项吗？"
+				responses = append(responses,
+					testkit.ResponseTool("create_task", createTaskArgs{Title: "需求研究", Goal: "Research the supplied requirement"}, "research"),
+					testkit.ResponseTool("set_user_questions", setUserQuestionsArgs{Questions: &[]string{want}}, "question"),
+				)
+			} else {
+				want = "「需求研究」未能创建任务。"
+				responses = append(responses, testkit.ResponseTool("create_task", createTaskArgs{Title: "需求研究"}, "failed-research"))
+			}
+			responses = append(responses, testkit.ResponseText(`{"text":"已收到，稍后给你结果。","reply_kind":"receipt","attachments":[]}`))
+			output, err := newMainAgent(t, &testkit.ResponsesFixture{T: t, Responses: responses}, s).Think(ctx, personal.TurnInput{Event: event})
+			if err != nil || output.Silent || !strings.Contains(output.Text, want) {
+				t.Fatalf("required reply was lost: want=%q output=%+v error=%v", want, output, err)
+			}
+		})
+	}
+}
+
+func TestThinkPreservesTaskStatusContentAlongsideQueuedTask(t *testing.T) {
+	ctx := context.Background()
+	s := testkit.Store(t, ":memory:", time.Minute)
+	seedEvent := testkit.OpenUserEvent(t, s, 1, 1, "创建一项现有研究任务。")
+	existing, _ := testkit.CreateTask(t, s, seedEvent, "existing", "现有研究", "Summarize the existing research", "")
+	testkit.FinishEvent(t, s, seedEvent, personal.TurnOutput{Silent: true}, nil)
+	event := testkit.OpenUserEvent(t, s, 2, 2, "查看现有研究的状态，并排一项新的方案研究。")
+	const answer = "现有研究仍在排队；新的方案研究也已排队。"
+	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+		testkit.ResponseTool("get_task", taskArgs{TaskID: existing.ID}, "query-existing"),
+		testkit.ResponseTool("create_task", createTaskArgs{Title: "方案研究", Goal: "Research the best implementation for the supplied product request"}, "research-new"),
+		testkit.ResponseText(`{"text":"` + answer + `","reply_kind":"content","attachments":[]}`),
+	}}
+	output, err := newMainAgent(t, fixture, s).Think(ctx, personal.TurnInput{Event: event})
+	if err != nil || output.Silent || output.Text != answer {
+		t.Fatalf("task status content was hidden by the new queued task: output=%+v error=%v", output, err)
+	}
+}
+
+func TestThinkSilencesReceiptAfterTaskReadAndSuccessfulContinuation(t *testing.T) {
+	ctx := context.Background()
+	s := testkit.Store(t, ":memory:", time.Minute)
+	seedEvent := testkit.OpenUserEvent(t, s, 1, 1, "创建一项需要补充信息的研究任务。")
+	existing, _ := testkit.CreateTask(t, s, seedEvent, "waiting", "待补充研究", "Research the requested topic", "")
+	if _, err := s.SettleTask(ctx, seedEvent.ID, existing.ID, existing.Revision, personal.TaskSettlement{
+		Status:   personal.TaskWaitingInput,
+		Summary:  "等待用户补充研究范围。",
+		Delivery: personal.DeliveryDraft{Text: "请补充研究范围。", Attachments: []string{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	testkit.FinishEvent(t, s, seedEvent, personal.TurnOutput{TaskID: existing.ID}, nil)
+	event := testkit.OpenUserEvent(t, s, 2, 2, "按现有范围继续研究。")
+	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+		testkit.ResponseTool("get_task", taskArgs{TaskID: existing.ID}, "query-waiting"),
+		testkit.ResponseTool("continue_task", continueTaskArgs{TaskID: existing.ID, ExpectedRevision: existing.Revision, Step: "Continue using the saved scope."}, "continue"),
+		testkit.ResponseText(`{"text":"已继续安排，稍后回复。","reply_kind":"receipt","attachments":[]}`),
+	}}
+	output, err := newMainAgent(t, fixture, s).Think(ctx, personal.TurnInput{Event: event, Tasks: []personal.Task{existing}})
+	if err != nil || !output.Silent || output.Text != "" {
+		t.Fatalf("task read prerequisite caused a queue-only receipt: output=%+v error=%v", output, err)
+	}
+}
+
+func TestThinkPreservesCancellationOutcomeAlongsideQueuedTask(t *testing.T) {
+	ctx := context.Background()
+	s := testkit.Store(t, ":memory:", time.Minute)
+	seedEvent := testkit.OpenUserEvent(t, s, 1, 1, "创建一项待取消的研究任务。")
+	existing, _ := testkit.CreateTask(t, s, seedEvent, "existing", "旧研究", "Summarize the existing research", "")
+	testkit.FinishEvent(t, s, seedEvent, personal.TurnOutput{Silent: true}, nil)
+	event := testkit.OpenUserEvent(t, s, 2, 2, "取消旧研究，并排一项新研究。")
+	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+		testkit.ResponseTool("cancel_task", cancelTaskArgs{TaskID: existing.ID, ExpectedRevision: existing.Revision}, "cancel-existing"),
+		testkit.ResponseTool("create_task", createTaskArgs{Title: "新研究", Goal: "Research the requested topic"}, "research-new"),
+		testkit.ResponseText(`{"text":"旧研究已取消，新研究已排队。","reply_kind":"receipt","attachments":[]}`),
+	}}
+	output, err := newMainAgent(t, fixture, s).Think(ctx, personal.TurnInput{Event: event})
+	if err != nil || output.Silent || !strings.Contains(output.Text, "取消任务") || output.SupplementalReply != nil || output.RequiredFeedback != "" {
+		t.Fatalf("queue receipt hid persisted cancellation outcome: output=%+v error=%v", output, err)
+	}
+}
+
 func TestThinkDoesNotNotifyOnlyBecauseTaskResultHasArtifacts(t *testing.T) {
 	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
 		testkit.ResponseText(`{"text":"","reply_kind":"silent","attachments":[]}`),

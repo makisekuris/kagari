@@ -22,21 +22,19 @@ func TestReferencedTasksPreserveMultipleTasksInRuntimeContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testkit.FinishEvent(t, s, event, personal.TurnOutput{Silent: true}, nil)
-	if queued, err := s.QueueWaitingReply(ctx, time.Now(), 0); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
+	const analysis = "两个问题分别涉及部署限制和长期维护成本，需要分别核对。"
+	testkit.FinishEvent(t, s, event, personal.TurnOutput{Text: analysis, TaskIDs: []int64{first.ID, second.ID}, ReplyKind: personal.ReplyContent}, []string{analysis})
+	initial, err := s.ClaimDelivery(ctx)
+	if err != nil || initial == nil {
+		t.Fatalf("ClaimDelivery() = (%+v,%v)", initial, err)
 	}
-	waiting, err := s.ClaimDelivery(ctx)
-	if err != nil || waiting == nil {
-		t.Fatalf("ClaimDelivery() = (%+v,%v)", waiting, err)
-	}
-	const waitingMessageID = "wait-receipt-41"
-	receipt := channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner", MessageID: waitingMessageID}
-	if err := s.UpdateDelivery(ctx, waiting.ID, "sent", receipt, "", time.Time{}); err != nil {
+	const analysisMessageID = "initial-analysis-41"
+	receipt := channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner", MessageID: analysisMessageID}
+	if err := s.UpdateDelivery(ctx, initial.ID, "sent", receipt, "", time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	replyInput := testkit.SourceInput("reply-to-wait-41", "Which result covers each question?")
-	replyInput.ReplyToID = waitingMessageID
+	replyInput := testkit.SourceInput("reply-to-analysis-41", "Which result covers each question?")
+	replyInput.ReplyToID = analysisMessageID
 	replyID := testkit.AcceptInput(t, s, "2", replyInput)
 	reply, err := s.ClaimEvent(ctx)
 	if err != nil || reply == nil || reply.ID != replyID {

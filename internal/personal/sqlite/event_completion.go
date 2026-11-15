@@ -404,6 +404,9 @@ func (s *Store) Recover(ctx context.Context) error {
 	if summary.UncertainSends, err = changedRows(res); err != nil {
 		return err
 	}
+	if err := suppressRetiredWaitingRepliesTx(ctx, tx); err != nil {
+		return err
+	}
 	if err := suppressTerminalDeliveryTailsTx(ctx, tx); err != nil {
 		return err
 	}

@@ -149,15 +149,11 @@ func TestDeliveryPolicySameRevisionRunKeepsResultAndSuppressesOldStatus(t *testi
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Minute)
 	user, task, runA, callbackA := startDeliveryPolicyTask(t, s, 1, "Stable Task")
-	if queued, err := s.QueueWaitingReply(ctx, user.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply()=(%v,%v), want true", queued, err)
-	}
+	legacyWaitFixture(t, s, user.ID)
 	waitA := waitIntentForEvent(t, s, user.ID)
 	resultA := settleDeliveryPolicyResult(t, s, task, runA, callbackA, personal.TaskWaitingInput, "Committed from run A")
 	continueEvent, runB := continueDeliveryPolicyTask(t, s, 2, task)
-	if queued, err := s.QueueWaitingReply(ctx, continueEvent.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply() for run B=(%v,%v), want true", queued, err)
-	}
+	legacyWaitFixture(t, s, continueEvent.ID)
 	waitB := waitIntentForEvent(t, s, continueEvent.ID)
 	callbackB := finishDeliveryPolicyRun(t, s, runB)
 	if _, _, err := s.ContinueTask(ctx, callbackB.ID, "continue-from-callback", task.ID, task.Revision, "Continue at the same revision", false); err != nil {
@@ -191,9 +187,7 @@ func TestDeliveryPolicyWaitRetryIsSuppressedAfterSameRevisionRunChange(t *testin
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Minute)
 	user, task, _, callbackA := startDeliveryPolicyTask(t, s, 1, "Wait Retry")
-	if queued, err := s.QueueWaitingReply(ctx, user.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply()=(%v,%v), want true", queued, err)
-	}
+	legacyWaitFixture(t, s, user.ID)
 	waitID := waitIntentForEvent(t, s, user.ID)
 	forcePolicyDeliveryDue(t, s, user.ID, waitID)
 	claimed, err := s.ClaimDelivery(ctx)
@@ -354,7 +348,7 @@ func TestDeliveryPolicyStopDuringSendingSuppressesReturnedRetry(t *testing.T) {
 	}
 }
 
-func TestQueueWaitingReplyRefreshesStopGateAndKeepsGroupReferences(t *testing.T) {
+func TestLegacyWaitRefreshesStopGateAndKeepsGroupReferences(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Minute)
 	_, task, run, callback := startDeliveryPolicyTask(t, s, 1, "Stopped Wait Notice")
@@ -368,9 +362,7 @@ func TestQueueWaitingReplyRefreshesStopGateAndKeepsGroupReferences(t *testing.T)
 	}
 	finishEvent(t, s, stopEvent, personal.TurnOutput{Silent: true}, nil)
 	continueEvent, _ := continueDeliveryPolicyTask(t, s, 3, task)
-	if queued, err := s.QueueWaitingReply(ctx, continueEvent.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply()=(%v,%v), want true", queued, err)
-	}
+	legacyWaitFixture(t, s, continueEvent.ID)
 	waitID := waitIntentForEvent(t, s, continueEvent.ID)
 	snapshot, err := s.Diagnostic(ctx, 0, task.ID)
 	if err != nil {

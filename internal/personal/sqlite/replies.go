@@ -206,7 +206,7 @@ func mergeReplyGroupsTx(ctx context.Context, tx *sql.Tx, firstID, secondID int64
 			continue
 		}
 		if wait.status == "pending" {
-			if err := suppressPendingReplyWaitTx(ctx, tx, wait.outboxID); err != nil {
+			if err := suppressPendingReplyWaitTx(ctx, tx, wait.outboxID, deliverySuppressionWaitSuperseded); err != nil {
 				return 0, err
 			}
 		}

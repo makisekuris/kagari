@@ -2,7 +2,7 @@ package sqlite
 
 import (
 	"context"
-	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,32 +10,169 @@ import (
 	"kagari/internal/personal"
 )
 
-func TestQueueWaitingReplyThresholdAndRestart(t *testing.T) {
+func TestRecoverRetiresPendingLegacyWaitingNotices(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "replies.db")
-	s := testStore(t, path, time.Minute)
-	event := openUserEvent(t, s, 1, 1, "帮我处理这件事")
-	due := event.CreatedAt.Add(30 * time.Second)
-	if queued, err := s.QueueWaitingReply(ctx, due.Add(-time.Second), 30*time.Second); err != nil || queued {
-		t.Fatalf("before delay QueueWaitingReply() = (%v,%v), want false", queued, err)
+	s := testStore(t, ":memory:", time.Minute)
+	type notice struct {
+		name       string
+		eventID    int64
+		deliveryID int64
+		outboxID   int64
 	}
-	if queued, err := s.QueueWaitingReply(ctx, due, 30*time.Second); err != nil || !queued {
-		t.Fatalf("at delay QueueWaitingReply() = (%v,%v), want true", queued, err)
+	notices := make(map[string]notice)
+	newNotice := func(name string, updateID int64) notice {
+		t.Helper()
+		event := openUserEvent(t, s, updateID, updateID, name)
+		deliveryID := legacyWaitFixture(t, s, event.ID)
+		var outboxID int64
+		if err := s.db.QueryRowContext(ctx, `SELECT wait_outbox_id FROM personal_reply_groups WHERE id=?`, event.ID).Scan(&outboxID); err != nil {
+			t.Fatal(err)
+		}
+		return notice{name: name, eventID: event.ID, deliveryID: deliveryID, outboxID: outboxID}
 	}
-	var message string
-	if err := s.db.QueryRowContext(ctx, `SELECT text FROM personal_outbox WHERE event_id=?`, event.ID).Scan(&message); err != nil || message != "我正在处理这条消息，稍后回复。" {
-		t.Fatalf("waiting message = %q, %v", message, err)
-	}
-	if err := s.Close(); err != nil {
+
+	notices["pending"] = newNotice("pending legacy wait", 1)
+	if _, err := s.db.ExecContext(ctx, `UPDATE personal_outbox SET next_attempt_at=? WHERE id=?`, timestamp(time.Now().Add(time.Hour)), notices["pending"].outboxID); err != nil {
 		t.Fatal(err)
 	}
-	s = testStore(t, path, time.Minute)
-	if queued, err := s.QueueWaitingReply(ctx, due.Add(time.Minute), 30*time.Second); err != nil || queued {
-		t.Fatalf("after restart QueueWaitingReply() = (%v,%v), want false", queued, err)
+
+	notices["retry"] = newNotice("retrying legacy wait", 2)
+	claimed, err := s.ClaimDelivery(ctx)
+	if err != nil || claimed == nil || claimed.ID != notices["retry"].outboxID {
+		t.Fatalf("retry ClaimDelivery()=(%+v,%v), want outbox %d", claimed, err, notices["retry"].outboxID)
 	}
-	var reminders int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE event_id=?`, event.ID).Scan(&reminders); err != nil || reminders != 1 {
-		t.Fatalf("reminder count after restart = %d, %v", reminders, err)
+	if err := s.UpdateDelivery(ctx, claimed.ID, "waiting", channel.Receipt{}, "rate limited", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	notices["sending"] = newNotice("sending legacy wait", 3)
+	claimed, err = s.ClaimDelivery(ctx)
+	if err != nil || claimed == nil || claimed.ID != notices["sending"].outboxID {
+		t.Fatalf("sending ClaimDelivery()=(%+v,%v), want outbox %d", claimed, err, notices["sending"].outboxID)
+	}
+
+	notices["sent"] = newNotice("sent legacy wait", 4)
+	claimed, err = s.ClaimDelivery(ctx)
+	if err != nil || claimed == nil || claimed.ID != notices["sent"].outboxID {
+		t.Fatalf("sent ClaimDelivery()=(%+v,%v), want outbox %d", claimed, err, notices["sent"].outboxID)
+	}
+	sentReceipt := channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner", MessageID: "legacy-sent"}
+	if err := s.UpdateDelivery(ctx, claimed.ID, "sent", sentReceipt, "", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+
+	notices["uncertain"] = newNotice("uncertain legacy wait", 5)
+	claimed, err = s.ClaimDelivery(ctx)
+	if err != nil || claimed == nil || claimed.ID != notices["uncertain"].outboxID {
+		t.Fatalf("uncertain ClaimDelivery()=(%+v,%v), want outbox %d", claimed, err, notices["uncertain"].outboxID)
+	}
+	uncertainReceipt := channel.Receipt{Channel: "telegram", Account: "test-bot", Conversation: "test-owner"}
+	if err := s.UpdateDelivery(ctx, claimed.ID, "uncertain", uncertainReceipt, "remote outcome unknown", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+
+	resultEvent := openUserEvent(t, s, 6, 6, "ordinary result")
+	finishEvent(t, s, resultEvent, personal.TurnOutput{Text: "Unrelated result", Attachments: []string{}}, []string{"Unrelated result"})
+	var resultDeliveryID int64
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM personal_delivery_intents WHERE event_id=? AND purpose='result'`, resultEvent.ID).Scan(&resultDeliveryID); err != nil {
+		t.Fatal(err)
+	}
+
+	statusEvent := openUserEvent(t, s, 7, 7, "ordinary status")
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusIntent, _, err := s.appendSupplementalDeliveryTx(ctx, tx, statusEvent.ID, personal.SupplementalReply{
+		Purpose: personal.DeliveryStatus,
+		Draft:   personal.DeliveryDraft{Text: "Unrelated status", Attachments: []string{}},
+		Chunks:  []string{"Unrelated status"},
+	})
+	if err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var statusOutboxID int64
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM personal_outbox WHERE delivery_id=?`, statusIntent.ID).Scan(&statusOutboxID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"pending", "retry"} {
+		item := notices[name]
+		var outboxStatus, outboxDetail, intentState, intentDetail string
+		if err := s.db.QueryRowContext(ctx, `SELECT o.status,o.detail,i.state,i.detail FROM personal_outbox o
+			JOIN personal_delivery_intents i ON i.id=o.delivery_id WHERE o.id=?`, item.outboxID).
+			Scan(&outboxStatus, &outboxDetail, &intentState, &intentDetail); err != nil {
+			t.Fatal(err)
+		}
+		if outboxStatus != "suppressed" || !strings.Contains(outboxDetail, deliverySuppressionWaitRetired) ||
+			intentState != string(personal.DeliveryIntentSuppressed) || !strings.Contains(intentDetail, deliverySuppressionWaitRetired) {
+			t.Fatalf("%s legacy wait after Recover: outbox=%q/%q intent=%q/%q", name, outboxStatus, outboxDetail, intentState, intentDetail)
+		}
+	}
+
+	for name, wantStatus := range map[string]string{"sending": "uncertain", "sent": "sent", "uncertain": "uncertain"} {
+		item := notices[name]
+		var status, detail, receiptChannel, receiptAccount, receiptConversation, receiptMessageID string
+		if err := s.db.QueryRowContext(ctx, `SELECT status,detail,receipt_channel,receipt_account,receipt_conversation,receipt_message_id
+			FROM personal_outbox WHERE id=?`, item.outboxID).
+			Scan(&status, &detail, &receiptChannel, &receiptAccount, &receiptConversation, &receiptMessageID); err != nil {
+			t.Fatal(err)
+		}
+		if status != wantStatus {
+			t.Fatalf("%s legacy wait status=%q, want %q", name, status, wantStatus)
+		}
+		if name == "sending" && detail != "outcome unknown after restart" {
+			t.Fatalf("recovered sending wait detail=%q, want uncertain outcome", detail)
+		}
+		if name == "sent" && (receiptChannel != sentReceipt.Channel || receiptAccount != sentReceipt.Account ||
+			receiptConversation != sentReceipt.Conversation || receiptMessageID != sentReceipt.MessageID) {
+			t.Fatalf("sent receipt after Recover=(%q,%q,%q,%q), want %+v", receiptChannel, receiptAccount, receiptConversation, receiptMessageID, sentReceipt)
+		}
+		if name == "uncertain" && (receiptChannel != uncertainReceipt.Channel || receiptAccount != uncertainReceipt.Account ||
+			receiptConversation != uncertainReceipt.Conversation || receiptMessageID != "") {
+			t.Fatalf("uncertain receipt after Recover=(%q,%q,%q,%q), want %+v", receiptChannel, receiptAccount, receiptConversation, receiptMessageID, uncertainReceipt)
+		}
+	}
+
+	for _, item := range notices {
+		var waitNotified int
+		var outboxID, historyID int64
+		if err := s.db.QueryRowContext(ctx, `SELECT wait_notified,wait_outbox_id,wait_history_id FROM personal_reply_groups WHERE id=?`, item.eventID).
+			Scan(&waitNotified, &outboxID, &historyID); err != nil {
+			t.Fatal(err)
+		}
+		var historyDelivery int64
+		var historyText string
+		if err := s.db.QueryRowContext(ctx, `SELECT delivery_id,text FROM personal_history WHERE id=?`, historyID).Scan(&historyDelivery, &historyText); err != nil {
+			t.Fatal(err)
+		}
+		if waitNotified != 1 || outboxID != item.outboxID || historyDelivery != item.deliveryID || historyText != "Legacy automatic waiting notice" {
+			t.Fatalf("%s legacy wait references/history changed: notified=%d outbox=%d history=%d/%d text=%q", item.name, waitNotified, outboxID, historyDelivery, item.deliveryID, historyText)
+		}
+	}
+
+	for label, outboxID := range map[string]int64{"unrelated result": func() int64 {
+		var id int64
+		if err := s.db.QueryRowContext(ctx, `SELECT id FROM personal_outbox WHERE delivery_id=?`, resultDeliveryID).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}(), "unrelated status": statusOutboxID} {
+		var status string
+		if err := s.db.QueryRowContext(ctx, `SELECT status FROM personal_outbox WHERE id=?`, outboxID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "pending" {
+			t.Fatalf("%s outbox status=%q after Recover, want pending", label, status)
+		}
 	}
 }
 
@@ -65,72 +202,11 @@ func TestCancelledTaskContinuationStartsNewReply(t *testing.T) {
 	}
 }
 
-func TestQueueWaitingReplyOnlyHintsEarliestUnclassifiedInput(t *testing.T) {
-	ctx := context.Background()
-	s := testStore(t, ":memory:", time.Minute)
-	first := openUserEvent(t, s, 1, 1, "第一条")
-	secondID := acceptInput(t, s, "2", sourceInput("2", "第二条"))
-	now := first.CreatedAt.Add(time.Minute)
-	if queued, err := s.QueueWaitingReply(ctx, now, 30*time.Second); err != nil || !queued {
-		t.Fatalf("first QueueWaitingReply() = (%v,%v), want true", queued, err)
-	}
-	if queued, err := s.QueueWaitingReply(ctx, now.Add(time.Minute), 30*time.Second); err != nil || queued {
-		t.Fatalf("second QueueWaitingReply() = (%v,%v), want false", queued, err)
-	}
-	var reminders int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE event_id IN (?,?)`, first.ID, secondID).Scan(&reminders); err != nil || reminders != 1 {
-		t.Fatalf("reminder count = %d, %v", reminders, err)
-	}
-}
-
-func TestQueueWaitingReplyDescribesQueuedUnclassifiedInput(t *testing.T) {
-	ctx := context.Background()
-	s := testStore(t, ":memory:", time.Minute)
-	id := acceptInput(t, s, "1", sourceInput("1", "稍后处理"))
-	if queued, err := s.QueueWaitingReply(ctx, time.Now().Add(time.Minute), 30*time.Second); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
-	}
-	var message string
-	if err := s.db.QueryRowContext(ctx, `SELECT text FROM personal_outbox WHERE event_id=?`, id).Scan(&message); err != nil || message != "消息已收到，正在等候处理。" {
-		t.Fatalf("waiting message = %q, %v", message, err)
-	}
-}
-
-func TestQueueWaitingReplyUsesTaskState(t *testing.T) {
-	ctx := context.Background()
-	s := testStore(t, ":memory:", time.Minute)
-	event := openUserEvent(t, s, 1, 1, "请做一份研究")
-	task, _, err := s.CreateTask(ctx, event.ID, "create", "研究", personal.TaskInput{Goal: "核对材料"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := bindReplyTaskTx(ctx, tx, event.ID, task.ID); err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	if queued, err := s.QueueWaitingReply(ctx, time.Now(), 0); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
-	}
-	var message string
-	if err := s.db.QueryRowContext(ctx, `SELECT text FROM personal_outbox WHERE event_id=?`, event.ID).Scan(&message); err != nil || message != "「研究」已排队，有结果后我会继续回复。" {
-		t.Fatalf("waiting message = %q, %v", message, err)
-	}
-}
-
 func TestRecordReplySuppressesPendingWaitAndClosesGroup(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Minute)
 	event := openUserEvent(t, s, 1, 1, "帮我处理")
-	if queued, err := s.QueueWaitingReply(ctx, event.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
-	}
+	legacyWaitFixture(t, s, event.ID)
 	finishEvent(t, s, event, personal.TurnOutput{Text: "处理完成"}, []string{"处理完成"})
 	var deliveries, histories int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM personal_outbox WHERE event_id=?`, event.ID).Scan(&deliveries); err != nil || deliveries != 2 {
@@ -158,9 +234,7 @@ func TestRecordReplyKeepsSendingWait(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Minute)
 	event := openUserEvent(t, s, 1, 1, "帮我处理")
-	if queued, err := s.QueueWaitingReply(ctx, time.Now(), 0); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
-	}
+	legacyWaitFixture(t, s, event.ID)
 	waiting, err := s.ClaimDelivery(ctx)
 	if err != nil || waiting == nil {
 		t.Fatalf("ClaimDelivery() = (%+v,%v)", waiting, err)
@@ -200,11 +274,8 @@ func TestMergeReplyInputsKeepsOriginalEvents(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	for range 2 {
-		if queued, err := s.QueueWaitingReply(ctx, second.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-			t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
-		}
-	}
+	legacyWaitFixture(t, s, first.ID)
+	legacyWaitFixture(t, s, second.ID)
 	tx, err = s.db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -272,11 +343,8 @@ func TestMergeReplyGroupsKeepsSendingWaitForRetrySuppression(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	for range 2 {
-		if queued, err := s.QueueWaitingReply(ctx, time.Now(), 0); err != nil || !queued {
-			t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
-		}
-	}
+	legacyWaitFixture(t, s, first.ID)
+	legacyWaitFixture(t, s, second.ID)
 	firstWait, err := s.ClaimDelivery(ctx)
 	if err != nil || firstWait == nil || firstWait.EventID != first.ID {
 		t.Fatalf("first ClaimDelivery() = (%+v,%v)", firstWait, err)
@@ -390,9 +458,7 @@ func TestGetTaskReplyDoesNotKeepInquiryGroupOpen(t *testing.T) {
 			}
 			finishEvent(t, s, taskEvent, personal.TurnOutput{TaskID: task.ID, Silent: true}, nil)
 			if waitQueued {
-				if queued, err := s.QueueWaitingReply(ctx, taskEvent.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-					t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
-				}
+				legacyWaitFixture(t, s, taskEvent.ID)
 			}
 			inquiry := openUserEvent(t, s, 2, 2, "目前确认了什么？")
 			answer := "已确认资料中的关键进展，我还会继续核对。"
@@ -424,8 +490,6 @@ func TestGetTaskReplyDoesNotKeepInquiryGroupOpen(t *testing.T) {
 				if waits != 1 || histories != 1 || suppressed != 1 {
 					t.Fatalf("pending wait after progress reply: outbox=%d history=%d", waits, histories)
 				}
-			} else if queued, err := s.QueueWaitingReply(ctx, taskEvent.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || queued {
-				t.Fatalf("QueueWaitingReply() after progress reply = (%v,%v), want false", queued, err)
 			}
 			cancelEvent := openUserEvent(t, s, 3, 3, "取消研究")
 			if _, err := s.CancelTask(ctx, cancelEvent.ID, task.ID, task.Revision); err != nil {
@@ -489,9 +553,7 @@ func TestSuppressStaleWaitAfterTaskStops(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if queued, err := s.QueueWaitingReply(ctx, event.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
-	}
+	legacyWaitFixture(t, s, event.ID)
 	if _, err := s.db.ExecContext(ctx, `UPDATE personal_tasks SET status='cancelled' WHERE id=?`, task.ID); err != nil {
 		t.Fatal(err)
 	}

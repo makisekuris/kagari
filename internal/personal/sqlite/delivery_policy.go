@@ -11,6 +11,7 @@ import (
 
 const (
 	deliverySuppressionWaitSuperseded = "reply_wait_superseded"
+	deliverySuppressionWaitRetired    = "automatic_reply_wait_retired"
 	deliverySuppressionTaskRevision   = "task_revision_changed"
 	deliverySuppressionTaskRun        = "task_run_changed"
 	deliverySuppressionTaskCancelled  = "task_cancelled_status"

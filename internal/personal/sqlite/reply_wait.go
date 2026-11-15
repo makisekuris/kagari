@@ -4,12 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
-	"time"
 
-	"kagari/internal/channel"
 	"kagari/internal/personal"
-	"kagari/internal/personal/internal/textclip"
 )
 
 const replySchema = `
@@ -37,7 +33,7 @@ CREATE TABLE IF NOT EXISTS personal_reply_tasks (
 CREATE INDEX IF NOT EXISTS personal_reply_tasks_task ON personal_reply_tasks(task_id,group_id);
 `
 
-func suppressPendingReplyWaitTx(ctx context.Context, tx *sql.Tx, outboxID int64) error {
+func suppressPendingReplyWaitTx(ctx context.Context, tx *sql.Tx, outboxID int64, reason string) error {
 	var status string
 	var deliveryID int64
 	err := tx.QueryRowContext(ctx, `SELECT status,delivery_id FROM personal_outbox WHERE id=?`, outboxID).Scan(&status, &deliveryID)
@@ -50,7 +46,7 @@ func suppressPendingReplyWaitTx(ctx context.Context, tx *sql.Tx, outboxID int64)
 	if status != "pending" {
 		return nil
 	}
-	return suppressDeliveryTx(ctx, tx, deliveryID, deliverySuppressionWaitSuperseded)
+	return suppressDeliveryTx(ctx, tx, deliveryID, reason)
 }
 
 func (s *Store) CanDeferReply(ctx context.Context, eventID int64) (bool, error) {
@@ -78,166 +74,35 @@ func (s *Store) CanDeferReply(ctx context.Context, eventID int64) (bool, error) 
 	return allowed, err
 }
 
-func (s *Store) QueueWaitingReply(ctx context.Context, now time.Time, delay time.Duration) (bool, error) {
-	if delay < 0 {
-		return false, errors.New("personal: reply wait delay cannot be negative")
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+func suppressRetiredWaitingRepliesTx(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT g.wait_outbox_id FROM personal_reply_groups g
+		JOIN personal_outbox d ON d.id=g.wait_outbox_id
+		WHERE d.status='pending' ORDER BY g.wait_outbox_id`)
 	if err != nil {
-		return false, err
+		return err
 	}
-	defer tx.Rollback()
-	cutoff := timestamp(now.Add(-delay).UTC())
-	rows, err := tx.QueryContext(ctx, `SELECT g.id,e.status,e.channel,e.account,e.sender,
-		COUNT(rt.task_id),
-		SUM(CASE WHEN t.status='queued' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN t.status='running' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN t.status='awaiting_review' THEN 1 ELSE 0 END)
-		FROM personal_reply_groups g JOIN personal_events e ON e.id=g.id
-		LEFT JOIN personal_reply_tasks rt ON rt.group_id=g.id
-		LEFT JOIN personal_tasks t ON t.id=rt.task_id
-		WHERE g.created_at<=? AND g.wait_notified=0 AND g.has_content=0 AND g.closed=0 AND e.kind='user'
-		GROUP BY g.id,e.status,e.channel,e.account,e.sender ORDER BY g.created_at,g.id`, cutoff)
-	if err != nil {
-		return false, err
-	}
-	type candidate struct {
-		id                                 int64
-		eventStatus                        personal.EventStatus
-		channel, account, sender           string
-		taskCount, queued, running, review int
-	}
-	var candidates []candidate
+	var pending []int64
 	for rows.Next() {
-		var c candidate
-		var taskCount, queued, running, review sql.NullInt64
-		if err := rows.Scan(&c.id, &c.eventStatus, &c.channel, &c.account, &c.sender, &taskCount, &queued, &running, &review); err != nil {
+		var outboxID int64
+		if err := rows.Scan(&outboxID); err != nil {
 			rows.Close()
-			return false, err
+			return err
 		}
-		c.taskCount, c.queued, c.running, c.review = int(taskCount.Int64), int(queued.Int64), int(running.Int64), int(review.Int64)
-		candidates = append(candidates, c)
+		pending = append(pending, outboxID)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return false, err
+		return err
 	}
 	if err := rows.Close(); err != nil {
-		return false, err
+		return err
 	}
-	for _, candidate := range candidates {
-		message := ""
-		if candidate.taskCount > 0 {
-			switch {
-			case candidate.running > 0:
-				message = "任务正在处理，完成后我会继续回复。"
-			case candidate.queued > 0:
-				message = "任务已排队，有结果后我会继续回复。"
-			case candidate.review > 0:
-				message = "任务正在整理阶段结果，稍后我会继续回复。"
-			default:
-				continue
-			}
-			if candidate.taskCount == 1 {
-				var title string
-				if err := tx.QueryRowContext(ctx, `SELECT t.title FROM personal_reply_tasks rt
-					JOIN personal_tasks t ON t.id=rt.task_id WHERE rt.group_id=?`, candidate.id).Scan(&title); err != nil {
-					return false, err
-				}
-				message = "「" + textclip.Excerpt(title, 80) + "」" + strings.TrimPrefix(message, "任务")
-			}
-		} else {
-			if candidate.eventStatus != personal.EventQueued && candidate.eventStatus != personal.EventRunning {
-				continue
-			}
-			var earlier int
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
-				SELECT 1 FROM personal_reply_groups older
-				JOIN personal_events oe ON oe.id=older.id
-				WHERE older.id<>? AND older.created_at<=? AND older.closed=0 AND older.has_content=0
-				AND oe.kind='user' AND oe.status IN ('queued','running')
-				AND oe.channel=? AND oe.account=? AND oe.sender=?
-				AND NOT EXISTS(SELECT 1 FROM personal_reply_tasks ort WHERE ort.group_id=older.id)
-				AND (older.created_at < (SELECT created_at FROM personal_reply_groups WHERE id=?)
-					OR (older.created_at = (SELECT created_at FROM personal_reply_groups WHERE id=?) AND older.id < ?))
-			)`, candidate.id, cutoff, candidate.channel, candidate.account, candidate.sender, candidate.id, candidate.id, candidate.id).Scan(&earlier); err != nil {
-				return false, err
-			}
-			if earlier != 0 {
-				continue
-			}
-			if candidate.eventStatus == personal.EventQueued {
-				message = "消息已收到，正在等候处理。"
-			} else {
-				message = "我正在处理这条消息，稍后回复。"
-			}
+	for _, outboxID := range pending {
+		if err := suppressPendingReplyWaitTx(ctx, tx, outboxID, deliverySuppressionWaitRetired); err != nil {
+			return err
 		}
-		scopes := make([]personal.DeliveryScope, 0, candidate.taskCount)
-		if candidate.taskCount > 0 {
-			taskRows, err := tx.QueryContext(ctx, `SELECT t.id,t.revision,COALESCE((
-				SELECT r.id FROM personal_runs r WHERE r.task_id=t.id AND r.revision=t.revision AND r.kind='task' ORDER BY r.id DESC LIMIT 1
-			),0) FROM personal_reply_tasks rt JOIN personal_tasks t ON t.id=rt.task_id
-				WHERE rt.group_id=? ORDER BY t.id`, candidate.id)
-			if err != nil {
-				return false, err
-			}
-			for taskRows.Next() {
-				var scope personal.DeliveryScope
-				if err := taskRows.Scan(&scope.TaskID, &scope.Revision, &scope.RunID); err != nil {
-					taskRows.Close()
-					return false, err
-				}
-				scopes = append(scopes, scope)
-			}
-			if err := taskRows.Err(); err != nil {
-				taskRows.Close()
-				return false, err
-			}
-			if err := taskRows.Close(); err != nil {
-				return false, err
-			}
-		}
-		intent, err := insertDeliveryIntentTx(ctx, tx, deliveryIntentInsert{
-			eventID: candidate.id, purpose: personal.DeliveryStatus,
-			draft: personal.DeliveryDraft{Text: message, Attachments: []string{}}, scopes: scopes,
-		}, now)
-		if err != nil {
-			return false, err
-		}
-		if _, err := appendDeliveryPartsTx(ctx, tx, candidate.id, intent.ID, message, []channel.Attachment{}, []string{message}, 0, 0); err != nil {
-			return false, err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE personal_outbox SET next_attempt_at=? WHERE delivery_id=?`, timestamp(now.UTC()), intent.ID); err != nil {
-			return false, err
-		}
-		if err := updateDeliveryIntentRenderedTx(ctx, tx, intent.ID, ""); err != nil {
-			return false, err
-		}
-		var historyID, outboxID int64
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM personal_history WHERE delivery_id=?`, intent.ID).Scan(&historyID); err != nil {
-			return false, err
-		}
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM personal_outbox WHERE delivery_id=? ORDER BY delivery_part LIMIT 1`, intent.ID).Scan(&outboxID); err != nil {
-			return false, err
-		}
-		updated, err := tx.ExecContext(ctx, `UPDATE personal_reply_groups SET wait_notified=1,wait_outbox_id=?,wait_history_id=? WHERE id=? AND wait_notified=0 AND has_content=0 AND closed=0`, outboxID, historyID, candidate.id)
-		if err != nil {
-			return false, err
-		}
-		if changed, err := updated.RowsAffected(); err != nil {
-			return false, err
-		} else if changed != 1 {
-			return false, nil
-		}
-		if err := refreshDeliveryIntentValidityTx(ctx, tx, intent.ID); err != nil {
-			return false, err
-		}
-		if err := tx.Commit(); err != nil {
-			return false, err
-		}
-		return true, nil
 	}
-	return false, nil
+	return nil
 }
 
 // suppressStaleWaitRepliesTx leaves sending and settled deliveries intact.
@@ -269,7 +134,7 @@ func suppressStaleWaitRepliesTx(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	for _, outboxID := range stale {
-		if err := suppressPendingReplyWaitTx(ctx, tx, outboxID); err != nil {
+		if err := suppressPendingReplyWaitTx(ctx, tx, outboxID, deliverySuppressionWaitSuperseded); err != nil {
 			return err
 		}
 	}

@@ -132,9 +132,9 @@ make run
 以后回答请简洁一些，但保留关键依据。
 ```
 
-只发送网页链接时，Agent 会先做范围有限的初步阅读，再回复简短理解、判断和依据。成功入队本身不发确认消息；约 30 秒仍无实质回应时补一次等待提示。相关的连续链接可以合并阅读，后补材料沿用当前任务；需要补充信息、执行失败和最终结果仍会通知。普通阅读回复默认不显示 Task/Run 编号，可引用消息或用任务内容继续追问。
+后台任务成功入队后默认安静等待结果，不发送统一回执或定时等待提示。如果能根据用户输入给出具体的初步判断，可以先回复这部分分析。只发送网页链接时，Agent 会先做范围有限的初步阅读，再回复简短理解、判断和依据。相关的连续链接可以合并阅读，后补材料沿用当前任务；需要补充信息、执行失败和最终结果仍会通知。普通阅读回复默认不显示 Task/Run 编号，可引用消息或用任务内容继续追问。
 
-Sending a bare link starts a bounded first read, followed by a concise interpretation and supporting evidence. Queuing alone produces no receipt; after about 30 seconds without a substantive reply, the service adds one waiting notice. Related links can be read together, and later material can join the existing task. Required input, failures, and final results still receive replies. Ordinary reading replies omit Task/Run IDs; quote a message or describe the work to follow up.
+Queued background work stays silent until results are available, unless the assistant can give a concrete initial analysis based on the user's input. There are no generic receipts or timed waiting notices. Sending a bare link starts a bounded first read, followed by a concise interpretation and supporting evidence. Related links can be read together, and later material can join the existing task. Required input, failures, and final results still receive replies. Ordinary reading replies omit Task/Run IDs; quote a message or describe the work to follow up.
 
 ## 配置 / Configuration
 

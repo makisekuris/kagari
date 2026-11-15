@@ -1,22 +1,14 @@
 package service
 
 import (
-	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"kagari/internal/domain"
 	"kagari/internal/personal"
 	"kagari/internal/personal/internal/textclip"
 	"kagari/internal/reader"
 )
-
-const replyWaitDelay = 30 * time.Second
-
-func (r *Runtime) waitingReply(ctx context.Context) (bool, error) {
-	return r.Store.QueueWaitingReply(ctx, time.Now(), replyWaitDelay)
-}
 
 func taskBudgetText(task *personal.Task) string {
 	return fmt.Sprintf("「%s」本轮执行时间已用完。已有成果已保存，需要你授权后才能继续。\n\n%s", task.Title, textclip.Excerpt(task.Summary, 6000))

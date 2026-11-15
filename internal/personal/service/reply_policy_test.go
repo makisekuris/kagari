@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"kagari/internal/channel"
 	"kagari/internal/personal"
 	"kagari/internal/personal/internal/testkit"
 )
@@ -18,6 +19,69 @@ func policyResponse(text string, kind personal.ReplyKind) testkit.Response {
 		Attachments []string           `json:"attachments"`
 	}{Text: text, ReplyKind: kind, Attachments: []string{}})
 	return testkit.ResponseText(string(raw))
+}
+
+func TestQueuedTaskRepliesWithInitialAnalysisOrWaitsForResult(t *testing.T) {
+	const analysis = "你要求离线使用，因此部署是否依赖远程服务会直接影响这个方案能否采用。"
+	for _, tc := range []struct {
+		name string
+		text string
+		kind personal.ReplyKind
+	}{
+		{name: "receipt", text: "已安排分析，稍后给你结果。", kind: personal.ReplyReceipt},
+		{name: "silent", kind: personal.ReplySilent},
+		{name: "initial analysis", text: analysis, kind: personal.ReplyContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := testkit.Store(t, ":memory:", time.Hour)
+			r := testRuntime(s)
+			fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+				testkit.ResponseTool("create_task", map[string]string{"title": "部署方案核对", "goal": "Check whether the supplied deployment supports offline use."}, "create"),
+				policyResponse(tc.text, tc.kind),
+				testkit.ResponseTool("settle_task", map[string]any{"task_id": 1, "expected_revision": 1, "status": personal.TaskCompleted, "summary": "无法完全离线使用。", "delivery": personal.DeliveryDraft{Text: "这个方案依赖远程服务，无法完全离线使用。", Attachments: []string{}}}, "settle"),
+				policyResponse("", personal.ReplySilent),
+			}}
+			r.Think = testMainAgent(t, fixture, s).Think
+			testkit.AcceptInput(t, s, "1", testkit.SourceInput("1", "我需要离线使用，请分析这个方案的部署限制：https://example.com/deploy"))
+			if worked, err := r.turn(ctx); err != nil || !worked {
+				t.Fatalf("initial turn=%v %v", worked, err)
+			}
+			initial, err := s.ClaimDelivery(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.kind == personal.ReplyContent {
+				if initial == nil || initial.Text != analysis {
+					t.Fatalf("initial analysis lost: %+v", initial)
+				}
+				if err := s.UpdateDelivery(ctx, initial.ID, "sent", channel.Receipt{MessageID: "analysis"}, "", time.Time{}); err != nil {
+					t.Fatal(err)
+				}
+			} else if initial != nil {
+				t.Fatalf("queued task sent a mechanical reply: %+v", initial)
+			}
+			if err := s.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if extra, err := s.ClaimDelivery(ctx); err != nil || extra != nil {
+				t.Fatalf("recovery produced an extra status reply: %+v %v", extra, err)
+			}
+			r.Execute = func(context.Context, personal.Run, func(string) error) (personal.StageResult, error) {
+				return personal.StageResult{Summary: "这个方案依赖远程服务，无法完全离线使用。"}, nil
+			}
+			if worked, err := r.task(ctx); err != nil || !worked {
+				t.Fatalf("task=%v %v", worked, err)
+			}
+			if worked, err := r.turn(ctx); err != nil || !worked {
+				t.Fatalf("final turn=%v %v", worked, err)
+			}
+			final, err := s.ClaimDelivery(ctx)
+			if err != nil || final == nil || !strings.Contains(final.Text, "无法完全离线使用") {
+				t.Fatalf("final result lost: %+v %v", final, err)
+			}
+		})
+	}
 }
 
 func TestRuntimeSuppressesMisclassifiedQueueReceipt(t *testing.T) {

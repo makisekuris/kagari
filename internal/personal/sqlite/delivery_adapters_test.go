@@ -11,7 +11,7 @@ import (
 	"kagari/internal/personal"
 )
 
-func TestQueueWaitingReplyDeliveryScopesAllLinkedTasks(t *testing.T) {
+func TestLegacyWaitDeliveryScopesAllLinkedTasks(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t, ":memory:", time.Minute)
 	event := openUserEvent(t, s, 1, 1, "请同时处理两项")
@@ -24,9 +24,7 @@ func TestQueueWaitingReplyDeliveryScopesAllLinkedTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	finishEvent(t, s, event, personal.TurnOutput{Silent: true}, nil)
-	if queued, err := s.QueueWaitingReply(ctx, event.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
-	}
+	legacyWaitFixture(t, s, event.ID)
 
 	var deliveryID int64
 	var purpose personal.DeliveryPurpose
@@ -36,7 +34,7 @@ func TestQueueWaitingReplyDeliveryScopesAllLinkedTasks(t *testing.T) {
 		JOIN personal_outbox d ON d.delivery_id=i.id WHERE d.event_id=?`, event.ID).Scan(&deliveryID, &purpose, &state, &draft); err != nil {
 		t.Fatal(err)
 	}
-	if purpose != personal.DeliveryStatus || state != personal.DeliveryIntentRendered || draft != "任务已排队，有结果后我会继续回复。" {
+	if purpose != personal.DeliveryStatus || state != personal.DeliveryIntentRendered || draft != "Legacy automatic waiting notice" {
 		t.Fatalf("wait intent = (%q,%q,%q), want rendered status draft", purpose, state, draft)
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT task_id,revision,COALESCE(run_id,0) FROM personal_delivery_scopes WHERE delivery_id=? ORDER BY task_id`, deliveryID)
@@ -86,9 +84,7 @@ func TestPendingWaitSuppressionPreservesDeliveryChildrenAndStartedWait(t *testin
 				t.Fatal(err)
 			}
 			finishEvent(t, s, event, personal.TurnOutput{Silent: true}, nil)
-			if queued, err := s.QueueWaitingReply(ctx, event.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-				t.Fatalf("QueueWaitingReply() = (%v,%v), want true", queued, err)
-			}
+			legacyWaitFixture(t, s, event.ID)
 			var deliveryID, outboxID int64
 			if err := s.db.QueryRowContext(ctx, `SELECT delivery_id,id FROM personal_outbox WHERE event_id=?`, event.ID).Scan(&deliveryID, &outboxID); err != nil {
 				t.Fatal(err)

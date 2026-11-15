@@ -106,9 +106,7 @@ func TestSuppressedStaleCallbackDoesNotAffectNewReplyGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	finishEvent(t, s, revisionEvent, personal.TurnOutput{Silent: true}, nil)
-	if queued, err := s.QueueWaitingReply(ctx, revisionEvent.CreatedAt.Add(time.Minute), 30*time.Second); err != nil || !queued {
-		t.Fatalf("QueueWaitingReply()=(%v,%v), want the new revision wait", queued, err)
-	}
+	legacyWaitFixture(t, s, revisionEvent.ID)
 	var replyGroupID, waitOutboxID int64
 	if err := s.db.QueryRowContext(ctx, `SELECT group_id FROM personal_reply_inputs WHERE event_id=?`, revisionEvent.ID).Scan(&replyGroupID); err != nil {
 		t.Fatal(err)

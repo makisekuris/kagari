@@ -17,7 +17,6 @@ type Repository interface {
 	CompleteEvent(context.Context, int64, personal.TurnOutput, []string, ...personal.RenderedDelivery) error
 	EventDeliveries(context.Context, int64) ([]personal.DeliveryIntent, error)
 	CanDeferReply(context.Context, int64) (bool, error)
-	QueueWaitingReply(context.Context, time.Time, time.Duration) (bool, error)
 	PendingInputs(context.Context, int64) ([]personal.Event, error)
 	PendingTaskInputs(context.Context, int64) ([]personal.Event, error)
 	ReferencedTasks(context.Context, int64) ([]personal.Task, error)

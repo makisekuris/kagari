@@ -61,6 +61,15 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 			response.SupplementalReplyFailed = true
 			return response, nil
 		}
+		if required == "" && input.Event.Kind == personal.EventUser && tools.supplementalPurpose == personal.DeliveryStatus && (supplemental.ReplyKind == personal.ReplyReceipt || supplemental.ReplyKind == personal.ReplySilent) {
+			deferred, err := a.Store.CanDeferReply(ctx, input.Event.ID)
+			if err != nil {
+				return personalTurnResponse{}, err
+			}
+			if deferred {
+				return response, nil
+			}
+		}
 		if supplemental.ReplyKind == personal.ReplySilent || strings.TrimSpace(supplemental.Text) == "" && len(supplemental.Attachments) == 0 {
 			response.SupplementalReplyFailed = true
 			return response, nil
@@ -117,6 +126,15 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 		}
 		response.ReplyKind = personal.ReplyContent
 		return response, nil
+	}
+	if err == nil && input.Event.Kind == personal.EventUser && !tools.mustNotify && response.ReplyKind == personal.ReplyReceipt {
+		deferred, err := a.Store.CanDeferReply(ctx, input.Event.ID)
+		if err != nil {
+			return personalTurnResponse{}, err
+		}
+		if deferred {
+			return personalTurnResponse{ReplyKind: personal.ReplySilent}, nil
+		}
 	}
 	return response, err
 }
