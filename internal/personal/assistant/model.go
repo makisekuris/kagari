@@ -140,7 +140,11 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 	modelCtx, cancelModel := context.WithCancel(ctx)
 	// Some Responses endpoints suppress function calls when text.format also requires JSON Schema.
 	// Validate the final response locally; the memory-only reviewer can still use strict wire output.
-	output, err := consumePersonalEvents(runner.Query(modelCtx, string(encoded), adk.WithCallbacks(observer)))
+	var interim func(string) error
+	if input.Event.Kind == personal.EventUser && input.OnInterimReply != nil {
+		interim = func(text string) error { return input.OnInterimReply(ctx, text) }
+	}
+	output, err := consumePersonalEvents(runner.Query(modelCtx, string(encoded), adk.WithCallbacks(observer)), interim)
 	if err != nil {
 		cancelModel()
 	}
@@ -268,8 +272,9 @@ func taskOutcomeRequiresNotification(input personal.TurnInput) bool {
 	return false
 }
 
-func consumePersonalEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]]) (string, error) {
+func consumePersonalEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]], interim ...func(string) error) (string, error) {
 	var output string
+	interimSent := false
 	statusSeen := false
 	responseStatus := ""
 	for {
@@ -324,6 +329,25 @@ func consumePersonalEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.Ag
 					return "", errors.New("model response refused")
 				}
 				text.WriteString(block.AssistantGenText.Text)
+			}
+		}
+		if toolCall && !interimSent && len(interim) > 0 && interim[0] != nil {
+			body := strings.TrimSpace(text.String())
+			if strings.HasPrefix(body, "{") {
+				// A final-response envelope can also accompany a tool call.
+				// Only its user-facing content is eligible for early delivery.
+				response, err := decodePersonalTurnResponse(body)
+				if err != nil || response.ReplyKind != personal.ReplyContent || len(response.Attachments) > 0 {
+					body = ""
+				} else {
+					body = strings.TrimSpace(response.Text)
+				}
+			}
+			if body != "" {
+				if err := interim[0](body); err != nil {
+					return "", fmt.Errorf("publish interim reply: %w", err)
+				}
+				interimSent = true
 			}
 		}
 		if !toolCall {

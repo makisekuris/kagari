@@ -136,6 +136,10 @@ make run
 
 Queued background work stays silent until results are available, unless the assistant can give a concrete initial analysis based on the user's input. There are no generic receipts or timed waiting notices. Sending a bare link starts a bounded first read, followed by a concise interpretation and supporting evidence. Related links can be read together, and later material can join the existing task. Required input, failures, and final results still receive replies. Ordinary reading replies omit Task/Run IDs; quote a message or describe the work to follow up.
 
+模型在工具调用时自然输出的第一段可见正文会直接进入投递队列，后续执行和最终回复继续进行；没有这段正文时保持安静，不额外调用模型生成概览。内部推理不作为即时回复发送。
+
+The first visible text the model produces alongside a tool call is queued for delivery while execution continues toward the final reply. When there is no visible text, the assistant stays silent; it makes no extra model call to generate an overview. Internal reasoning is not sent as an interim reply.
+
 ## 配置 / Configuration
 
 所有命令都会读取**当前工作目录**的 `.env`，无需手动 `source`。配置优先级为 **系统环境变量 > .env > YAML > 默认值**；显式设置的空值也会覆盖低优先级配置。`-config` 只指定 YAML 路径，不改变 `.env` 查找目录。

@@ -5,18 +5,19 @@ import (
 )
 
 type TurnInput struct {
-	RepliedMessage    *Message             `json:"replied_message,omitempty"`
-	PendingInputs     []Event              `json:"pending_inputs,omitempty"`
-	PendingTaskInputs []Event              `json:"pending_task_inputs,omitempty"`
-	ReferencedTaskIDs []int64              `json:"referenced_task_ids,omitempty"`
-	ReplySuggestions  []ScheduleSuggestion `json:"reply_suggestions,omitempty"`
-	Suggestions       []ScheduleSuggestion `json:"suggestions,omitempty"`
-	Schedule          *ScheduleContext     `json:"schedule,omitempty"`
-	Event             Event                `json:"event"`
-	History           []Message            `json:"history"`
-	Tasks             []Task               `json:"tasks"`
-	Memories          []Memory             `json:"memories"`
-	CurrentRun        *Run                 `json:"current_run,omitempty"`
+	OnInterimReply    func(context.Context, string) error `json:"-"`
+	RepliedMessage    *Message                            `json:"replied_message,omitempty"`
+	PendingInputs     []Event                             `json:"pending_inputs,omitempty"`
+	PendingTaskInputs []Event                             `json:"pending_task_inputs,omitempty"`
+	ReferencedTaskIDs []int64                             `json:"referenced_task_ids,omitempty"`
+	ReplySuggestions  []ScheduleSuggestion                `json:"reply_suggestions,omitempty"`
+	Suggestions       []ScheduleSuggestion                `json:"suggestions,omitempty"`
+	Schedule          *ScheduleContext                    `json:"schedule,omitempty"`
+	Event             Event                               `json:"event"`
+	History           []Message                           `json:"history"`
+	Tasks             []Task                              `json:"tasks"`
+	Memories          []Memory                            `json:"memories"`
+	CurrentRun        *Run                                `json:"current_run,omitempty"`
 }
 
 type ReplyKind string

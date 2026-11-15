@@ -15,6 +15,7 @@ type Repository interface {
 	TaskCallbackState(context.Context, int64) (personal.TaskCallbackState, error)
 	History(context.Context, int64, int) ([]personal.Message, error)
 	CompleteEvent(context.Context, int64, personal.TurnOutput, []string, ...personal.RenderedDelivery) error
+	QueueInterimReply(context.Context, int64, string, []string) error
 	EventDeliveries(context.Context, int64) ([]personal.DeliveryIntent, error)
 	CanDeferReply(context.Context, int64) (bool, error)
 	PendingInputs(context.Context, int64) ([]personal.Event, error)

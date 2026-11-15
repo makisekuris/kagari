@@ -115,6 +115,11 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 			accountDone <- nil
 		}()
 	}
+	if event.Kind == personal.EventUser {
+		input.OnInterimReply = func(ctx context.Context, text string) error {
+			return r.queueInterimReply(ctx, *event, text)
+		}
+	}
 	output, thinkErr := r.Think(turnCtx, input)
 	cancel()
 	if task != nil {
