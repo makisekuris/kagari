@@ -17,7 +17,7 @@ import (
 func TestThinkDeliversVisibleToolTextAndContinuesWithoutExtraModelCall(t *testing.T) {
 	const initial = "你给出的两个条件分别影响部署方式和维护成本，需要分开比较。"
 	const final = "已有任务的目标同时包含部署限制和维护成本。"
-	first := testkit.ResponseText(initial)
+	first := testkit.ResponseText(`{"text":"` + initial + `","reply_kind":"content","attachments":[]}`)
 	first.Output = append(first.Output, testkit.ResponseTool("get_task", map[string]any{"task_id": 7}, "inspect").Output...)
 	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
 		first,
@@ -45,16 +45,25 @@ func TestThinkDeliversVisibleToolTextAndContinuesWithoutExtraModelCall(t *testin
 }
 
 func TestConsumePersonalEventsInterimReplySelection(t *testing.T) {
+	withinLimit := strings.Repeat("界", maxInterimReplyRunes)
+	overLimit := strings.Repeat("界", maxInterimReplyRunes+1)
+	longEnglishPlan := strings.Repeat("I will inspect the saved preferences before calling the memory tools. ", 5)
 	for _, tc := range []struct {
 		name string
 		text string
 		want []string
 	}{
-		{name: "natural text", text: "离线要求会影响方案选择。", want: []string{"离线要求会影响方案选择。"}},
+		{name: "natural text is ignored", text: "离线要求会影响方案选择。"},
+		{name: "long English tool plan is ignored", text: longEnglishPlan},
+		{name: "mixed text is ignored", text: "我先梳理一下条件。{" + `"text":"离线要求会影响方案选择。","reply_kind":"content","attachments":[]}`},
 		{name: "tool only"},
 		{name: "receipt envelope", text: `{"text":"已收到，稍后回复。","reply_kind":"receipt","attachments":[]}`},
 		{name: "silent envelope", text: `{"text":"内部进度","reply_kind":"silent","attachments":[]}`},
 		{name: "content envelope", text: `{"text":"离线要求会影响方案选择。","reply_kind":"content","attachments":[]}`, want: []string{"离线要求会影响方案选择。"}},
+		{name: "content at Unicode character limit", text: `{"text":"` + withinLimit + `","reply_kind":"content","attachments":[]}`, want: []string{withinLimit}},
+		{name: "content over Unicode character limit is ignored", text: `{"text":"` + overLimit + `","reply_kind":"content","attachments":[]}`},
+		{name: "content with attachment is ignored", text: `{"text":"离线要求会影响方案选择。","reply_kind":"content","attachments":["file-id"]}`},
+		{name: "malformed envelope is ignored", text: `{"text":"离线要求会影响方案选择。","reply_kind":"content","attachments":[]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			it, gen := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.AgenticMessage]]()
@@ -97,7 +106,7 @@ func TestConsumePersonalEventsStopsOnInterimPersistenceFailure(t *testing.T) {
 	gen.Send(adk.EventFromAgenticMessage(&schema.AgenticMessage{
 		Role: schema.AgenticRoleTypeAssistant,
 		ContentBlocks: []*schema.ContentBlock{
-			{AssistantGenText: &schema.AssistantGenText{Text: "部署条件需要分别核对。"}},
+			{AssistantGenText: &schema.AssistantGenText{Text: `{"text":"部署条件需要分别核对。","reply_kind":"content","attachments":[]}`}},
 			{FunctionToolCall: &schema.FunctionToolCall{Name: "get_task", Arguments: `{}`, CallID: "first"}},
 		},
 	}, nil, schema.AgenticRoleTypeAssistant))

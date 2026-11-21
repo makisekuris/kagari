@@ -3,11 +3,14 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/go-telegram/bot/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -34,6 +37,34 @@ func TestPersonalInputLogsCommittedIdentityAndDuplicate(t *testing.T) {
 	}
 	if second["outcome"] != "duplicate" || second["event_id"] != nil || second["payload"] != nil {
 		t.Fatalf("duplicate was logged as new input: %v", second)
+	}
+}
+
+func TestPollingLogsTransportFailureWithoutRequestURL(t *testing.T) {
+	core, observed := observer.New(zap.WarnLevel)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := zap.New(core, zap.Hooks(func(zapcore.Entry) error {
+		cancel()
+		return nil
+	}))
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, &net.DNSError{Name: "telegram.test", IsNotFound: true}
+	})
+	client, err := newPersonalClient(personalConfig(), &channelInboxFixture{}, newChannelFilesFixture(), log, "https://telegram.test", transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	entries := observed.FilterMessage("telegram.polling.failed").All()
+	if len(entries) != 1 {
+		t.Fatalf("expected one transport failure, got %d", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	if fields["reason"] != "DNS lookup failed" || fields["http_status"] != nil || fields["api_code"] != nil {
+		t.Fatalf("unexpected transport diagnostics: %v", fields)
 	}
 }
 

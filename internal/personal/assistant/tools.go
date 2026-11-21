@@ -29,6 +29,15 @@ type personalToolReply struct {
 	Control    *personal.DeliveryControlResult `json:"control,omitempty"`
 }
 
+type memoryCurrentAnswerReply struct {
+	OK           bool              `json:"ok"`
+	CurrentMatch bool              `json:"current_match"`
+	Tombstone    bool              `json:"tombstone,omitempty"`
+	Memory       *personal.Memory  `json:"memory,omitempty"`
+	Memories     []personal.Memory `json:"memories,omitempty"`
+	Error        string            `json:"error,omitempty"`
+}
+
 type createTaskArgs struct {
 	ActionID     string   `json:"action_id,omitempty" jsonschema:"description=Omit for a new operation. For corrections or retries of a failed operation reuse the returned action_id. Do not omit or change it; a different ID is a separate action and does not resolve the failure."`
 	SourceRunIDs []int64  `json:"source_run_ids,omitempty"`
@@ -84,6 +93,11 @@ type memorySearchArgs struct {
 	Query string `json:"query"`
 }
 
+type memoryCurrentAnswerArgs struct {
+	Query string `json:"query,omitempty" jsonschema:"description=Relevant words from the current direct question. Supply this unless an exact key alone is sufficient."`
+	Key   string `json:"key,omitempty" jsonschema:"description=Exact memory key when it is already known. Never invent a key."`
+}
+
 type memoryKeyArgs struct {
 	Key string `json:"key"`
 }
@@ -122,6 +136,9 @@ type personalTools struct {
 	callbackFailure       *taskActionFailure
 	controlDeliveries     []personal.DeliveryIntent
 	persistedControl      bool
+	currentMemoryMatched  bool
+	currentMemoryTried    bool
+	otherToolCalled       bool
 	supplementalWork      bool
 	supplementalTaskIDs   map[int64]struct{}
 	supplementalSchedules map[int64]struct{}
@@ -131,6 +148,18 @@ type personalTools struct {
 	taskActions           map[string]*taskActionState
 	taskActionOrder       []string
 	nextTaskActionID      uint64
+}
+
+func (p *personalTools) recordCurrentMemoryAnswer(matched bool) {
+	p.currentMemoryTried = true
+	p.currentMemoryMatched = p.currentMemoryMatched || matched
+}
+
+func (p *personalTools) currentMemoryAnswerReply(event personal.Event, required string) (string, bool) {
+	if !p.currentMemoryTried || p.currentMemoryMatched || p.otherToolCalled || event.Kind != personal.EventUser || required != "" {
+		return "", false
+	}
+	return "当前没有查到匹配的有效记忆。", true
 }
 
 func (p *personalTools) addScheduleID(id int64, changed bool) {
@@ -366,6 +395,13 @@ func (p *personalTools) build() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 	scheduled = append(scheduled, suggestions...)
+	if p.event.Kind == personal.EventUser {
+		reminders, err := p.reminderTools()
+		if err != nil {
+			return nil, err
+		}
+		scheduled = append(scheduled, reminders...)
+	}
 	inputs, err := p.inputTools()
 	if err != nil {
 		return nil, err

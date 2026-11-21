@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/cloudwego/eino/adk"
@@ -26,8 +27,9 @@ import (
 )
 
 const (
-	maxMemories    = 40
-	maxMemoryRunes = 1_500
+	maxMemories          = 40
+	maxMemoryRunes       = 1_500
+	maxInterimReplyRunes = 200
 )
 
 // MainAgent handles the owner's conversation and manages tasks, schedules and memory.
@@ -47,6 +49,7 @@ type personalTurnResponse struct {
 	Text                    string                      `json:"text"`
 	ReplyKind               personal.ReplyKind          `json:"reply_kind"`
 	Attachments             []string                    `json:"attachments"`
+	SkipReplyPresentation   bool                        `json:"-"`
 	SupplementalReply       *personal.SupplementalReply `json:"-"`
 	SupplementalReplyFailed bool                        `json:"-"`
 }
@@ -144,7 +147,11 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 	if input.Event.Kind == personal.EventUser && input.OnInterimReply != nil {
 		interim = func(text string) error { return input.OnInterimReply(ctx, text) }
 	}
-	output, err := consumePersonalEvents(runner.Query(modelCtx, string(encoded), adk.WithCallbacks(observer)), interim)
+	output, err := consumePersonalEventsWithToolObserver(runner.Query(modelCtx, string(encoded), adk.WithCallbacks(observer)), func(name string) {
+		if name != memoryCurrentAnswerToolName {
+			tools.otherToolCalled = true
+		}
+	}, interim)
 	if err != nil {
 		cancelModel()
 	}
@@ -218,7 +225,10 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 	if len(taskIDs) > 1 {
 		taskID = 0
 	}
-	return personal.TurnOutput{ScheduleID: scheduleID, Text: response.Text, TaskID: taskID, TaskIDs: taskIDs, RequiredFeedback: requiredFeedback, SupplementalReply: response.SupplementalReply, Purpose: purpose, Silent: !notify, Attachments: response.Attachments, ReplyKind: response.ReplyKind}, nil
+	return personal.TurnOutput{ScheduleID: scheduleID, Text: response.Text, TaskID: taskID, TaskIDs: taskIDs, RequiredFeedback: requiredFeedback, SupplementalReply: response.SupplementalReply,
+		CommittedActionsNeedReceipt: tools.persistedControl && response.SupplementalReplyFailed,
+		SkipReplyPresentation:       response.SkipReplyPresentation,
+		Purpose:                     purpose, Silent: !notify, Attachments: response.Attachments, ReplyKind: response.ReplyKind}, nil
 }
 
 func personalJSONOutputOption(name string, schema map[string]any) model.Option {
@@ -273,6 +283,10 @@ func taskOutcomeRequiresNotification(input personal.TurnInput) bool {
 }
 
 func consumePersonalEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]], interim ...func(string) error) (string, error) {
+	return consumePersonalEventsWithToolObserver(it, nil, interim...)
+}
+
+func consumePersonalEventsWithToolObserver(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]], observeTool func(string), interim ...func(string) error) (string, error) {
 	var output string
 	interimSent := false
 	statusSeen := false
@@ -323,6 +337,9 @@ func consumePersonalEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.Ag
 			}
 			if block.FunctionToolCall != nil {
 				toolCall = true
+				if observeTool != nil {
+					observeTool(block.FunctionToolCall.Name)
+				}
 			}
 			if block.AssistantGenText != nil {
 				if block.AssistantGenText.OpenAIExtension != nil && block.AssistantGenText.OpenAIExtension.Refusal != nil {
@@ -332,17 +349,7 @@ func consumePersonalEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.Ag
 			}
 		}
 		if toolCall && !interimSent && len(interim) > 0 && interim[0] != nil {
-			body := strings.TrimSpace(text.String())
-			if strings.HasPrefix(body, "{") {
-				// A final-response envelope can also accompany a tool call.
-				// Only its user-facing content is eligible for early delivery.
-				response, err := decodePersonalTurnResponse(body)
-				if err != nil || response.ReplyKind != personal.ReplyContent || len(response.Attachments) > 0 {
-					body = ""
-				} else {
-					body = strings.TrimSpace(response.Text)
-				}
-			}
+			body := personalInterimReply(text.String())
 			if body != "" {
 				if err := interim[0](body); err != nil {
 					return "", fmt.Errorf("publish interim reply: %w", err)
@@ -354,6 +361,18 @@ func consumePersonalEvents(it *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.Ag
 			output = text.String()
 		}
 	}
+}
+
+func personalInterimReply(raw string) string {
+	response, err := decodePersonalTurnResponse(strings.TrimSpace(raw))
+	if err != nil || response.ReplyKind != personal.ReplyContent || len(response.Attachments) > 0 {
+		return ""
+	}
+	text := strings.TrimSpace(response.Text)
+	if text == "" || utf8.RuneCountInString(text) > maxInterimReplyRunes {
+		return ""
+	}
+	return text
 }
 
 func strictJSONObject(raw string, expected ...string) (map[string]json.RawMessage, error) {

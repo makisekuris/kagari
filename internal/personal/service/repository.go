@@ -38,6 +38,9 @@ type Repository interface {
 	UpdateDelivery(context.Context, int64, string, channel.Receipt, string, time.Time) error
 	ScheduleForTask(context.Context, int64) (*personal.ScheduleContext, error)
 	DispatchDueSchedule(context.Context, time.Time) (*personal.ScheduleOccurrence, error)
+	DispatchDueReminder(context.Context, time.Time) (bool, error)
+	EventTimingReceipts(context.Context, int64) ([]personal.TimingReceipt, error)
+	EventMemoryReceipts(context.Context, int64) ([]personal.MemoryReceipt, error)
 	BeginScheduledRun(context.Context, int64, time.Time) (*personal.Run, error)
 	ScheduleSuggestions(context.Context, int64) ([]personal.ScheduleSuggestion, error)
 	ReplyScheduleSuggestions(context.Context, int64) ([]personal.ScheduleSuggestion, error)

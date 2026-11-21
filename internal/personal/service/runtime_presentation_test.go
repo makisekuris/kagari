@@ -3,10 +3,14 @@ package service
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openai/openai-go/v3"
 
 	"kagari/internal/channel"
 	"kagari/internal/personal"
@@ -167,6 +171,126 @@ func TestRuntimePublishPresentationContract(t *testing.T) {
 			t.Fatalf("presenter-added source escaped fallback: %+v, %v", delivery, err)
 		}
 	})
+}
+
+func TestRuntimeDirectUserModelDeadlineSkipsPresenter(t *testing.T) {
+	t.Run("no committed action", func(t *testing.T) {
+		ctx := context.Background()
+		s := testkit.Store(t, filepath.Join(t.TempDir(), "timeout.db"), time.Minute)
+		r := testRuntime(s)
+		thinkCalls, presenterCalls := 0, 0
+		r.Think = func(context.Context, personal.TurnInput) (personal.TurnOutput, error) {
+			thinkCalls++
+			return personal.TurnOutput{}, errors.Join(context.DeadlineExceeded, errors.New("model request timed out"))
+		}
+		r.PresentReply = func(context.Context, personal.Event, string) (string, error) {
+			presenterCalls++
+			return "错误的措辞", nil
+		}
+		eventID := testkit.AcceptInput(t, s, "1", testkit.SourceInput("1", "请检查这条资料。"))
+		if worked, err := r.turn(ctx); !worked || err != nil {
+			t.Fatalf("turn = %t, %v", worked, err)
+		}
+		message := testkit.AssistantMessage(t, s, eventID)
+		if message.Text != channel.PlainTextMarkdown("模型响应超时，本次未能生成回复。") {
+			t.Fatalf("timeout reply = %q", message.Text)
+		}
+		if message.Delivery == nil || message.Delivery.Purpose != personal.DeliveryResult {
+			t.Fatalf("timeout reply purpose = %+v, want ordinary result", message.Delivery)
+		}
+		if thinkCalls != 1 || presenterCalls != 0 {
+			t.Fatalf("think calls=%d presenter calls=%d, want one and zero", thinkCalls, presenterCalls)
+		}
+	})
+
+	t.Run("committed state remains attached to the timeout", func(t *testing.T) {
+		ctx := context.Background()
+		s := testkit.Store(t, filepath.Join(t.TempDir(), "timeout-committed.db"), time.Minute)
+		r := testRuntime(s)
+		var scheduleID int64
+		var committedEvent personal.Event
+		presenterCalls := 0
+		r.Think = func(ctx context.Context, input personal.TurnInput) (personal.TurnOutput, error) {
+			committedEvent = input.Event
+			schedule, _, err := s.CreateSchedule(ctx, input.Event.ID, "schedule", personal.ScheduleInput{
+				Title: "每日练习", Goal: "生成一道练习题", Cron: "0 9 * * *", Timezone: "UTC",
+			}, time.Now().UTC())
+			if err != nil {
+				return personal.TurnOutput{}, err
+			}
+			scheduleID = schedule.ID
+			return personal.TurnOutput{}, errors.Join(context.DeadlineExceeded, errors.New("model request timed out"))
+		}
+		r.PresentReply = func(context.Context, personal.Event, string) (string, error) {
+			presenterCalls++
+			return "错误的措辞", nil
+		}
+		eventID := testkit.AcceptInput(t, s, "1", testkit.SourceInput("1", "请登记每日练习。"))
+		if worked, err := r.turn(ctx); !worked || err != nil {
+			t.Fatalf("turn = %t, %v", worked, err)
+		}
+		message := testkit.AssistantMessage(t, s, eventID)
+		expected, err := r.committedActionFallback(ctx, committedEvent, personal.TurnOutput{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if message.Text != channel.PlainTextMarkdown(expected.Text) {
+			t.Fatalf("committed timeout reply changed the saved receipt: got %q want %q", message.Text, expected.Text)
+		}
+		if message.ScheduleID != scheduleID || message.ScheduleID != expected.ScheduleID {
+			t.Fatalf("timeout reply schedule scope = %d, want %d", message.ScheduleID, scheduleID)
+		}
+		if message.Delivery == nil || message.Delivery.Purpose != personal.DeliveryControl {
+			t.Fatalf("committed timeout reply purpose = %+v, want committed control receipt", message.Delivery)
+		}
+		if presenterCalls != 0 {
+			t.Fatalf("timeout reply invoked presenter %d times", presenterCalls)
+		}
+	})
+}
+
+func TestRuntimeDirectUserQuotaFailureSkipsPresenter(t *testing.T) {
+	for _, tc := range []struct {
+		code   string
+		status int
+	}{
+		{code: "pre_consume_token_quota_failed", status: http.StatusForbidden},
+		{code: "insufficient_quota", status: http.StatusTooManyRequests},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			ctx := context.Background()
+			s := testkit.Store(t, filepath.Join(t.TempDir(), "quota.db"), time.Minute)
+			r := testRuntime(s)
+			thinkCalls, presenterCalls := 0, 0
+			r.Think = func(context.Context, personal.TurnInput) (personal.TurnOutput, error) {
+				thinkCalls++
+				apiErr := &openai.Error{
+					Code: tc.code, Type: "insufficient_quota", StatusCode: tc.status,
+					Request:  &http.Request{Method: http.MethodPost, URL: &url.URL{Scheme: "https", Host: "api.example.org", Path: "/v1/responses"}},
+					Response: &http.Response{StatusCode: tc.status},
+				}
+				return personal.TurnOutput{}, errors.Join(errors.New("request rejected"), apiErr)
+			}
+			r.PresentReply = func(context.Context, personal.Event, string) (string, error) {
+				presenterCalls++
+				return "错误的措辞", nil
+			}
+			eventID := testkit.AcceptInput(t, s, "1", testkit.SourceInput("1", "请检查这条资料。"))
+			if worked, err := r.turn(ctx); !worked || err != nil {
+				t.Fatalf("turn = %t, %v", worked, err)
+			}
+			message := testkit.AssistantMessage(t, s, eventID)
+			if message.Text != channel.PlainTextMarkdown("模型服务未能为这次请求分配额度。") {
+				t.Fatalf("quota reply = %q", message.Text)
+			}
+			if message.Delivery == nil || message.Delivery.Purpose != personal.DeliveryResult {
+				t.Fatalf("quota reply purpose = %+v, want ordinary result", message.Delivery)
+			}
+			if thinkCalls != 1 || presenterCalls != 0 {
+				t.Fatalf("think calls=%d presenter calls=%d, want one and zero", thinkCalls, presenterCalls)
+			}
+		})
+	}
 }
 
 func TestRuntimePresentationRespectsReplyKindAndTerminalCallback(t *testing.T) {

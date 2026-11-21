@@ -20,7 +20,7 @@ func (r *Runtime) renderReply(ctx context.Context, event personal.Event, output 
 	if output.Text != "" {
 		// Control times and historical provenance are persisted facts. Rewording
 		// them could turn an old operation or result into a claim about now.
-		skipPresentation := output.Purpose == personal.DeliveryControl || output.Purpose == personal.DeliveryHistorical
+		skipPresentation := output.SkipReplyPresentation || output.Purpose == personal.DeliveryControl || output.Purpose == personal.DeliveryHistorical
 		if event.Kind == personal.EventUser && output.ReplyKind == personal.ReplyReceipt {
 			deferred, err := r.Store.CanDeferReply(ctx, event.ID)
 			if err != nil {

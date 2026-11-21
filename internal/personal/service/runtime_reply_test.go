@@ -294,20 +294,76 @@ func TestRuntimeTerminalTaskResultOverridesModelCommitment(t *testing.T) {
 	}
 }
 
-func TestTaskClosingSourcesOmitDuplicatesAndFailedReads(t *testing.T) {
+func TestTaskClosingSourcesDeduplicateAndLabelFailedReads(t *testing.T) {
 	text := taskClosingText(&personal.Task{Title: "核对", Status: personal.TaskCompleted, Summary: "已核对 https://example.com/existing。"}, []domain.SourceRef{
 		{URL: "https://example.com/existing", Status: "ok"},
 		{URL: "https://example.com/additional", Status: "ok"},
 		{URL: "https://example.com/additional", Status: "ok"},
 		{URL: "https://example.com/unread", Status: "failed"},
 	})
-	for _, url := range []string{"https://example.com/existing", "https://example.com/additional"} {
+	for _, url := range []string{"https://example.com/existing", "https://example.com/additional", "https://example.com/unread"} {
 		if strings.Count(text, url) != 1 {
 			t.Fatalf("source missing or duplicated: %s", text)
 		}
 	}
-	if strings.Contains(text, "https://example.com/unread") {
-		t.Fatalf("failed read presented as evidence: %s", text)
+	if !strings.Contains(text, "未能完整读取的来源：\nhttps://example.com/unread（读取失败）") {
+		t.Fatalf("failed read was not clearly distinguished from evidence: %s", text)
+	}
+}
+
+func TestTaskClosingTextPreservesLongSuccessfulSummary(t *testing.T) {
+	summary := strings.Repeat("已核对每项要求。", 700) + "最后一项结论已保留。"
+	text := taskClosingText(&personal.Task{Title: "完整核对", Status: personal.TaskCompleted, Summary: summary}, nil)
+	if !strings.Contains(text, summary) {
+		t.Fatalf("task closing truncated the saved result: got %d runes, want full %d-rune summary", len([]rune(text)), len([]rune(summary)))
+	}
+}
+
+func TestTaskFallbackBoundsFailedAndWaitingSummaries(t *testing.T) {
+	const sourceText = "英文来源正文不得进入回退消息。"
+	legacySummary := "Stage did not complete. upstream timed out. Partial source evidence returned:\n" +
+		"- Account guide (status: restricted); note: login required; returned text: " + strings.Repeat(sourceText, 500) + "\n" +
+		"- Pricing guide (status: failed); note: connection refused; returned text: " + strings.Repeat(sourceText, 500)
+	sources := []domain.SourceRef{
+		{URL: "https://example.com/account", Status: "restricted"},
+		{URL: "https://example.com/pricing", Status: "failed"},
+	}
+
+	for _, tc := range []struct {
+		name   string
+		status personal.TaskStatus
+	}{
+		{name: "failed task", status: personal.TaskFailed},
+		{name: "legacy completed task", status: personal.TaskCompleted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := taskClosingText(&personal.Task{Title: "账户核对", Status: tc.status, Summary: legacySummary}, sources)
+			if strings.Contains(text, sourceText) || strings.Contains(text, "returned text:") {
+				t.Fatalf("fallback repeated source excerpts: %s", text)
+			}
+			for _, want := range []string{"upstream timed out", "login required", "connection refused", "https://example.com/account", "https://example.com/pricing"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("fallback omitted actionable detail %q: %s", want, text)
+				}
+			}
+			if len(text) > maxTaskFallbackSummaryBytes+500 {
+				t.Fatalf("legacy fallback remains unbounded: %d bytes", len(text))
+			}
+		})
+	}
+
+	waitingSummary := strings.Repeat("已核对当前资料并保存阶段结果。", 300) + "\n\n需要你提供账户地区才能继续核对。"
+	waitingText := taskClosingText(&personal.Task{Title: "价格核对", Status: personal.TaskWaitingInput, Summary: waitingSummary}, nil)
+	if len(waitingText) > maxTaskFallbackSummaryBytes+300 {
+		t.Fatalf("waiting-input fallback remains unbounded: %d bytes", len(waitingText))
+	}
+	if !strings.Contains(waitingText, "需要你提供账户地区才能继续核对") {
+		t.Fatalf("bounded waiting fallback lost the required question: %s", waitingText)
+	}
+
+	budgetText := taskBudgetText(&personal.Task{Title: "账户核对", Status: personal.TaskWaitingBudget, Summary: legacySummary}, sources)
+	if strings.Contains(budgetText, sourceText) || strings.Contains(budgetText, "returned text:") || !strings.Contains(budgetText, "https://example.com/account") {
+		t.Fatalf("waiting-budget fallback leaked legacy body or lost source: %s", budgetText)
 	}
 }
 

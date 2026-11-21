@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -32,6 +33,8 @@ func assertPersonalToolMode(t *testing.T, request map[string]any, eventKind pers
 		t.Fatalf("personal tool loop must expose tools without forcing final JSON format: tools=%d format=%v", len(tools), format["type"])
 	}
 	names := make(map[string]bool, len(tools))
+	var memoryPutDescription string
+	var memoryAnswerDescription, memorySearchDescription, memoryGetDescription string
 	for _, raw := range tools {
 		definition := raw.(map[string]any)
 		name := definition["name"].(string)
@@ -39,10 +42,22 @@ func assertPersonalToolMode(t *testing.T, request map[string]any, eventKind pers
 			t.Fatalf("duplicate personal tool %q", name)
 		}
 		names[name] = true
+		if name == "memory_put" {
+			memoryPutDescription, _ = definition["description"].(string)
+		}
+		if name == "memory_answer_current" {
+			memoryAnswerDescription, _ = definition["description"].(string)
+		}
+		if name == "memory_search" {
+			memorySearchDescription, _ = definition["description"].(string)
+		}
+		if name == "memory_get" {
+			memoryGetDescription, _ = definition["description"].(string)
+		}
 	}
 	for _, name := range []string{
 		"create_task", "list_tasks", "get_task", "update_task", "cancel_task", "continue_task", "get_run", "list_runs",
-		"memory_search", "memory_get", "memory_put", "memory_forget", "memory_history", "read_attachment", "write_attachment",
+		"memory_answer_current", "memory_search", "memory_get", "memory_put", "memory_forget", "memory_history", "read_attachment", "write_attachment",
 		"create_schedule", "list_schedules", "get_schedule", "update_schedule", "cancel_schedule",
 		"list_deliveries", "get_delivery", "stop_delivery", "resume_task_delivery", "resend_delivery",
 		"propose_schedule_context_update", "resolve_schedule_context_update", "add_task_input", "set_user_questions",
@@ -53,6 +68,13 @@ func assertPersonalToolMode(t *testing.T, request map[string]any, eventKind pers
 	}
 	if names["settle_task"] != (eventKind == personal.EventTask) {
 		t.Fatalf("settle_task exposure for %s event = %t", eventKind, names["settle_task"])
+	}
+	if !strings.Contains(memoryPutDescription, "明确记忆请求") || !strings.Contains(memoryPutDescription, "执行某次操作所需的设置或提醒不属于记忆请求") {
+		t.Fatalf("memory_put tool description omits operation-scope rule: %q", memoryPutDescription)
+	}
+	if !strings.Contains(memoryAnswerDescription, "用户单独询问当前长期记忆值") || !strings.Contains(memoryAnswerDescription, "current_match=true") ||
+		!strings.Contains(memorySearchDescription, "更大任务") || !strings.Contains(memoryGetDescription, "精确键") {
+		t.Fatalf("memory tools do not distinguish direct current-value lookup from contextual reads: answer=%q search=%q get=%q", memoryAnswerDescription, memorySearchDescription, memoryGetDescription)
 	}
 }
 

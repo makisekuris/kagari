@@ -12,6 +12,15 @@ type Memory struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+// MemoryReceipt reports the final memory state committed by one user event.
+// Deleted receipts never expose the value that was forgotten.
+type MemoryReceipt struct {
+	Key     string `json:"key"`
+	Value   string `json:"value,omitempty"`
+	Version int64  `json:"version"`
+	Deleted bool   `json:"deleted"`
+}
+
 type MemoryChange struct {
 	Operation       string `json:"operation"` // put or forget
 	Key             string `json:"key"`

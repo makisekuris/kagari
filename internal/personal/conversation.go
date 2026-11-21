@@ -29,16 +29,18 @@ const (
 )
 
 type TurnOutput struct {
-	ScheduleID        int64
-	Text              string
-	Attachments       []string
-	TaskID            int64
-	TaskIDs           []int64            `json:"-"`
-	RequiredFeedback  string             `json:"-"`
-	SupplementalReply *SupplementalReply `json:"-"`
-	Silent            bool
-	ReplyKind         ReplyKind       `json:"-"`
-	Purpose           DeliveryPurpose `json:"-"`
+	ScheduleID                  int64
+	Text                        string
+	Attachments                 []string
+	TaskID                      int64
+	TaskIDs                     []int64            `json:"-"`
+	RequiredFeedback            string             `json:"-"`
+	SupplementalReply           *SupplementalReply `json:"-"`
+	CommittedActionsNeedReceipt bool               `json:"-"`
+	SkipReplyPresentation       bool               `json:"-"`
+	Silent                      bool
+	ReplyKind                   ReplyKind       `json:"-"`
+	Purpose                     DeliveryPurpose `json:"-"`
 }
 
 type ThinkFunc func(context.Context, TurnInput) (TurnOutput, error)

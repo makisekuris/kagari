@@ -6,6 +6,11 @@ import (
 )
 
 func (r *Runtime) schedule(ctx context.Context) (bool, error) {
-	o, err := r.Store.DispatchDueSchedule(ctx, time.Now().UTC())
-	return o != nil, err
+	now := time.Now().UTC()
+	reminded, err := r.Store.DispatchDueReminder(ctx, now)
+	if err != nil {
+		return false, err
+	}
+	o, err := r.Store.DispatchDueSchedule(ctx, now)
+	return reminded || o != nil, err
 }

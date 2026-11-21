@@ -25,7 +25,8 @@ func TestLivePersonalScheduleRegistration(t *testing.T) {
 	main := livePersonalAgent(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
-	store := testkit.Store(t, filepath.Join(t.TempDir(), "schedules.db"), 10*time.Minute)
+	const defaultBudget = 10 * time.Minute
+	store := testkit.Store(t, filepath.Join(t.TempDir(), "schedules.db"), defaultBudget)
 	main.Store = store
 	main.Timezone = "UTC"
 
@@ -43,7 +44,7 @@ func TestLivePersonalScheduleRegistration(t *testing.T) {
 	}
 
 	continuous := testkit.OpenUserEvent(t, store, 502, 602,
-		"请直接登记一个连续信息检查计划：每周一 10:30 UTC 检查虚构项目白桦的新增状态更新，来源是 https://status.example.invalid/baihua。检查从上次成功检查后开始，必须确认该来源完整读取；如果来源失败就报告不完整。")
+		"请直接登记一个连续信息检查计划：每周一 10:30 UTC 检查虚构项目白桦的新增状态更新，每次最多执行 7 分钟，来源是 https://status.example.invalid/baihua。检查从上次成功检查后开始，必须确认该来源完整读取；如果来源失败就报告不完整。")
 	continuousOutput, continuousLogs := livePersonalScheduleThink(t, ctx, main, livePersonalInput(t, ctx, store, continuous))
 	testkit.FinishEvent(t, store, continuous, continuousOutput, nil)
 	assertScheduleOutputHasNoQuestionOrMemory(t, ctx, store, continuous, continuousOutput, continuousLogs)
@@ -69,7 +70,55 @@ func TestLivePersonalScheduleRegistration(t *testing.T) {
 	if continuousSchedule == nil || continuousSchedule.Cron != "30 10 * * 1" || continuousSchedule.WindowMode != personal.WindowSinceSuccess || continuousSchedule.Timezone != "UTC" || continuousSchedule.BaselineAt == nil || len(continuousSchedule.RequiredSources) != 1 || continuousSchedule.RequiredSources[0].URL != "https://status.example.invalid/baihua" {
 		t.Fatalf("semantic FAIL: continuous check did not retain its coverage source: %+v", continuousSchedule)
 	}
-	t.Log("mechanism PASS: two real SQLite plans persisted; semantic PASS: ordinary generation and since-success source check kept distinct modes")
+	if ordinarySchedule.TaskBudgetMS != defaultBudget.Milliseconds() || continuousSchedule.TaskBudgetMS != (7*time.Minute).Milliseconds() {
+		t.Fatalf("schedule task budgets in ms: ordinary=%d, continuous=%d", ordinarySchedule.TaskBudgetMS, continuousSchedule.TaskBudgetMS)
+	}
+	t.Log("mechanism PASS: two real SQLite plans persisted; semantic PASS: ordinary generation and since-success source check kept their respective modes and time limits")
+}
+
+func TestLivePersonalFocusBreakReminder(t *testing.T) {
+	main := livePersonalAgent(t)
+	ctx := context.Background()
+	store := testkit.Store(t, ":memory:", time.Minute)
+	main.Store = store
+	event := testkit.OpenUserEvent(t, store, 1, 1, "现在开始一轮番茄钟：专注 30 分钟，休息 10 分钟。两个阶段结束时各发一句消息提醒我。")
+	out := livePersonalThink(t, ctx, main, livePersonalInput(t, ctx, store, event))
+	testkit.FinishEvent(t, store, event, out, nil)
+	timers, err := store.Reminders(ctx, true, 0, 20)
+	if err != nil || len(timers) != 1 || out.Silent {
+		t.Fatalf("expected one registered timer and its receipt, got %+v, %+v, %v", timers, out, err)
+	}
+	timer := timers[0]
+	if timer.Repeat || len(timer.Steps) != 2 || timer.Steps[0].AfterMinutes != 30 || timer.Steps[1].AfterMinutes != 10 {
+		t.Fatalf("expected one focus/break cycle: %+v", timer)
+	}
+	plans, err := store.Schedules(ctx, false, 0, 20)
+	if err != nil || len(plans) != 0 {
+		t.Fatalf("unexpected cron plans: %+v, %v", plans, err)
+	}
+}
+
+func TestLivePersonalFixedCalendarReminder(t *testing.T) {
+	main := livePersonalAgent(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	store := testkit.Store(t, ":memory:", time.Minute)
+	main.Store = store
+	event := testkit.OpenUserEvent(t, store, 1, 1, "每小时第29分（上海时间）给我发一句「定时链路到点」，按原文发送。")
+	out := livePersonalThink(t, ctx, main, livePersonalInput(t, ctx, store, event))
+	testkit.FinishEvent(t, store, event, out, nil)
+	timers, err := store.Reminders(ctx, true, 0, 20)
+	if err != nil || out.Silent || len(timers) != 1 {
+		t.Fatalf("expected one calendar reminder: %+v, %v", timers, err)
+	}
+	timer := timers[0]
+	if timer.Cron != "29 * * * *" || timer.Timezone != "Asia/Shanghai" || len(timer.Steps) != 1 || timer.Steps[0].Text != "定时链路到点" {
+		t.Fatalf("calendar reminder lost schedule or text: %+v", timer)
+	}
+	plans, err := store.Schedules(ctx, false, 0, 20)
+	if err != nil || len(plans) != 0 {
+		t.Fatalf("unexpected background schedules: %+v, %v", plans, err)
+	}
 }
 
 func TestLivePersonalScheduleAmbiguousCancellationAsksQuestion(t *testing.T) {

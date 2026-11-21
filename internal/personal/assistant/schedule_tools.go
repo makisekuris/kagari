@@ -12,13 +12,16 @@ import (
 )
 
 type scheduleToolReply struct {
-	OK          bool                          `json:"ok"`
-	Error       string                        `json:"error,omitempty"`
-	Replayed    bool                          `json:"replayed,omitempty"`
-	Schedule    *personal.Schedule            `json:"schedule,omitempty"`
-	Schedules   []personal.Schedule           `json:"schedules,omitempty"`
-	Occurrences []personal.ScheduleOccurrence `json:"occurrences,omitempty"`
-	Suggestions []personal.ScheduleSuggestion `json:"suggestions,omitempty"`
+	ReminderTimezone string                        `json:"reminder_timezone,omitempty"`
+	Reminder         *personal.Reminder            `json:"reminder,omitempty"`
+	Reminders        []personal.Reminder           `json:"reminders,omitempty"`
+	OK               bool                          `json:"ok"`
+	Error            string                        `json:"error,omitempty"`
+	Replayed         bool                          `json:"replayed,omitempty"`
+	Schedule         *personal.Schedule            `json:"schedule,omitempty"`
+	Schedules        []personal.Schedule           `json:"schedules,omitempty"`
+	Occurrences      []personal.ScheduleOccurrence `json:"occurrences,omitempty"`
+	Suggestions      []personal.ScheduleSuggestion `json:"suggestions,omitempty"`
 }
 
 type updateScheduleArgs struct {
@@ -62,7 +65,7 @@ func schedulePageLimit(limit int) (int, error) {
 }
 
 func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
-	create, err := utils.InferTool("create_schedule", "登记五段 cron 定时计划；timezone 留空时使用个人默认时区（未配置时为 Asia/Shanghai）。只允许直接用户事件，首次触发严格晚于登记时刻。", func(ctx context.Context, input personal.ScheduleInput) (scheduleToolReply, error) {
+	create, err := utils.InferTool("create_schedule", "登记到点需要生成内容、执行工作或检查来源的五段 cron 定时计划。到点发送固定文字请用 create_reminder。timezone 留空时使用个人默认时区（未配置时为 Asia/Shanghai）。只允许直接用户事件，首次触发严格晚于登记时刻。", func(ctx context.Context, input personal.ScheduleInput) (scheduleToolReply, error) {
 		if err := p.directUserMutation(); err != nil {
 			return scheduleToolError(err), nil
 		}
@@ -89,7 +92,7 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 		return nil, err
 	}
 
-	list, err := utils.InferTool("list_schedules", "按计划 ID 倒序列出计划；默认 20 条，最多 100 条，可用 before_id 继续向前翻页。", func(ctx context.Context, args listSchedulesArgs) (scheduleToolReply, error) {
+	list, err := utils.InferTool("list_schedules", "查询定时计划 schedules 和计时提醒 reminders，各自按 ID 倒序。两类编号独立。各默认 20 条，最多 100 条，before_id 为两类结果的 ID 上界；include_cancelled 同时包含已结束的提醒。", func(ctx context.Context, args listSchedulesArgs) (scheduleToolReply, error) {
 		if args.BeforeID < 0 {
 			return scheduleToolError(fmt.Errorf("before_id cannot be negative")), nil
 		}
@@ -105,7 +108,15 @@ func (p *personalTools) buildScheduleTools() ([]tool.BaseTool, error) {
 		for _, schedule := range schedules {
 			p.addSupplementalSchedule(schedule.ID, personal.DeliveryControl)
 		}
-		return scheduleToolReply{OK: true, Schedules: schedules}, nil
+		reminders, err := p.store.Reminders(ctx, !args.IncludeCancelled, args.BeforeID, limit)
+		if err != nil {
+			return scheduleToolError(err), nil
+		}
+		reply := scheduleToolReply{OK: true, Schedules: schedules, Reminders: reminders}
+		if len(reminders) > 0 {
+			reply.ReminderTimezone = p.reminderTimezone()
+		}
+		return reply, nil
 	})
 	if err != nil {
 		return nil, err

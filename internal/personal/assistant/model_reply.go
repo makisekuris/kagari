@@ -52,7 +52,7 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 			response.SupplementalReplyFailed = true
 			return response, nil
 		}
-		supplemental, err := decodePersonalTurnResponse(raw)
+		supplemental, err := decodePersonalTurnResponseOrTrailingEnvelope(raw)
 		if err != nil {
 			supplemental, err = a.formatTurn(ctx, raw, createdAttachments)
 		}
@@ -86,6 +86,14 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 		}
 		return response, nil
 	}
+	if text, ok := tools.currentMemoryAnswerReply(input.Event, required); ok {
+		return personalTurnResponse{
+			Text:                  text,
+			ReplyKind:             personal.ReplyContent,
+			Attachments:           []string{},
+			SkipReplyPresentation: true,
+		}, nil
+	}
 	if modelErr != nil {
 		if required == "" {
 			return personalTurnResponse{}, modelErr
@@ -110,7 +118,7 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 			return personalTurnResponse{ReplyKind: personal.ReplySilent}, nil
 		}
 	}
-	response, err := decodePersonalTurnResponse(raw)
+	response, err := decodePersonalTurnResponseOrTrailingEnvelope(raw)
 	if err != nil {
 		// Formatting gets one tool-free attempt; committed actions are never replayed.
 		response, err = a.formatTurn(ctx, raw, createdAttachments)
@@ -137,4 +145,32 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 		}
 	}
 	return response, err
+}
+
+func decodePersonalTurnResponseOrTrailingEnvelope(raw string) (personalTurnResponse, error) {
+	response, err := decodePersonalTurnResponse(raw)
+	if err == nil {
+		return response, nil
+	}
+	if strings.Contains(raw, "```") {
+		return personalTurnResponse{}, err
+	}
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\r\n", "\n"))
+	beforeObject, afterObject, found := strings.Cut(raw, "{")
+	if !found {
+		return personalTurnResponse{}, err
+	}
+	separator := strings.LastIndex(beforeObject, "\n\n")
+	if separator < 0 || strings.TrimSpace(beforeObject[separator+2:]) != "" {
+		return personalTurnResponse{}, err
+	}
+	prefix := strings.TrimSpace(beforeObject[:separator])
+	if prefix == "" || strings.Contains(prefix, "}") || strings.HasSuffix(prefix, ":") || strings.HasSuffix(prefix, "：") {
+		return personalTurnResponse{}, err
+	}
+	response, envelopeErr := decodePersonalTurnResponse("{" + afterObject)
+	if envelopeErr != nil {
+		return personalTurnResponse{}, err
+	}
+	return response, nil
 }

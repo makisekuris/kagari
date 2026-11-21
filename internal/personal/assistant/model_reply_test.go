@@ -38,6 +38,97 @@ func TestDecodePersonalTurnNotificationContract(t *testing.T) {
 	}
 }
 
+func TestSelectReplyExtractsStandaloneTrailingEnvelopeWithoutFormatter(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "English explanation and receipt",
+			raw:  "I have registered the scheduled goal successfully.\n\n{\"text\":\"已登记每日练习。\",\"reply_kind\":\"receipt\",\"attachments\":[]}",
+			want: "已登记每日练习。",
+		},
+		{
+			name: "Chinese draft and receipt",
+			raw:  "每日练习已安排，会在早上提醒你。\n\n{\"text\":\"每日练习已登记。\",\"reply_kind\":\"receipt\",\"attachments\":[]}",
+			want: "每日练习已登记。",
+		},
+		{
+			name: "pretty JSON with an internal blank line",
+			raw:  "The scheduled goal is registered.\n\n{\n\"text\":\"每日练习已登记。\",\n\n\"reply_kind\":\"receipt\",\n\"attachments\":[]\n}",
+			want: "每日练习已登记。",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := testkit.Store(t, ":memory:", time.Minute)
+			event := testkit.OpenUserEvent(t, s, 1, 1, "请登记每日练习提醒。")
+			fixture := &testkit.ResponsesFixture{T: t}
+			response, err := newMainAgent(t, fixture, s).selectReply(ctx, personal.TurnInput{Event: event}, &personalTools{}, tc.raw, nil, nil)
+			if err != nil || response.Text != tc.want || response.ReplyKind != personal.ReplyReceipt {
+				t.Fatalf("response=%+v error=%v", response, err)
+			}
+			if len(fixture.Requests) != 0 {
+				t.Fatalf("formatter requests=%d, want none", len(fixture.Requests))
+			}
+		})
+	}
+}
+
+func TestSelectReplyExtractsSupplementalTrailingEnvelopeWithoutFormatter(t *testing.T) {
+	ctx := context.Background()
+	s := testkit.Store(t, ":memory:", time.Minute)
+	event := testkit.OpenUserEvent(t, s, 1, 1, "检查已登记的提醒。")
+	fixture := &testkit.ResponsesFixture{T: t}
+	tools := &personalTools{
+		persistedControl:    true,
+		supplementalWork:    true,
+		supplementalPurpose: personal.DeliveryControl,
+		controlDeliveries:   []personal.DeliveryIntent{{Draft: personal.DeliveryDraft{Text: "提醒状态已确认。", Attachments: []string{}}}},
+	}
+	raw := "The scheduled goal was registered successfully.\n\n{\"text\":\"每日练习已登记。\",\"reply_kind\":\"content\",\"attachments\":[]}"
+	response, err := newMainAgent(t, fixture, s).selectReply(ctx, personal.TurnInput{Event: event}, tools, raw, nil, nil)
+	if err != nil || response.Text != "提醒状态已确认。" || response.SupplementalReply == nil {
+		t.Fatalf("response=%+v error=%v", response, err)
+	}
+	if draft := response.SupplementalReply.Draft; draft.Text != "每日练习已登记。" || len(draft.Attachments) != 0 {
+		t.Fatalf("supplemental draft=%+v", draft)
+	}
+	if len(fixture.Requests) != 0 {
+		t.Fatalf("formatter requests=%d, want none", len(fixture.Requests))
+	}
+}
+
+func TestSelectReplyFormatsAmbiguousTrailingEnvelope(t *testing.T) {
+	const envelope = `{"text":"已登记每日练习。","reply_kind":"receipt","attachments":[]}`
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "multiple objects", raw: `Draft object: {"text":"older","reply_kind":"content","attachments":[]}` + "\n\n" + envelope},
+		{name: "fenced code example", raw: "Example:\n```json\n" + envelope + "\n```\n\n" + envelope},
+		{name: "Chinese example label", raw: "例如：\n\n" + envelope},
+		{name: "English example label", raw: "For example:\n\n" + envelope},
+		{name: "missing field", raw: "Reminder registered.\n\n" + `{"text":"已登记每日练习。","reply_kind":"receipt"}`},
+		{name: "trailing explanation", raw: "Reminder registered.\n\n" + envelope + "\n\nThis is the final explanation."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+				testkit.ResponseText(`{"text":"formatter result","reply_kind":"content","attachments":[]}`),
+			}}
+			event := personal.Event{ID: 51, Kind: personal.EventUser, Text: "请登记每日练习提醒。"}
+			response, err := newMainAgent(t, fixture, newToolRepo()).selectReply(context.Background(), personal.TurnInput{Event: event}, &personalTools{}, tc.raw, nil, nil)
+			if err != nil || response.Text != "formatter result" || response.ReplyKind != personal.ReplyContent {
+				t.Fatalf("response=%+v error=%v", response, err)
+			}
+			if len(fixture.Requests) != 1 {
+				t.Fatalf("formatter requests=%d, want one", len(fixture.Requests))
+			}
+		})
+	}
+}
+
 func TestThinkCanReturnSilentEmptyDirectReply(t *testing.T) {
 	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
 		testkit.ResponseText(`{"text":"","reply_kind":"silent","attachments":[]}`),

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	sqlitedriver "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"kagari/internal/channel"
 	"kagari/internal/logging"
@@ -15,6 +17,7 @@ import (
 
 // Runtime owns scheduling. Model tools persist work without waiting for its execution.
 type Runtime struct {
+	Timezone        string
 	Store           Repository
 	Think           personal.ThinkFunc
 	Execute         personal.ExecuteFunc
@@ -110,6 +113,11 @@ func onlyCancellationError(err, cancellation error) bool {
 	}
 	if err == cancellation {
 		return true
+	}
+	// Cancelling a context during an active SQLite statement may surface the
+	// driver's interrupt instead of ctx.Err(). Keep checking joined siblings.
+	if dbErr, ok := err.(*sqlitedriver.Error); ok {
+		return dbErr.Code() == sqlite3.SQLITE_INTERRUPT
 	}
 	if multiple, ok := err.(interface{ Unwrap() []error }); ok {
 		unwrapped := multiple.Unwrap()

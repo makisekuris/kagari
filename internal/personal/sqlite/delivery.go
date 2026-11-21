@@ -45,7 +45,9 @@ func (s *Store) ClaimDelivery(ctx context.Context) (*personal.Outgoing, error) {
 					WHERE p.delivery_id=prior_delivery.id AND p.status IN ('pending','sending'))
 			)
 		)
-		ORDER BY d.id LIMIT 1`, timestamp(now)).Scan(&id)
+		AND NOT EXISTS(SELECT 1 FROM personal_reminders r
+			WHERE r.status='active' AND r.last_delivery_id=d.delivery_id AND r.next_run_at<=?)
+		ORDER BY d.id LIMIT 1`, timestamp(now), timestamp(now)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
 			return nil, err

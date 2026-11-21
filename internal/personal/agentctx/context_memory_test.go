@@ -134,3 +134,60 @@ func TestMemoryToolHistoryKeepsVersionUntilForgotten(t *testing.T) {
 		})
 	}
 }
+
+func TestMemoryContextRefreshesCurrentAnswerMatchAfterFiltering(t *testing.T) {
+	for _, forgotten := range []bool{false, true} {
+		name := "active"
+		if forgotten {
+			name = "forgotten_after_match"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := testkit.Store(t, ":memory:", time.Minute)
+			event := testkit.OpenUserEvent(t, s, 1, 1, "我的测试笔记本叫白桦。")
+			stored, err := s.WriteMemory(ctx, event.ID, "put", personal.MemoryChange{Operation: "put", Key: "test_laptop_name", Value: "白桦", Evidence: event.Text})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if forgotten {
+				if _, err := s.WriteMemory(ctx, event.ID, "forget", personal.MemoryChange{Operation: "forget", Key: stored.Key, ExpectedVersion: stored.Version, Evidence: event.Text}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			memory, err := NewMemoryContext(ctx, MemoryContextConfig{Store: s})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := json.Marshal(struct {
+				OK           bool            `json:"ok"`
+				CurrentMatch bool            `json:"current_match"`
+				Memory       personal.Memory `json:"memory"`
+			}{OK: true, CurrentMatch: true, Memory: stored})
+			if err != nil {
+				t.Fatal(err)
+			}
+			round := contextToolRound("memory_answer_current", string(payload))
+			state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: round.Messages}
+			_, updated, err := memory.BeforeModelRewriteState(ctx, state, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := updated.Messages[1].ContentBlocks[0].FunctionToolResult.Content[0].Text.Text
+			var result struct {
+				CurrentMatch bool              `json:"current_match"`
+				Memory       *personal.Memory  `json:"memory"`
+				Memories     []personal.Memory `json:"memories"`
+			}
+			if err := json.Unmarshal([]byte(body), &result); err != nil {
+				t.Fatalf("decode rewritten current-memory answer %q: %v", body, err)
+			}
+			if forgotten {
+				if result.CurrentMatch || result.Memory != nil || strings.Contains(body, "白桦") {
+					t.Fatalf("forgotten value remained a current match: %s", body)
+				}
+			} else if !result.CurrentMatch || result.Memory == nil || result.Memory.Value != "白桦" {
+				t.Fatalf("active match status was not retained: %s", body)
+			}
+		})
+	}
+}

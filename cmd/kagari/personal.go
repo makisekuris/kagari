@@ -115,7 +115,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 	main.WorkspaceDirectory = workspaceDirectory
 	runtime := &service.Runtime{
 		Store: s, Think: main.Think, Execute: execution.TaskExecutor(engine, s, workspaceDirectory), ReviewMemory: main.ReviewMemory, PresentReply: main.PresentReply,
-		TaskConcurrency: cfg.Personal.TaskConcurrency, Poll: client.Poll, Log: log,
+		Timezone: cfg.Personal.Timezone, TaskConcurrency: cfg.Personal.TaskConcurrency, Poll: client.Poll, Log: log,
 		Prepare: channel.PrepareText, Send: client.Send, Ready: client.Ready,
 	}
 	return runtime.Run(ctx)

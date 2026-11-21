@@ -12,6 +12,8 @@ import (
 
 	"github.com/go-telegram/bot/models"
 	"go.uber.org/zap"
+
+	"kagari/internal/logging"
 )
 
 const (
@@ -24,6 +26,7 @@ type pollFailure struct {
 	code       int
 	httpStatus int
 	retryAfter time.Duration
+	reason     string
 }
 
 func (e *pollFailure) Error() string { return "Telegram polling request failed" }
@@ -66,16 +69,20 @@ func pollUpdates(ctx context.Context, readOffset offsetReader, readUpdates updat
 			}
 			var apiErr *pollFailure
 			fields := []zap.Field{}
-			if errors.As(err, &apiErr) {
-				fields = append(fields, zap.Int("api_code", apiErr.code), zap.Int("http_status", apiErr.httpStatus))
-			}
-			if errors.As(err, &apiErr) && (apiErr.code == http.StatusBadRequest || apiErr.code == http.StatusUnauthorized || apiErr.code == http.StatusForbidden) {
-				log.Error("telegram.polling.rejected", fields...)
-				return errors.New("Telegram polling request was rejected")
-			}
 			wait := delay
-			if errors.As(err, &apiErr) && apiErr.retryAfter > 0 {
-				wait = apiErr.retryAfter
+			if errors.As(err, &apiErr) {
+				if apiErr.reason != "" {
+					fields = append(fields, zap.String("reason", apiErr.reason))
+				} else {
+					fields = append(fields, zap.Int("api_code", apiErr.code), zap.Int("http_status", apiErr.httpStatus))
+				}
+				if apiErr.code == http.StatusBadRequest || apiErr.code == http.StatusUnauthorized || apiErr.code == http.StatusForbidden {
+					log.Error("telegram.polling.rejected", fields...)
+					return errors.New("Telegram polling request was rejected")
+				}
+				if apiErr.retryAfter > 0 {
+					wait = apiErr.retryAfter
+				}
 			}
 			failures++
 			log.Warn("telegram.polling.failed", append(fields, zap.Duration("retry_after", wait), zap.Int("consecutive_failures", failures))...)
@@ -135,7 +142,8 @@ func getUpdates(ctx context.Context, client *http.Client, baseURL, token string,
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, errors.New("Telegram polling transport failed")
+		// The raw HTTP error includes the bot token in the request URL.
+		return nil, &pollFailure{reason: logging.ErrorReason(err)}
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))

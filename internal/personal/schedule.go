@@ -38,7 +38,7 @@ type ScheduleInput struct {
 	WindowMode       WindowMode          `json:"window_mode"`
 	RequiredSources  []SourceRequirement `json:"required_sources,omitempty"`
 	InitialCheckFrom *time.Time          `json:"initial_check_from,omitempty"`
-	TaskBudgetMS     *int64              `json:"task_budget_ms,omitempty"`
+	TaskBudgetMS     *int64              `json:"task_budget_ms,omitempty" jsonschema:"description=Per-task time limit explicitly requested by the owner in milliseconds. Omit to use the configured default."`
 }
 
 type SchedulePatch struct {

@@ -54,3 +54,16 @@ func TestPresentReplyUsesOnlyDraftAndOwnerRequest(t *testing.T) {
 		}
 	}
 }
+
+func TestPersonalPresentationInstructionBalancesBrevityAndRequestedDetail(t *testing.T) {
+	for _, rule := range []string{
+		"prefer one brief sentence stating the result",
+		"retain every requested item",
+		"replace a requested breakdown with a summary",
+		"If a requested detail is absent from the draft, do not invent it",
+	} {
+		if !strings.Contains(personalPresentationInstruction, rule) {
+			t.Errorf("personal presentation instruction omitted %q", rule)
+		}
+	}
+}

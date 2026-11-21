@@ -22,8 +22,7 @@ import (
 )
 
 const (
-	readingEvidenceLimit     = 12000
-	readingEvidencePerSource = 1800
+	readingEvidenceLimit = 12000
 )
 
 // readingExecutor runs one bounded task stage with attachment tools.
@@ -254,22 +253,41 @@ func readingSubmission(input personal.TaskInput, run personal.Run) (domain.Submi
 }
 
 func partialReadingSummary(result domain.Result, cause error) string {
-	const heading = "Stage did not complete."
-	if strings.TrimSpace(result.Body) != "" {
-		return boundSummary(heading + " Partial model result:\n" + result.Body)
-	}
 	var b strings.Builder
-	b.WriteString(heading)
-	if cause != nil {
-		fmt.Fprintf(&b, " %s", logging.ErrorReason(cause))
+	if strings.TrimSpace(result.Body) != "" {
+		if cause != nil {
+			fmt.Fprintf(&b, "未能完成原因：%s。\n\n", logging.ErrorReason(cause))
+		}
+		b.WriteString("阶段部分结果：\n")
+		b.WriteString(result.Body)
+	} else if cause != nil {
+		fmt.Fprintf(&b, "阶段执行遇到问题：%s。", logging.ErrorReason(cause))
+		if len(result.Sources) == 0 {
+			b.WriteString("没有取得来源资料。")
+		}
+	} else if len(result.Sources) == 0 {
+		b.WriteString("本阶段没有返回结果，也没有取得来源资料。")
 	}
-	if len(result.Sources) == 0 {
-		b.WriteString(" No source evidence was returned.")
-		return boundSummary(b.String())
+
+	sourceNotes := result.Sources
+	if strings.TrimSpace(result.Body) != "" {
+		// Successful source URLs are added once by the task closing fallback.
+		// Keep failure and partial-read details here without copying page text.
+		sourceNotes = nil
+		for _, source := range result.Sources {
+			if source.Status != "ok" {
+				sourceNotes = append(sourceNotes, source)
+			}
+		}
 	}
-	b.WriteString(" Partial source evidence returned:")
+	if len(sourceNotes) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("来源读取情况：")
+	}
 	remaining := readingEvidenceLimit - utf8.RuneCountInString(b.String())
-	for _, source := range result.Sources {
+	for _, source := range sourceNotes {
 		if remaining <= 0 {
 			break
 		}
@@ -281,18 +299,43 @@ func partialReadingSummary(result domain.Result, cause error) string {
 			label = source.ID
 		}
 		var line strings.Builder
-		fmt.Fprintf(&line, "\n- %s (status: %s)", label, source.Status)
-		if strings.TrimSpace(source.Reason) != "" {
-			fmt.Fprintf(&line, "; note: %s", source.Reason)
+		line.WriteString("\n- ")
+		if source.URL != "" {
+			line.WriteString(source.URL)
+			if label != source.URL {
+				fmt.Fprintf(&line, " — %s", textclip.Truncate(label, 200))
+			}
+		} else {
+			line.WriteString(textclip.Truncate(label, 200))
 		}
-		if strings.TrimSpace(source.Content) != "" {
-			fmt.Fprintf(&line, "; returned text: %s", textclip.Truncate(source.Content, readingEvidencePerSource))
+		if status := readingStatusLabel(source.Status); status != "" {
+			fmt.Fprintf(&line, "\n  %s", status)
+		}
+		if strings.TrimSpace(source.Reason) != "" {
+			fmt.Fprintf(&line, "\n  原因：%s", textclip.Truncate(source.Reason, 300))
 		}
 		part := textclip.Truncate(line.String(), remaining)
 		b.WriteString(part)
 		remaining -= utf8.RuneCountInString(part)
 	}
 	return boundSummary(b.String())
+}
+
+func readingStatusLabel(status string) string {
+	switch status {
+	case "ok":
+		return "读取完成"
+	case "supplied":
+		return "用户提供"
+	case "incomplete":
+		return "读取不完整"
+	case "restricted":
+		return "访问受限"
+	case "failed":
+		return "读取失败"
+	default:
+		return status
+	}
 }
 
 func sourceWithReadError(source domain.Source, err error) domain.Source {

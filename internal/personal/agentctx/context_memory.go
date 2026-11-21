@@ -97,10 +97,12 @@ type memorySearchArgs struct {
 }
 
 type memoryToolReply struct {
-	OK       bool              `json:"ok"`
-	Error    string            `json:"error,omitempty"`
-	Memory   *personal.Memory  `json:"memory,omitempty"`
-	Memories []personal.Memory `json:"memories,omitempty"`
+	OK           bool              `json:"ok"`
+	Error        string            `json:"error,omitempty"`
+	CurrentMatch *bool             `json:"current_match,omitempty"`
+	Tombstone    bool              `json:"tombstone,omitempty"`
+	Memory       *personal.Memory  `json:"memory,omitempty"`
+	Memories     []personal.Memory `json:"memories,omitempty"`
 }
 
 func (m *MemoryContext) Tools() ([]tool.BaseTool, error) {
@@ -188,6 +190,7 @@ func (m *MemoryContext) BeforeModelRewriteState(ctx context.Context, state *adk.
 				if json.Unmarshal([]byte(item.Text.Text), &reply) != nil || (reply.Memory == nil && reply.Memories == nil) {
 					continue
 				}
+				currentMatch := false
 				if reply.Memory != nil && !reply.Memory.Deleted {
 					current, err := m.get(ctx, reply.Memory.Key)
 					if err != nil {
@@ -195,6 +198,8 @@ func (m *MemoryContext) BeforeModelRewriteState(ctx context.Context, state *adk.
 					}
 					if current == nil {
 						reply.Memory = nil
+					} else {
+						currentMatch = true
 					}
 				}
 				filtered := []personal.Memory{}
@@ -208,6 +213,9 @@ func (m *MemoryContext) BeforeModelRewriteState(ctx context.Context, state *adk.
 					}
 				}
 				reply.Memories = filtered
+				if reply.CurrentMatch != nil {
+					*reply.CurrentMatch = currentMatch || len(filtered) > 0
+				}
 				raw, err := json.Marshal(reply)
 				if err != nil {
 					return ctx, state, err

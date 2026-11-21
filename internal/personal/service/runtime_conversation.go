@@ -7,11 +7,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openai/openai-go/v3"
 	"go.uber.org/zap"
 
+	"kagari/internal/domain"
 	"kagari/internal/logging"
 	"kagari/internal/personal"
-	"kagari/internal/personal/internal/textclip"
 )
 
 func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
@@ -38,7 +39,14 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 	}
 	if len(intents) > 0 {
 		outcome = "recovered_delivery"
-		return true, r.publishIntents(ctx, *event, intents, personal.TurnOutput{})
+		output := personal.TurnOutput{}
+		if event.Kind == personal.EventUser && event.Interrupted {
+			output, err = r.committedActionSupplement(ctx, *event, output)
+			if err != nil {
+				return true, err
+			}
+		}
+		return true, r.publishIntents(ctx, *event, intents, output)
 	}
 	if event.Kind == personal.EventTask {
 		state, err := r.taskCallbackState(ctx, *event)
@@ -60,7 +68,11 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 				return true, fmt.Errorf("personal: continued callback task %d is missing", event.TaskID)
 			}
 			if task.Status == personal.TaskWaitingBudget {
-				return true, r.publish(ctx, *event, personal.TurnOutput{TaskID: task.ID, Text: taskBudgetText(task), Purpose: personal.DeliveryStatus})
+				sources, err := r.taskSourcesForEvent(ctx, *event)
+				if err != nil {
+					return true, err
+				}
+				return true, r.publish(ctx, *event, personal.TurnOutput{TaskID: task.ID, Text: taskBudgetText(task, sources), Purpose: personal.DeliveryStatus})
 			}
 			outcome = "continued"
 			return true, r.Store.CompleteEvent(ctx, event.ID, personal.TurnOutput{TaskID: event.TaskID, Silent: true}, nil)
@@ -81,7 +93,7 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 			return true, r.completeStaleTaskCallback(ctx, *event)
 		}
 		if task.Status == personal.TaskWaitingBudget {
-			return true, r.publish(ctx, *event, personal.TurnOutput{TaskID: task.ID, Text: taskBudgetText(task), Purpose: personal.DeliveryStatus})
+			return true, r.publish(ctx, *event, personal.TurnOutput{TaskID: task.ID, Text: taskBudgetText(task, personal.SummarizeRunResult(*input.CurrentRun).Sources), Purpose: personal.DeliveryStatus})
 		}
 	}
 	if event.Interrupted {
@@ -141,6 +153,12 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 		return true, err
 	}
 	if len(intents) > 0 {
+		if output.CommittedActionsNeedReceipt {
+			output, err = r.committedActionSupplement(ctx, *event, output)
+			if err != nil {
+				return true, err
+			}
+		}
 		return true, r.publishIntents(ctx, *event, intents, output)
 	}
 	callbackState := personal.TaskCallbackCurrent
@@ -171,12 +189,28 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 		outcome = "fallback_reply"
 		log.Warn("conversation.model.failed", logging.ErrorFields(thinkErr)...)
 		fallback := "这轮回复未能完成。已提交的任务、计划和记忆操作仍保留，可以继续查询。"
-		if errors.Is(thinkErr, personal.ErrAttachmentUnavailable) {
+		attachmentUnavailable := errors.Is(thinkErr, personal.ErrAttachmentUnavailable)
+		modelQuotaFailure := event.Kind == personal.EventUser && isModelQuotaFailure(thinkErr) && !attachmentUnavailable
+		modelDeadline := event.Kind == personal.EventUser && errors.Is(thinkErr, context.DeadlineExceeded) && !attachmentUnavailable
+		if attachmentUnavailable {
 			fallback = "要发送的附件已删除或不可用，未发送。请重新上传或重新生成文件。"
+		} else if modelQuotaFailure {
+			fallback = "模型服务未能为这次请求分配额度。"
+		} else if modelDeadline {
+			fallback = "模型响应超时，本次未能生成回复。"
 		}
-		output = personal.TurnOutput{Text: fallback, TaskID: event.TaskID, ScheduleID: event.ScheduleID}
+		output = personal.TurnOutput{
+			Text: fallback, TaskID: event.TaskID, ScheduleID: event.ScheduleID,
+			SkipReplyPresentation: modelDeadline || modelQuotaFailure,
+		}
+		if !attachmentUnavailable {
+			output, err = r.committedActionFallback(ctx, *event, output)
+			if err != nil {
+				return true, err
+			}
+		}
 		if event.Kind == personal.EventTask {
-			output.Text = fmt.Sprintf("「%s」的阶段结果：\n%s", task.Title, textclip.Excerpt(event.Text, 6000))
+			output.Text = fmt.Sprintf("「%s」的阶段结果：\n%s", task.Title, boundTaskSummary(event.Text, maxTaskFallbackSummaryBytes))
 		}
 	}
 	if task != nil {
@@ -191,7 +225,7 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 			// This callback may finish its own handoff, but the child Run now
 			// owns any further Task decision.
 			if current.Status == personal.TaskWaitingBudget {
-				output.Text = taskBudgetText(current)
+				output.Text = taskBudgetText(current, personal.SummarizeRunResult(*input.CurrentRun).Sources)
 				output.Purpose = personal.DeliveryStatus
 				output.TaskID = task.ID
 				output.Silent = false
@@ -213,7 +247,8 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 				output = personal.TurnOutput{TaskID: task.ID, Silent: true}
 			} else {
 				// An incomplete planning turn must not strand work without a visible state.
-				draft := fmt.Sprintf("「%s」的阶段成果已保存，后续安排未能完成。你可以让我继续。\n\n%s", current.Title, textclip.Excerpt(current.Summary, 6000))
+				draft := fmt.Sprintf("「%s」的阶段成果已保存，后续安排未能完成。你可以让我继续。\n\n%s", current.Title, taskReplySummary(current))
+				draft = appendTaskSources(draft, personal.SummarizeRunResult(*input.CurrentRun).Sources)
 				_, err := r.Store.SettleTask(ctx, event.ID, task.ID, current.Revision, personal.TaskSettlement{
 					Status: personal.TaskWaitingInput, Summary: current.Summary, Delivery: personal.DeliveryDraft{Text: draft},
 				})
@@ -229,7 +264,7 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 				output.Silent = false
 			}
 		} else if current.Status == personal.TaskWaitingBudget {
-			output.Text = taskBudgetText(current)
+			output.Text = taskBudgetText(current, personal.SummarizeRunResult(*input.CurrentRun).Sources)
 			output.Purpose = personal.DeliveryStatus
 			output.TaskID = task.ID
 			output.Silent = false
@@ -252,6 +287,19 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 	return true, r.publish(ctx, *event, output)
 }
 
+func isModelQuotaFailure(err error) bool {
+	var apiErr *openai.Error
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return false
+	}
+	switch apiErr.Code {
+	case "pre_consume_token_quota_failed", "insufficient_quota":
+		return true
+	default:
+		return false
+	}
+}
+
 func (r *Runtime) taskCallbackState(ctx context.Context, event personal.Event) (personal.TaskCallbackState, error) {
 	state, err := r.Store.TaskCallbackState(ctx, event.ID)
 	if err != nil {
@@ -272,12 +320,24 @@ func (r *Runtime) completeStaleTaskCallback(ctx context.Context, event personal.
 // A restarted model could paraphrase an already committed tool call and create a second task.
 func (r *Runtime) recoverTurn(ctx context.Context, event personal.Event, task *personal.Task) error {
 	output := personal.TurnOutput{ScheduleID: event.ScheduleID, Text: "处理上一条消息时服务中断了。已提交的任务、计划和记忆操作仍保留，可以查询；尚未提交的部分请重新告诉我。"}
+	if event.Kind == personal.EventUser {
+		recovered, err := r.committedActionFallback(ctx, event, output)
+		if err != nil {
+			return err
+		}
+		return r.publish(ctx, event, recovered)
+	}
 	if task != nil {
 		if task.Status == personal.TaskQueued {
 			return r.publish(ctx, event, personal.TurnOutput{TaskID: task.ID, ScheduleID: event.ScheduleID, Silent: true})
 		}
+		sources, err := r.taskSourcesForEvent(ctx, event)
+		if err != nil {
+			return err
+		}
 		if task.Status == personal.TaskAwaitingReview {
-			draft := fmt.Sprintf("「%s」的阶段成果已保存，但后续安排被中断。请告诉我是否继续。\n\n%s", task.Title, textclip.Excerpt(task.Summary, 6000))
+			draft := fmt.Sprintf("「%s」的阶段成果已保存，但后续安排被中断。请告诉我是否继续。\n\n%s", task.Title, taskReplySummary(task))
+			draft = appendTaskSources(draft, sources)
 			if _, err := r.Store.SettleTask(ctx, event.ID, task.ID, task.Revision, personal.TaskSettlement{
 				Status: personal.TaskWaitingInput, Summary: task.Summary, Delivery: personal.DeliveryDraft{Text: draft},
 			}); err != nil {
@@ -287,8 +347,13 @@ func (r *Runtime) recoverTurn(ctx context.Context, event personal.Event, task *p
 				return err
 			}
 			output.Text = draft
+		} else if task.Status == personal.TaskWaitingBudget {
+			output.Text = taskBudgetText(task, sources)
+		} else if task.Status == personal.TaskCompleted || task.Status == personal.TaskFailed || task.Status == personal.TaskWaitingInput {
+			output.Text = taskClosingText(task, sources)
 		} else {
-			output.Text = fmt.Sprintf("「%s」此前的回复被中断，已保存的结果如下。\n\n%s", task.Title, textclip.Excerpt(task.Summary, 6000))
+			output.Text = fmt.Sprintf("「%s」此前的回复被中断，已保存的结果如下。\n\n%s", task.Title, taskReplySummary(task))
+			output.Text = appendTaskSources(output.Text, sources)
 		}
 		output.TaskID = task.ID
 	}
@@ -302,6 +367,20 @@ func (r *Runtime) recoverTurn(ctx context.Context, event personal.Event, task *p
 		}
 	}
 	return r.publish(ctx, event, output)
+}
+
+func (r *Runtime) taskSourcesForEvent(ctx context.Context, event personal.Event) ([]domain.SourceRef, error) {
+	if event.RunID <= 0 {
+		return nil, nil
+	}
+	run, err := r.Store.Run(ctx, event.RunID)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, nil
+	}
+	return personal.SummarizeRunResult(*run).Sources, nil
 }
 
 func (r *Runtime) publish(ctx context.Context, event personal.Event, output personal.TurnOutput) error {

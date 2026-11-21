@@ -136,9 +136,9 @@ make run
 
 Queued background work stays silent until results are available, unless the assistant can give a concrete initial analysis based on the user's input. There are no generic receipts or timed waiting notices. Sending a bare link starts a bounded first read, followed by a concise interpretation and supporting evidence. Related links can be read together, and later material can join the existing task. Required input, failures, and final results still receive replies. Ordinary reading replies omit Task/Run IDs; quote a message or describe the work to follow up.
 
-模型在工具调用时自然输出的第一段可见正文会直接进入投递队列，后续执行和最终回复继续进行；没有这段正文时保持安静，不额外调用模型生成概览。内部推理不作为即时回复发送。
+模型只有显式返回 `reply_kind="content"`、`attachments=[]` 的严格 JSON 回复，且正文不超过 200 个 Unicode 字符时，才会在工具调用旁发送一条简短的面向用户的即时内容。其他混合文本、思考内容和超长正文会被静默忽略，不会截断；后续执行和最终回复继续进行，也不会额外调用模型生成概览。
 
-The first visible text the model produces alongside a tool call is queued for delivery while execution continues toward the final reply. When there is no visible text, the assistant stays silent; it makes no extra model call to generate an overview. Internal reasoning is not sent as an interim reply.
+The model may send one short user-facing interim reply alongside a tool call only when it explicitly returns a strict JSON response with `reply_kind="content"`, `attachments=[]`, and text no longer than 200 Unicode characters. Other mixed text, reasoning, and longer text are silently ignored without truncation; execution continues toward the final reply, with no extra model call to generate an overview.
 
 ## 配置 / Configuration
 
@@ -234,6 +234,10 @@ Each Task stores its files at `<storage.path>.workspaces/<store_id>/tasks/<task_
 Only one `run` process can hold a database's lock. Read-only inspection commands remain available while the service runs.
 
 ### 定时计划 / Schedules
+
+在私聊发“现在开始一轮番茄钟，专注 30 分钟、休息 10 分钟，到点提醒我”。计时提醒在第 30 分钟和第 40 分钟各发送一条消息，随后结束。明确说“循环”会重复整组阶段。也可以说“每周一至周五早上九点发一句‘起来走走’”，到点会直接投递这句话。可问“有哪些定时提醒”，或说“取消计时提醒 #1”。计时状态保存在 SQLite，服务恢复后按原定时间继续，只补最近一个到期阶段。
+
+For a countdown, ask for one 30-minute focus session followed by a 10-minute break. Kagari sends the two messages at minutes 30 and 40 and finishes. Request a loop to repeat the steps. Calendar reminders such as “send ‘stretch’ at 09:00 every weekday” deliver the requested text directly. Ask for active reminders or cancel a timer by its reminder ID. After downtime, the service resumes the original timeline and queues only the latest due step.
 
 在私聊中登记周期目标，例如“每天上海时间 9 点生成一道 Go 练习题”。普通计划每次创建独立 Task；连续检查计划只在完整检查已保存区间后推进进度。首次登记从未来的正常周期开始，不立即执行。停机错过多个周期时只创建一次任务；同计划仍有排队、执行或待决回调时跳过本次触发。稳定等待输入或执行时间用完的 Task 不阻止下一周期。
 

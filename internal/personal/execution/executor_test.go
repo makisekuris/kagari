@@ -227,8 +227,37 @@ func TestTaskExecutorCancellationKeepsPartialEvidence(t *testing.T) {
 	for _, ref := range result.Sources {
 		joinedSources += savedSource(t, store, run.ID, ref).Content + " " + ref.ID
 	}
-	if !strings.Contains(joinedSources, "Actual evidence from the first page.") || !strings.Contains(result.Summary, "Actual evidence from the first page.") || !strings.Contains(result.Summary, "did not complete") || len(progress) != 2 {
+	if !strings.Contains(joinedSources, "Actual evidence from the first page.") || !strings.Contains(result.Summary, "https://example.org/first") || strings.Contains(result.Summary, "Actual evidence from the first page.") || len(progress) != 2 {
 		t.Fatalf("partial result was incomplete: result=%+v progress=%v", result, progress)
+	}
+}
+
+func TestPartialReadingSummaryKeepsSourceMetadataWithoutSourceBody(t *testing.T) {
+	const sourceURL = "https://example.org/private-guide"
+	const sourceBody = "Long source text that belongs in saved evidence."
+	result := domain.Result{Sources: []domain.Source{{
+		URL: sourceURL, Title: "Private guide", Status: "restricted", Reason: "login required",
+		Content: strings.Repeat(sourceBody, 100),
+	}}}
+	summary := partialReadingSummary(result, errors.New("read was interrupted"))
+	for _, expected := range []string{"Private guide", sourceURL, "访问受限", "login required"} {
+		if !strings.Contains(summary, expected) {
+			t.Errorf("partial summary omitted %q: %q", expected, summary)
+		}
+	}
+	if strings.Contains(summary, sourceBody) || strings.Contains(summary, "returned text:") {
+		t.Fatalf("partial summary copied source content into chat fallback: %q", summary)
+	}
+	withPartialResult := partialReadingSummary(domain.Result{
+		Body: "已对照可访问页面的两项要求。", Sources: result.Sources,
+	}, errors.New("another source could not be read"))
+	for _, expected := range []string{"未能完成原因：operation failed。", "已对照可访问页面的两项要求。", sourceURL, "访问受限", "login required"} {
+		if !strings.Contains(withPartialResult, expected) {
+			t.Errorf("partial model result omitted %q: %q", expected, withPartialResult)
+		}
+	}
+	if strings.Contains(withPartialResult, sourceBody) {
+		t.Fatalf("partial model result fallback copied source content: %q", withPartialResult)
 	}
 }
 
@@ -256,7 +285,7 @@ func TestReadingExecutorRejectsTrailingTaskInputAndRetainsEvidenceOnModelError(t
 		if err == nil {
 			t.Fatalf("result=%+v err=%v", result, err)
 		}
-		if len(result.Sources) != 1 || !strings.Contains(result.Summary, "Observed text only.") || strings.Contains(result.Summary, "successfully completed") {
+		if len(result.Sources) != 1 || !strings.Contains(result.Summary, "https://example.org/evidence") || !strings.Contains(result.Summary, "读取完成") || strings.Contains(result.Summary, "Observed text only.") || strings.Contains(result.Summary, "returned text:") {
 			t.Fatalf("partial evidence was not preserved accurately: %+v", result)
 		}
 		if got := savedSource(t, store, run.ID, result.Sources[0]).Content; got != "Observed text only." {
