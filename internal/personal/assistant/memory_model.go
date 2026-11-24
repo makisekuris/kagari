@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"kagari/internal/logging"
+	"kagari/internal/modelprovider"
 	"kagari/internal/personal"
 	"kagari/internal/personal/agentctx"
 	"kagari/internal/personal/internal/textclip"
@@ -34,7 +35,8 @@ func (a *MainAgent) ReviewMemory(ctx context.Context, input personal.MemoryRevie
 	defer cancel()
 
 	input = boundedMemoryReviewInput(input)
-	boundedModel, err := agentctx.ModelWithSchema(a.Model, memoryReviewOutputSchema())
+	outputSchema := memoryReviewOutputSchema()
+	boundedModel, err := agentctx.ModelWithSchema(a.Model, outputSchema)
 	if err != nil {
 		return personal.MemoryReview{}, err
 	}
@@ -52,7 +54,8 @@ func (a *MainAgent) ReviewMemory(ctx context.Context, input personal.MemoryRevie
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
 	observer := logging.NewCallbackObserver("memory_review")
 	modelCtx, cancelModel := context.WithCancel(ctx)
-	output, err := consumePersonalEvents(runner.Query(modelCtx, string(encoded), adk.WithChatModelOptions([]model.Option{memoryReviewOutputOption()}), adk.WithCallbacks(observer)))
+	outputOption := modelprovider.WithJSONSchema("personal_memory_review", outputSchema)
+	output, err := consumePersonalEvents(runner.Query(modelCtx, string(encoded), adk.WithChatModelOptions([]model.Option{outputOption}), adk.WithCallbacks(observer)))
 	if err != nil {
 		cancelModel()
 	}
@@ -84,10 +87,6 @@ func boundedMemoryReviewInput(input personal.MemoryReviewInput) personal.MemoryR
 		}
 	}
 	return input
-}
-
-func memoryReviewOutputOption() model.Option {
-	return personalJSONOutputOption("personal_memory_review", memoryReviewOutputSchema())
 }
 
 func memoryReviewOutputSchema() map[string]any {

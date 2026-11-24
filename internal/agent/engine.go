@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -23,6 +22,7 @@ import (
 	"kagari/internal/domain"
 	"kagari/internal/inputbudget"
 	"kagari/internal/logging"
+	"kagari/internal/modelprovider"
 	"kagari/internal/reader"
 	"kagari/internal/textpage"
 )
@@ -56,12 +56,7 @@ func New(ctx context.Context, cfg config.Config, read func(context.Context, stri
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read profile: %w", err)
 	}
-	zero, no := 0, false
-	m, err := agenticopenai.NewResponsesModel(ctx, &agenticopenai.ResponsesConfig{
-		BaseURL: cfg.Model.BaseURL, APIKey: cfg.Model.APIKey, Model: cfg.Model.Name,
-		Timeout: &cfg.Model.Timeout, MaxTokens: &cfg.Model.MaxOutputTokens, MaxRetries: &zero,
-		Store: &no, ParallelToolCalls: &no,
-	})
+	m, err := modelprovider.New(ctx, cfg.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +64,7 @@ func New(ctx context.Context, cfg config.Config, read func(context.Context, stri
 	if persona != nil {
 		personaText = persona.Prompt()
 	}
-	engine := &Engine{Model: &normalizedResponsesModel{ResponsesModel: m}, Config: cfg, Profile: string(profile), Read: read, personaPrompt: personaText}
+	engine := &Engine{Model: m, Config: cfg, Profile: string(profile), Read: read, personaPrompt: personaText}
 	engine.Model, err = engine.budgetModel(ctx)
 	if err != nil {
 		return nil, err

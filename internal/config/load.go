@@ -33,12 +33,13 @@ func Load(path string) (Config, error) {
 	for key, value := range defaults {
 		v.SetDefault(key, value)
 	}
-	keys := []string{"model.base_url", "model.api_key", "model.name", "telegram.token", "telegram.allowed_user_ids"}
+	keys := []string{"model.base_url", "model.api_key", "model.apiType", "model.name", "telegram.token", "telegram.allowed_user_ids"}
 	for key := range defaults {
 		keys = append(keys, key)
 	}
 	for _, key := range keys {
-		name := "KAGARI_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
+		envKey := strings.ReplaceAll(key, "apiType", "api_type")
+		name := "KAGARI_" + strings.ToUpper(strings.ReplaceAll(envKey, ".", "_"))
 		if err := v.BindEnv(key, name); err != nil {
 			return Config{}, err
 		}

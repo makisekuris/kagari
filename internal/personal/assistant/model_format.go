@@ -12,6 +12,7 @@ import (
 
 	"kagari/internal/channel"
 	"kagari/internal/logging"
+	"kagari/internal/modelprovider"
 	"kagari/internal/personal"
 	"kagari/internal/personal/agentctx"
 )
@@ -33,14 +34,14 @@ func (a *MainAgent) formatTurn(ctx context.Context, raw string, createdAttachmen
 	if err != nil {
 		return personalTurnResponse{}, fmt.Errorf("encode personal response draft: %w", err)
 	}
-	output, err := a.runToolFreeFormatter(ctx, "personal_response_formatter", "Format a completed assistant draft without performing actions.", personalFormatInstruction, encoded, personalTurnOutputSchema(), personalTurnOutputOption())
+	output, err := a.runToolFreeFormatter(ctx, "personal_response_formatter", "Format a completed assistant draft without performing actions.", personalFormatInstruction, encoded, "personal_turn", personalTurnOutputSchema())
 	if err != nil {
 		return personalTurnResponse{}, err
 	}
 	return decodePersonalTurnResponse(output)
 }
 
-func (a *MainAgent) runToolFreeFormatter(ctx context.Context, name, description, instruction string, input []byte, outputSchema map[string]any, outputOption model.Option) (string, error) {
+func (a *MainAgent) runToolFreeFormatter(ctx context.Context, name, description, instruction string, input []byte, schemaName string, outputSchema map[string]any) (string, error) {
 	if a == nil || a.Model == nil {
 		return "", errors.New("personal response formatter is not configured")
 	}
@@ -57,6 +58,7 @@ func (a *MainAgent) runToolFreeFormatter(ctx context.Context, name, description,
 	runner := adk.NewTypedRunner(adk.TypedRunnerConfig[*schema.AgenticMessage]{Agent: formatter})
 	observer := logging.NewCallbackObserver(name)
 	modelCtx, cancelModel := context.WithCancel(ctx)
+	outputOption := modelprovider.WithJSONSchema(schemaName, outputSchema)
 	result, err := consumePersonalEvents(runner.Query(modelCtx, string(input), adk.WithChatModelOptions([]model.Option{outputOption}), adk.WithCallbacks(observer)))
 	if err != nil {
 		cancelModel()
@@ -67,10 +69,6 @@ func (a *MainAgent) runToolFreeFormatter(ctx context.Context, name, description,
 		return "", err
 	}
 	return result, nil
-}
-
-func personalTurnOutputOption() model.Option {
-	return personalJSONOutputOption("personal_turn", personalTurnOutputSchema())
 }
 
 func personalTurnOutputSchema() map[string]any {

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cloudwego/eino/components/model"
-
 	"kagari/internal/personal"
 )
 
@@ -62,7 +60,7 @@ func (a *MainAgent) PresentReply(ctx context.Context, event personal.Event, draf
 	if err != nil {
 		return "", fmt.Errorf("encode personal reply presentation input: %w", err)
 	}
-	raw, err := a.runToolFreeFormatter(ctx, "personal_reply_presenter", "Edit final response text without performing actions.", personalPresentationInstruction, input, personalPresentationOutputSchema(), personalPresentationOutputOption())
+	raw, err := a.runToolFreeFormatter(ctx, "personal_reply_presenter", "Edit final response text without performing actions.", personalPresentationInstruction, input, "personal_presentation", personalPresentationOutputSchema())
 	if err != nil {
 		return "", err
 	}
@@ -87,8 +85,4 @@ func personalPresentationOutputSchema() map[string]any {
 		"required":             []string{"omitted_text", "text"},
 		"additionalProperties": false,
 	}
-}
-
-func personalPresentationOutputOption() model.Option {
-	return personalJSONOutputOption("personal_presentation", personalPresentationOutputSchema())
 }

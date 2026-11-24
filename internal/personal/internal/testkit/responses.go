@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/cloudwego/eino/components/model"
 
 	"kagari/internal/agent"
 	"kagari/internal/config"
 	"kagari/internal/domain"
 	"kagari/internal/inputbudget"
+	"kagari/internal/modelprovider"
 )
 
 type Response struct {
@@ -57,11 +57,9 @@ func (f *ResponsesFixture) Model(t *testing.T) model.AgenticModel {
 	t.Helper()
 	server := httptest.NewServer(f)
 	t.Cleanup(server.Close)
-	timeout := 4 * time.Second
-	maxRetries, store, parallelCalls := 0, false, false
-	m, err := agenticopenai.NewResponsesModel(context.Background(), &agenticopenai.ResponsesConfig{
-		BaseURL: server.URL + "/v1", APIKey: "test-key", Model: "fixture-model",
-		Timeout: &timeout, MaxRetries: &maxRetries, Store: &store, ParallelToolCalls: &parallelCalls,
+	m, err := modelprovider.New(context.Background(), config.Model{
+		BaseURL: server.URL + "/v1", APIKey: "test-key", Name: "fixture-model",
+		Timeout: 4 * time.Second, MaxOutputTokens: 5000,
 	})
 	if err != nil {
 		t.Fatal(err)

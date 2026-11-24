@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	chatopenai "github.com/meguminnnnnnnnn/go-openai"
 	"github.com/openai/openai-go/v3"
 )
 
@@ -30,6 +31,8 @@ func TestErrorFieldsAreUsefulAndDoNotExposeRawErrors(t *testing.T) {
 		want string
 	}{
 		{"api", fmt.Errorf("wrapped: %w", apiErr), "model request failed"},
+		{"chat_api", fmt.Errorf("wrapped: %w", &chatopenai.APIError{HTTPStatusCode: 403, Type: "invalid_request_error", Code: "invalid_api_key", Message: "fixture_secret_body"}), "model request failed"},
+		{"chat_http", &chatopenai.RequestError{HTTPStatusCode: 502, Body: []byte("fixture_secret_body")}, "model request failed"},
 		{"canceled", fmt.Errorf("wrapped: %w", context.Canceled), "operation canceled"},
 		{"deadline", context.DeadlineExceeded, "operation deadline exceeded"},
 		{"dns", &net.DNSError{Err: "fixture_secret_body", Name: "secret.example", IsNotFound: true}, "DNS lookup failed"},
@@ -59,8 +62,11 @@ func TestErrorFieldsAreUsefulAndDoNotExposeRawErrors(t *testing.T) {
 			if values["reason"] != tc.want || ErrorReason(tc.err) != tc.want {
 				t.Fatalf("reason fields = %v, ErrorReason = %q, want %q", values, ErrorReason(tc.err), tc.want)
 			}
-			if tc.name == "api" && (values["error_type"] != "invalid_request_error" || values["error_code"] != "invalid_api_key" || fields[2].Integer != 403) {
+			if (tc.name == "api" || tc.name == "chat_api") && (values["error_type"] != "invalid_request_error" || values["error_code"] != "invalid_api_key" || fields[2].Integer != 403) {
 				t.Fatalf("API diagnostics missing safe structured data: %+v", fields)
+			}
+			if tc.name == "chat_http" && (values["error_type"] != "model_api_error" || fields[2].Integer != 502) {
+				t.Fatalf("Chat HTTP diagnostics missing safe structured data: %+v", fields)
 			}
 			if tc.name == "json" && values["error_type"] != "json_syntax_error" {
 				t.Fatalf("JSON error type missing: %+v", fields)

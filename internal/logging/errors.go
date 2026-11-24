@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	chatopenai "github.com/meguminnnnnnnnn/go-openai"
 	"github.com/openai/openai-go/v3"
 	"go.uber.org/zap"
 )
@@ -47,11 +48,16 @@ func ErrorReason(err error) string {
 func describeError(err error) errorInfo {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
-		kind := safeIdentifier(apiErr.Type)
-		if kind == "" {
-			kind = "model_api_error"
-		}
-		return errorInfo{reason: "model request failed", kind: kind, code: safeIdentifier(apiErr.Code), status: apiErr.StatusCode}
+		return modelAPIError(apiErr.Type, apiErr.Code, apiErr.StatusCode)
+	}
+	var chatErr *chatopenai.APIError
+	if errors.As(err, &chatErr) {
+		code, _ := chatErr.Code.(string)
+		return modelAPIError(chatErr.Type, code, chatErr.HTTPStatusCode)
+	}
+	var chatRequestErr *chatopenai.RequestError
+	if errors.As(err, &chatRequestErr) {
+		return modelAPIError("", "", chatRequestErr.HTTPStatusCode)
 	}
 	if errors.Is(err, context.Canceled) {
 		return errorInfo{reason: "operation canceled", kind: "context_canceled"}
@@ -116,6 +122,14 @@ func describeError(err error) errorInfo {
 		}
 	}
 	return errorInfo{reason: "operation failed", kind: "unknown_error"}
+}
+
+func modelAPIError(kind, code string, status int) errorInfo {
+	kind = safeIdentifier(kind)
+	if kind == "" {
+		kind = "model_api_error"
+	}
+	return errorInfo{reason: "model request failed", kind: kind, code: safeIdentifier(code), status: status}
 }
 
 func safeIdentifier(value string) string {

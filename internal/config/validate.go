@@ -48,6 +48,9 @@ func (c Config) ValidatePersonal() error {
 // Validate 先校验所有命令共享的边界，再按调用方需求检查凭证。
 // 本地检查不要求凭证；启动服务时再检查模型和所选渠道。
 func (c Config) Validate(modelRequired, telegramRequired bool) error {
+	if apiType := c.Model.EffectiveAPIType(); apiType != ModelAPIResponses && apiType != ModelAPIChatCompletions {
+		return errors.New("model.apiType must be responses or chat_completions")
+	}
 	if c.Personal.Timezone == "Local" {
 		return errors.New("personal.timezone must be a valid IANA time zone")
 	}

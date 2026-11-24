@@ -148,10 +148,11 @@ Commands load `.env` from the current working directory; no `source` command is 
 
 | 设置 / Setting | 默认值 / Default | 说明 / Description |
 | --- | --- | --- |
+| `model.apiType` / `KAGARI_MODEL_API_TYPE` | `responses` | 选择 Responses（默认）或 Chat Completions，空值按 `responses` 处理 / Selects Responses (default) or Chat Completions. Empty values use `responses` |
 | `model.context_window` | 必填 / required | 端点输入加输出总 token 容量，不从模型别名推断 / endpoint input plus output token capacity |
 | `storage.path` | `data/kagari-context.db` | SQLite 数据库 / SQLite database |
 | `profile_path` | `profile.md` | V2 Agent 的 owner 背景与表达偏好 / Owner context and style for the V2 agent |
-| `agent.streaming` | `false` | 启用 Responses SSE / Enables Responses SSE |
+| `agent.streaming` | `false` | 为所选 API 启用 SSE 流式响应 / Enables SSE streaming for the selected API |
 | `personal.task_concurrency` | `4` | 并行 Task worker 数，必须为正数 / Concurrent task workers; must be positive |
 | `personal.task_budget` | `30m` | 每个 Task 的累计执行时长上限 / Total execution time limit per Task |
 | `personal.timezone` | `Asia/Shanghai` | 新计划的默认 IANA 时区 / Default IANA timezone for new schedules |
@@ -171,6 +172,10 @@ V2 `run` reads the persona prompt through `persona.Default()` and loads `profile
 Built-in personas are Taffy (default) and Mingqian Nailv. To use Nailv, change the import in `internal/persona/main.go` to `nailv "kagari/internal/persona/nailv"` and return `nailv.Nailv{}` from `Default()`. Nailv draws on the [public character profile](https://laplace.live/about), using a flower shop assistant background and a friendly, laid-back tone with occasional teasing.
 
 ### 模型输出 / Model output
+
+两种 API 均支持 `agent.streaming` SSE 流式响应。
+
+Both APIs support SSE streaming through `agent.streaming`.
 
 主对话和读取阶段在调用工具时不附加 JSON Schema 输出约束，最终结果由程序校验。主对话格式不合格时，只额外进行一次无工具的严格格式整理，不重做操作；自动记忆提取也使用严格 JSON Schema，因此模型端点仍需支持该能力。Task 执行器直接返回文字摘要。
 

@@ -20,10 +20,25 @@ type Config struct {
 type Model struct {
 	BaseURL         string        `mapstructure:"base_url"`
 	APIKey          string        `mapstructure:"api_key"`
+	APIType         ModelAPIType  `mapstructure:"apiType"`
 	Name            string        `mapstructure:"name"`
 	ContextWindow   int64         `mapstructure:"context_window"`
 	Timeout         time.Duration `mapstructure:"timeout"`
 	MaxOutputTokens int           `mapstructure:"max_output_tokens"`
+}
+
+type ModelAPIType string
+
+const (
+	ModelAPIResponses       ModelAPIType = "responses"
+	ModelAPIChatCompletions ModelAPIType = "chat_completions"
+)
+
+func (m Model) EffectiveAPIType() ModelAPIType {
+	if m.APIType == "" {
+		return ModelAPIResponses
+	}
+	return m.APIType
 }
 
 type Personal struct {

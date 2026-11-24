@@ -9,13 +9,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
-	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
 	"go.uber.org/zap"
 
 	"kagari/internal/channel"
@@ -229,14 +226,6 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 		CommittedActionsNeedReceipt: tools.persistedControl && response.SupplementalReplyFailureMessage != "",
 		SkipReplyPresentation:       response.SkipReplyPresentation,
 		Purpose:                     purpose, Silent: !notify, Attachments: response.Attachments, ReplyKind: response.ReplyKind}, nil
-}
-
-func personalJSONOutputOption(name string, schema map[string]any) model.Option {
-	return agenticopenai.WithResponsesText(&responses.ResponseTextConfigParam{
-		Format: responses.ResponseFormatTextConfigUnionParam{OfJSONSchema: &responses.ResponseFormatTextJSONSchemaConfigParam{
-			Name: name, Strict: param.NewOpt(true), Schema: schema,
-		}},
-	})
 }
 
 func taskOutcomeRequiresNotification(input personal.TurnInput) bool {

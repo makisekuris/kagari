@@ -1,5 +1,7 @@
 model:
-  base_url: "" # Your Responses-compatible base URL, including /v1 when needed.
+  base_url: "" # OpenAI-compatible API base URL, including /v1 when needed.
+  # Optional API type. Use responses (default) or chat_completions.
+  # apiType: chat_completions
   name: "" # Model ID provided by your endpoint.
   context_window: 0 # Required: set the endpoint's total input + output token capacity.
   # Use KAGARI_MODEL_API_KEY for the credential.
@@ -44,4 +46,4 @@ agent:
   max_sources: 6 # Shared budget for HTTP reads and valid browser actions per task stage.
   max_iterations: 10
   timeout: 3m
-  streaming: false # Enables Responses SSE for task stages; per-chunk SSE logs are disabled.
+  streaming: false # Enables SSE for task stages with the selected API. Per-chunk logs are disabled.

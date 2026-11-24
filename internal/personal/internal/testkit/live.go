@@ -73,6 +73,12 @@ func (transport *livePersonalTransport) RoundTrip(request *http.Request) (*http.
 						Strict *bool  `json:"strict"`
 					} `json:"format"`
 				} `json:"text"`
+				ResponseFormat struct {
+					Type       string `json:"type"`
+					JSONSchema struct {
+						Strict bool `json:"strict"`
+					} `json:"json_schema"`
+				} `json:"response_format"`
 				Tools []struct {
 					Name       string `json:"name"`
 					Strict     *bool  `json:"strict"`
@@ -103,7 +109,8 @@ func (transport *livePersonalTransport) RoundTrip(request *http.Request) (*http.
 					transport.t.Logf("request tool names=%v", names)
 					transport.printedSchema = true
 				}
-				transport.t.Logf("real HTTP request tools=%d tool_choice=%s text.format.type=%s", len(names), metadata.ToolChoice, metadata.Text.Format.Type)
+				strict := metadata.Text.Format.Strict != nil && *metadata.Text.Format.Strict || metadata.ResponseFormat.JSONSchema.Strict
+				transport.t.Logf("real HTTP request tools=%d tool_choice=%s text.format.type=%s response_format.type=%s schema_strict=%t", len(names), metadata.ToolChoice, metadata.Text.Format.Type, metadata.ResponseFormat.Type, strict)
 			}
 		}
 	}

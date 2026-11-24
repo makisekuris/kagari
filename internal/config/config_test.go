@@ -58,6 +58,79 @@ func TestAgentStreamingOverride(t *testing.T) {
 	}
 }
 
+func TestModelAPITypeDefaultsAndYAML(t *testing.T) {
+	t.Chdir(t.TempDir())
+	unsetModelAPITypeEnv(t)
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want ModelAPIType
+	}{
+		{name: "omitted", want: ModelAPIResponses},
+		{name: "empty", yaml: "model:\n  apiType: \"\"\n", want: ModelAPIResponses},
+		{name: "null", yaml: "model:\n  apiType: null\n", want: ModelAPIResponses},
+		{name: "configured", yaml: "model:\n  apiType: chat_completions\n", want: ModelAPIChatCompletions},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile("config.yaml", []byte(tc.yaml), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Model.EffectiveAPIType(); got != tc.want {
+				t.Fatalf("EffectiveAPIType() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestModelAPITypeEnvironmentPrecedenceAndValidation(t *testing.T) {
+	t.Chdir(t.TempDir())
+	unsetModelAPITypeEnv(t)
+	if err := os.WriteFile("config.yaml", []byte("model:\n  apiType: chat_completions\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".env", []byte("KAGARI_MODEL_API_TYPE=responses\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load("")
+	if err != nil || cfg.Model.APIType != ModelAPIResponses {
+		t.Fatalf(".env did not override YAML: apiType=%q err=%v", cfg.Model.APIType, err)
+	}
+	t.Setenv("KAGARI_MODEL_API_TYPE", "chat_completions")
+	cfg, err = Load("")
+	if err != nil || cfg.Model.APIType != ModelAPIChatCompletions {
+		t.Fatalf("system environment did not override .env: apiType=%q err=%v", cfg.Model.APIType, err)
+	}
+	t.Setenv("KAGARI_MODEL_API_TYPE", "")
+	cfg, err = Load("")
+	if err != nil || cfg.Model.APIType != "" || cfg.Model.EffectiveAPIType() != ModelAPIResponses {
+		t.Fatalf("explicit empty system environment did not override lower precedence: apiType=%q effective=%q err=%v", cfg.Model.APIType, cfg.Model.EffectiveAPIType(), err)
+	}
+	t.Setenv("KAGARI_MODEL_API_TYPE", "chat-completions")
+	if _, err := Load(""); err == nil || !strings.Contains(err.Error(), "model.apiType") {
+		t.Fatalf("invalid API type accepted or not identified: %v", err)
+	}
+}
+
+func unsetModelAPITypeEnv(t *testing.T) {
+	t.Helper()
+	key := "KAGARI_MODEL_API_TYPE"
+	value, present := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if present {
+			_ = os.Setenv(key, value)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+}
+
 func TestRemovedArchiveSettingsAreRejected(t *testing.T) {
 	t.Chdir(t.TempDir())
 	for name, yaml := range map[string]string{

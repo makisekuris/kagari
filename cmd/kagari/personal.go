@@ -75,7 +75,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 		runErr = errors.Join(runErr, session.Close())
 	}()
 	// No polling or worker starts before the persistent log has opened successfully.
-	log.Info("service.starting", zap.String("log_directory", directory), zap.Int("task_concurrency", cfg.Personal.TaskConcurrency))
+	log.Info("service.starting", zap.String("log_directory", directory), zap.Int("task_concurrency", cfg.Personal.TaskConcurrency), zap.String("model_api_type", string(cfg.Model.EffectiveAPIType())))
 	role := persona.Default()
 	engine, err := agent.New(ctx, cfg, read, role)
 	if err != nil {
