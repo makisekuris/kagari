@@ -8,6 +8,16 @@ model:
   timeout: 60s
   max_output_tokens: 5000
 
+# Optional independent endpoint for direct image interpretation. It does not inherit model credentials or URL.
+# multimodal_model:
+#   base_url: "" # OpenAI-compatible API base URL, including /v1 when needed.
+#   # Optional API type. Use responses (default) or chat_completions.
+#   # apiType: chat_completions
+#   name: "" # Model ID provided by your endpoint.
+#   # Use KAGARI_MULTIMODAL_MODEL_API_KEY for the credential.
+#   timeout: 60s
+#   max_output_tokens: 5000
+
 storage:
   path: data/kagari-context.db
 

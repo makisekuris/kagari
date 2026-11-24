@@ -29,6 +29,14 @@ import (
 	"go.uber.org/zap"
 )
 
+func configuredSecrets(cfg config.Config) []string {
+	secrets := []string{cfg.Model.APIKey, cfg.Telegram.Token}
+	if cfg.MultimodalModel != nil {
+		secrets = append(secrets, cfg.MultimodalModel.APIKey)
+	}
+	return secrets
+}
+
 func runPersonal(ctx context.Context, cfg config.Config, read func(context.Context, string) (domain.Source, error), log *zap.Logger) (runErr error) {
 	if err := cfg.ValidatePersonal(); err != nil {
 		return err
@@ -59,7 +67,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 		Directory: directory, StoreID: storeID, Console: os.Stderr, Level: level.Level(),
 		RotateBytes: cfg.Logging.RotateMiB << 20, MaxBytes: cfg.Logging.MaxTotalMiB << 20,
 		MaxAge:  time.Duration(cfg.Logging.RetentionDays) * 24 * time.Hour,
-		Secrets: []string{cfg.Model.APIKey, cfg.Telegram.Token},
+		Secrets: configuredSecrets(cfg),
 	})
 	if err != nil {
 		return fmt.Errorf("initialize service logs: %w", err)
@@ -87,7 +95,8 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 			return browser.Open(ctx, cfg)
 		}
 	}
-	main := &assistant.MainAgent{Store: s, Log: log, Model: engine.Model, Persona: role.Prompt(), Profile: engine.Profile, Timezone: cfg.Personal.Timezone, MaxIterations: cfg.Agent.MaxIterations, Timeout: cfg.Agent.Timeout}
+	main := &assistant.MainAgent{Store: s, Log: log, Model: engine.Model, MultimodalModel: engine.MultimodalModel,
+		Persona: role.Prompt(), Profile: engine.Profile, Timezone: cfg.Personal.Timezone, MaxIterations: cfg.Agent.MaxIterations, Timeout: cfg.Agent.Timeout}
 	var client channel.Client
 	if cfg.Personal.Channel == "weixin" {
 		credentials, loadErr := weixin.LoadCredentials(credentialPath(cfg))

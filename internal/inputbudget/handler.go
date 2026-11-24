@@ -110,10 +110,10 @@ func NewAgenticHandler(ctx context.Context, cfg HandlerConfig) (*AgenticHandler,
 		limits:                            limits, outputSchema: outputSchema, summaryOutputSchema: summaryOutputSchema,
 		summaryOptions: append([]model.Option(nil), cfg.SummaryModelOptions...), requiredPrefix: cfg.RequiredPrefix,
 		beforeModel: cfg.BeforeModel, validateSummary: cfg.ValidateSummary, canReduce: cfg.CanReduceToolRound, persistReplace: cfg.PersistAndReplace,
-		keepTools: make(map[string]struct{}, len(cfg.KeepUncompressedTools)), noSummaryTools: make(map[string]struct{}, len(cfg.ExcludeFromSummaryTools)+7),
+		keepTools: make(map[string]struct{}, len(cfg.KeepUncompressedTools)), noSummaryTools: make(map[string]struct{}, len(cfg.ExcludeFromSummaryTools)+8),
 		recentMessages: cfg.RecentMessages, observe: cfg.Observe,
 	}
-	for _, name := range []string{"memory_get", "memory_search", "memory_history", "memory_put", "memory_forget", "read_attachment", "write_attachment"} {
+	for _, name := range []string{"memory_get", "memory_search", "memory_history", "memory_put", "memory_forget", "read_attachment", "write_attachment", "analyze_image"} {
 		h.noSummaryTools[name] = struct{}{}
 	}
 	for _, name := range cfg.KeepUncompressedTools {

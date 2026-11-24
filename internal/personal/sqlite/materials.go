@@ -75,7 +75,7 @@ func (s *Store) SaveToolRecord(ctx context.Context, scope personal.ReadScope, ke
 		return "", errors.New("material_too_large")
 	}
 	for _, name := range record.Tools {
-		if strings.HasPrefix(name, "memory_") || (name == "read_attachment" || name == "write_attachment") {
+		if strings.HasPrefix(name, "memory_") || name == "read_attachment" || name == "write_attachment" || name == "analyze_image" {
 			return "", errors.New("personal: memory and attachment bodies cannot be copied into tool records")
 		}
 	}

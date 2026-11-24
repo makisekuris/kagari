@@ -104,9 +104,9 @@ make build
 
 The terminal displays the QR code. Optional `-qr` saves and refreshes a PNG at a previously unused path. Repeating `login` for the same user reloads credentials in the running service; changing users requires stopping the service and running `weixin rebind`. After a login token changes, send a new message to the bot to resume pending deliveries. Credentials are stored at `<storage.path>.channels/weixin.json`. Status reports saved configuration, not live platform availability.
 
-两渠道支持文字和普通文件，单文件双向上限 20,000,000 字节；请将图片作为文件发送。Agent 收到正文与附件 ID，可读取最多 1 MiB 的 UTF-8 文本、生成文本成果并选择发送；本次未增加 PDF、Office、音视频解析器。附件保留至显式删除：
+两渠道支持文字和普通文件，单文件双向上限 20,000,000 字节；请将图片作为文件发送。配置 `multimodal_model` 后，可以随 PNG、JPEG 或 WebP 图片提问，例如「截图里的错误码是什么？」。主 Agent 把问题和指定图片交给视觉模型，拿到文字结果后在同一轮回答。后台 Task 也可以分析分配给它的图片。文本附件支持读取最多 1 MiB 的 UTF-8 文本。附件保留至显式删除：
 
-Both channels support text and ordinary files up to 20,000,000 bytes each; send images as files. The Agent receives text and attachment IDs, reads UTF-8 text up to 1 MiB, and selects generated text files for delivery. PDF, Office, audio and video parsing are not included. Files remain until explicitly deleted:
+Both channels support text and ordinary files up to 20,000,000 bytes each; send images as files. Configure `multimodal_model` to ask about an attached PNG, JPEG, or WebP, for example “What error code is in this screenshot?” The main agent delegates the image and question to the vision model and uses its text result to answer in the same turn. Background tasks can analyze images assigned to them. UTF-8 text attachments support reads up to 1 MiB. Files remain until explicitly deleted:
 
 ```sh
 ./bin/kagari attachments list
@@ -149,6 +149,7 @@ Commands load `.env` from the current working directory; no `source` command is 
 | 设置 / Setting | 默认值 / Default | 说明 / Description |
 | --- | --- | --- |
 | `model.apiType` / `KAGARI_MODEL_API_TYPE` | `responses` | 选择 Responses（默认）或 Chat Completions，空值按 `responses` 处理 / Selects Responses (default) or Chat Completions. Empty values use `responses` |
+| `multimodal_model` | 可选 / optional | 图片理解端点，单独配置 `base_url`、`name` 和 `KAGARI_MULTIMODAL_MODEL_API_KEY` / Independent image model endpoint, model name and API key. See [config.example.yaml](config.example.yaml). |
 | `model.context_window` | 必填 / required | 端点输入加输出总 token 容量，不从模型别名推断 / endpoint input plus output token capacity |
 | `storage.path` | `data/kagari-context.db` | SQLite 数据库 / SQLite database |
 | `profile_path` | `profile.md` | V2 Agent 的 owner 背景与表达偏好 / Owner context and style for the V2 agent |

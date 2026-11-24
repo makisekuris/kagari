@@ -53,7 +53,7 @@ func (f *ResponsesFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (f *ResponsesFixture) Model(t *testing.T) model.AgenticModel {
+func (f *ResponsesFixture) RawModel(t *testing.T) model.AgenticModel {
 	t.Helper()
 	server := httptest.NewServer(f)
 	t.Cleanup(server.Close)
@@ -64,6 +64,12 @@ func (f *ResponsesFixture) Model(t *testing.T) model.AgenticModel {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return m
+}
+
+func (f *ResponsesFixture) Model(t *testing.T) model.AgenticModel {
+	t.Helper()
+	m := f.RawModel(t)
 	limits, err := inputbudget.NewLimits(262144, 5000)
 	if err != nil {
 		t.Fatal(err)

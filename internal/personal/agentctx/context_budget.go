@@ -66,7 +66,7 @@ func BudgetHandler(ctx context.Context, m model.AgenticModel, store BudgetReposi
 			}
 			return nil
 		},
-		KeepUncompressedTools: []string{"memory_get", "memory_search", "memory_history", "memory_put", "memory_forget", "read_attachment", "write_attachment"},
+		KeepUncompressedTools: []string{"memory_get", "memory_search", "memory_history", "memory_put", "memory_forget", "read_attachment", "write_attachment", "analyze_image"},
 		PersistAndReplace: func(ctx context.Context, round inputbudget.ToolRound) ([]*schema.AgenticMessage, error) {
 			return reduceToolRound(ctx, store, scope, round)
 		},

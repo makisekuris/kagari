@@ -3,8 +3,9 @@ package config
 import "time"
 
 type Config struct {
-	Model   Model `mapstructure:"model"`
-	Storage struct {
+	Model           Model  `mapstructure:"model"`
+	MultimodalModel *Model `mapstructure:"multimodal_model"`
+	Storage         struct {
 		Path string `mapstructure:"path"`
 	} `mapstructure:"storage"`
 	Telegram    Telegram `mapstructure:"telegram"`

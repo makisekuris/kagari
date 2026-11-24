@@ -4,10 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 	"github.com/subosito/gotenv"
+)
+
+const (
+	defaultModelTimeout         = 60 * time.Second
+	defaultModelMaxOutputTokens = 5000
 )
 
 // Load 从当前工作目录读取可选的 .env 和 config.yaml；path 只替换 YAML 路径。
@@ -20,7 +27,7 @@ func Load(path string) (Config, error) {
 	v := viper.New()
 	defaults := map[string]any{
 		"storage.path": "data/kagari-context.db", "profile_path": "profile.md", "log_level": "info",
-		"model.context_window": int64(0), "model.timeout": "60s", "model.max_output_tokens": 5000,
+		"model.context_window": int64(0), "model.timeout": defaultModelTimeout, "model.max_output_tokens": defaultModelMaxOutputTokens,
 		"reader.timeout": "20s", "reader.max_bytes": 4 << 20, "reader.max_content_chars": 20000,
 		"reader.max_links": 40, "reader.allowed_non_public_cidrs": []string{},
 		"agent.max_sources": 6,
@@ -33,7 +40,15 @@ func Load(path string) (Config, error) {
 	for key, value := range defaults {
 		v.SetDefault(key, value)
 	}
-	keys := []string{"model.base_url", "model.api_key", "model.apiType", "model.name", "telegram.token", "telegram.allowed_user_ids"}
+	multimodalKeys := []string{
+		"multimodal_model.base_url", "multimodal_model.api_key", "multimodal_model.apiType", "multimodal_model.name",
+		"multimodal_model.timeout", "multimodal_model.max_output_tokens",
+	}
+	keys := []string{
+		"model.base_url", "model.api_key", "model.apiType", "model.name",
+		"telegram.token", "telegram.allowed_user_ids",
+	}
+	keys = append(keys, multimodalKeys...)
 	for key := range defaults {
 		keys = append(keys, key)
 	}
@@ -66,9 +81,17 @@ func Load(path string) (Config, error) {
 			}
 		}
 	}
+	configured := slices.ContainsFunc(multimodalKeys, v.IsSet)
+	if configured {
+		v.SetDefault("multimodal_model.timeout", defaultModelTimeout)
+		v.SetDefault("multimodal_model.max_output_tokens", defaultModelMaxOutputTokens)
+	}
 	var cfg Config
 	if err := v.UnmarshalExact(&cfg); err != nil {
 		return cfg, fmt.Errorf("decode config: %w", err)
+	}
+	if !configured {
+		cfg.MultimodalModel = nil
 	}
 	return cfg, cfg.Validate(false, false)
 }

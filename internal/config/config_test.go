@@ -131,6 +131,129 @@ func unsetModelAPITypeEnv(t *testing.T) {
 	})
 }
 
+func TestOptionalMultimodalModelConfiguration(t *testing.T) {
+	t.Chdir(t.TempDir())
+	unsetMultimodalModelEnv(t)
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MultimodalModel != nil {
+		t.Fatalf("omitted multimodal model = %+v, want nil", cfg.MultimodalModel)
+	}
+	for _, yaml := range []string{"multimodal_model: {}\n", "multimodal_model: null\n"} {
+		if err := os.WriteFile("config.yaml", []byte(yaml), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err = Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.MultimodalModel != nil {
+			t.Fatalf("empty multimodal block %q = %+v, want nil", yaml, cfg.MultimodalModel)
+		}
+	}
+
+	if err := os.WriteFile("config.yaml", []byte("multimodal_model:\n  base_url: https://vision.example/v1\n  name: vision-model\n  api_key: vision-secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := cfg.MultimodalModel
+	if model == nil || model.BaseURL != "https://vision.example/v1" || model.Name != "vision-model" || model.APIKey != "vision-secret" {
+		t.Fatalf("multimodal model fields = %+v", model)
+	}
+	if model.EffectiveAPIType() != ModelAPIResponses || model.Timeout != time.Minute || model.MaxOutputTokens != 5000 {
+		t.Fatalf("multimodal defaults = apiType %q, timeout %s, max output %d", model.EffectiveAPIType(), model.Timeout, model.MaxOutputTokens)
+	}
+	if model.ContextWindow != 0 {
+		t.Fatalf("multimodal context window = %d, want unset", model.ContextWindow)
+	}
+	if cfg.Model.BaseURL != "" || cfg.Model.Name != "" || cfg.Model.APIKey != "" {
+		t.Fatalf("primary model unexpectedly inherited multimodal settings: %+v", cfg.Model)
+	}
+}
+
+func TestMultimodalModelEnvironmentPrecedenceAndValidation(t *testing.T) {
+	t.Chdir(t.TempDir())
+	unsetMultimodalModelEnv(t)
+	configYAML := "multimodal_model:\n  apiType: chat_completions\n  base_url: https://yaml.example/v1\n  name: yaml-model\n  api_key: yaml-key\n  timeout: 20s\n  max_output_tokens: 256\n"
+	if err := os.WriteFile("config.yaml", []byte(configYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dotenv := "KAGARI_MULTIMODAL_MODEL_BASE_URL=https://dotenv.example/v1\nKAGARI_MULTIMODAL_MODEL_NAME=dotenv-model\nKAGARI_MULTIMODAL_MODEL_API_KEY=dotenv-key\nKAGARI_MULTIMODAL_MODEL_API_TYPE=responses\nKAGARI_MULTIMODAL_MODEL_TIMEOUT=45s\nKAGARI_MULTIMODAL_MODEL_MAX_OUTPUT_TOKENS=1024\n"
+	if err := os.WriteFile(".env", []byte(dotenv), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := cfg.MultimodalModel
+	if model == nil || model.BaseURL != "https://dotenv.example/v1" || model.Name != "dotenv-model" || model.APIKey != "dotenv-key" || model.APIType != ModelAPIResponses || model.Timeout != 45*time.Second || model.MaxOutputTokens != 1024 {
+		t.Fatalf("multimodal .env values = %+v", model)
+	}
+	t.Setenv("KAGARI_MULTIMODAL_MODEL_BASE_URL", "https://system.example/v1")
+	t.Setenv("KAGARI_MULTIMODAL_MODEL_API_TYPE", "chat_completions")
+	cfg, err = Load("")
+	if err != nil || cfg.MultimodalModel == nil || cfg.MultimodalModel.BaseURL != "https://system.example/v1" || cfg.MultimodalModel.APIType != ModelAPIChatCompletions {
+		t.Fatalf("system environment did not override .env: model=%+v err=%v", cfg.MultimodalModel, err)
+	}
+
+	t.Setenv("KAGARI_MULTIMODAL_MODEL_API_TYPE", "chat-completions")
+	if _, err := Load(""); err == nil || !strings.Contains(err.Error(), "multimodal_model.apiType") {
+		t.Fatalf("invalid multimodal API type accepted or not identified: %v", err)
+	}
+	t.Setenv("KAGARI_MULTIMODAL_MODEL_API_TYPE", "responses")
+	t.Setenv("KAGARI_MULTIMODAL_MODEL_TIMEOUT", "0s")
+	if _, err := Load(""); err == nil || !strings.Contains(err.Error(), "multimodal_model.timeout") {
+		t.Fatalf("invalid multimodal timeout accepted or not identified: %v", err)
+	}
+}
+
+func TestIncompleteMultimodalModelIsRejected(t *testing.T) {
+	t.Chdir(t.TempDir())
+	unsetMultimodalModelEnv(t)
+	configYAML := "model:\n  base_url: https://text.example/v1\n  name: text-model\n  api_key: text-key\n  context_window: 32768\nmultimodal_model:\n  api_key: only-a-key\n"
+	if err := os.WriteFile("config.yaml", []byte(configYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("read-only config load rejected missing multimodal endpoint: %v", err)
+	}
+	if err := cfg.Validate(false, false); err != nil {
+		t.Fatalf("local validation required multimodal credentials: %v", err)
+	}
+	if err := cfg.Validate(true, false); err == nil || !strings.Contains(err.Error(), "multimodal_model.base_url, multimodal_model.name and multimodal_model.api_key are required") {
+		t.Fatalf("incomplete multimodal model accepted or not identified: %v", err)
+	}
+}
+
+func unsetMultimodalModelEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"KAGARI_MULTIMODAL_MODEL_BASE_URL", "KAGARI_MULTIMODAL_MODEL_NAME", "KAGARI_MULTIMODAL_MODEL_API_KEY",
+		"KAGARI_MULTIMODAL_MODEL_API_TYPE", "KAGARI_MULTIMODAL_MODEL_TIMEOUT", "KAGARI_MULTIMODAL_MODEL_MAX_OUTPUT_TOKENS",
+	} {
+		value, present := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+		key := key
+		t.Cleanup(func() {
+			if present {
+				_ = os.Setenv(key, value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+}
+
 func TestRemovedArchiveSettingsAreRejected(t *testing.T) {
 	t.Chdir(t.TempDir())
 	for name, yaml := range map[string]string{

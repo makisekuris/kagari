@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"strings"
 	"testing"
@@ -11,6 +12,30 @@ import (
 	"kagari/internal/personal"
 	"kagari/internal/personal/internal/testkit"
 )
+
+func TestTaskConsultsVisionModelForSelectedImage(t *testing.T) {
+	ctx := t.Context()
+	store := testkit.Store(t, ":memory:", time.Minute)
+	image, err := store.SaveAttachment(ctx, "selected.png", "image/png", base64.NewDecoder(base64.StdEncoding,
+		strings.NewReader(testkit.OnePixelPNG)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const goal = "Read the heading on the selected slide."
+	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+		testkit.ResponseTool("analyze_image", map[string]string{"id": image.ID, "question": goal}, "inspect-slide"),
+		testkit.ResponseText("The heading is Revenue."),
+	}}
+	vision := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{testkit.ResponseText("Heading: Revenue")}}
+	engine := testkit.ReadingEngine(fixture, nil)
+	engine.MultimodalModel = vision.RawModel(t)
+	run := testkit.CreateRunningTask(t, store, "image", personal.TaskInput{Goal: goal, Attachments: []channel.Attachment{image}})
+	result, err := runTaskExecutor(t, ctx, engine, store, run, nil)
+	if err != nil || len(fixture.Requests) != 2 || len(vision.Requests) != 1 ||
+		!strings.Contains(testkit.RequestInput(fixture.Requests[1]), "Heading: Revenue") || !strings.Contains(result.Summary, "Revenue") {
+		t.Fatalf("stage summary=%q err=%v stage calls=%d vision calls=%d", result.Summary, err, len(fixture.Requests), len(vision.Requests))
+	}
+}
 
 func TestTaskReadsSelectedFileAndProducesCandidate(t *testing.T) {
 	ctx := context.Background()

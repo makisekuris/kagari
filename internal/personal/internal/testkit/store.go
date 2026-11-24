@@ -11,6 +11,9 @@ import (
 	"kagari/internal/personal/sqlite"
 )
 
+// OnePixelPNG is a base64-encoded grayscale PNG for attachment fixtures.
+const OnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg=="
+
 func Store(t *testing.T, path string, budget time.Duration) *sqlite.Store {
 	t.Helper()
 	s := EmptyStore(t, path, budget)

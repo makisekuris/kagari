@@ -98,6 +98,13 @@ func readingExecutor(engine *agent.Engine, store Repository, executor ...*execut
 			return personal.StageResult{}, err
 		}
 		stageEngine.AdditionalTools = append(append(stageEngine.AdditionalTools[:0:0], stageEngine.AdditionalTools...), fileTools...)
+		if engine.MultimodalModel != nil && len(allowed) > 0 {
+			imageTool, err := agentctx.ImageAnalysisTool(store, engine.MultimodalModel, allowed, guard)
+			if err != nil {
+				return personal.StageResult{}, err
+			}
+			stageEngine.AdditionalTools = append(stageEngine.AdditionalTools, imageTool)
+		}
 		contextTools, err := agentctx.ReadTools(agentctx.ReadToolsConfig{Store: store, Scope: personal.ReadScope{RunID: run.ID}, Ledger: ledger, ReadFile: readFile, Attachments: allowed})
 		if err != nil {
 			return personal.StageResult{}, err

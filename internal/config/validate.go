@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -51,6 +52,11 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 	if apiType := c.Model.EffectiveAPIType(); apiType != ModelAPIResponses && apiType != ModelAPIChatCompletions {
 		return errors.New("model.apiType must be responses or chat_completions")
 	}
+	if c.MultimodalModel != nil {
+		if apiType := c.MultimodalModel.EffectiveAPIType(); apiType != ModelAPIResponses && apiType != ModelAPIChatCompletions {
+			return errors.New("multimodal_model.apiType must be responses or chat_completions")
+		}
+	}
 	if c.Personal.Timezone == "Local" {
 		return errors.New("personal.timezone must be a valid IANA time zone")
 	}
@@ -85,6 +91,14 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 	if c.Reader.MaxBytes < 1024 || c.Reader.MaxContentChars < 256 || c.Reader.MaxLinks < 1 || c.Model.MaxOutputTokens < 1 {
 		return errors.New("reader and model limits must be positive")
 	}
+	if c.MultimodalModel != nil {
+		if c.MultimodalModel.Timeout <= 0 {
+			return errors.New("multimodal_model.timeout must be positive")
+		}
+		if c.MultimodalModel.MaxOutputTokens < 1 {
+			return errors.New("multimodal_model.max_output_tokens must be positive")
+		}
+	}
 	if c.Agent.MaxSources < 1 || c.Agent.MaxSources > 30 || c.Agent.MaxIterations < 1 {
 		return errors.New("invalid agent reading limits")
 	}
@@ -95,12 +109,13 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 		if _, err := inputbudget.NewLimits(c.Model.ContextWindow, int64(c.Model.MaxOutputTokens)); err != nil {
 			return err
 		}
-		if c.Model.Name == "" || c.Model.APIKey == "" || c.Model.BaseURL == "" {
-			return errors.New("model.base_url, model.name and model.api_key are required")
+		if err := validateModelEndpoint("model", c.Model); err != nil {
+			return err
 		}
-		u, err := url.Parse(c.Model.BaseURL)
-		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			return errors.New("model.base_url must be an HTTP(S) base URL without credentials, query or fragment")
+		if c.MultimodalModel != nil {
+			if err := validateModelEndpoint("multimodal_model", *c.MultimodalModel); err != nil {
+				return err
+			}
 		}
 	}
 	if telegramRequired {
@@ -112,6 +127,17 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 				return errors.New("telegram.allowed_user_ids must contain positive user IDs")
 			}
 		}
+	}
+	return nil
+}
+
+func validateModelEndpoint(prefix string, model Model) error {
+	if model.Name == "" || model.APIKey == "" || model.BaseURL == "" {
+		return fmt.Errorf("%s.base_url, %s.name and %s.api_key are required", prefix, prefix, prefix)
+	}
+	u, err := url.Parse(model.BaseURL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%s.base_url must be an HTTP(S) base URL without credentials, query or fragment", prefix)
 	}
 	return nil
 }

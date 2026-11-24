@@ -87,7 +87,7 @@ func inspectTrace(ctx context.Context, cfg config.Config, args []string, out io.
 			state.Memories[i].Value = ""
 		}
 	}
-	stateValue, err := logging.Sanitize(state, []string{cfg.Model.APIKey, cfg.Telegram.Token})
+	stateValue, err := logging.Sanitize(state, configuredSecrets(cfg))
 	if err != nil {
 		return err
 	}

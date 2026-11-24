@@ -35,6 +35,7 @@ type MainAgent struct {
 	Store              Repository
 	Log                *zap.Logger
 	Model              model.AgenticModel
+	MultimodalModel    model.AgenticModel
 	Persona            string
 	Profile            string
 	MaxIterations      int
@@ -83,6 +84,15 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 		return personal.TurnOutput{}, err
 	}
 	registeredTools = append(registeredTools, fileTools...)
+	if a.MultimodalModel != nil && input.Event.Kind == personal.EventUser {
+		if allowed := turnImageAttachments(input); len(allowed) > 0 {
+			imageTool, err := agentctx.ImageAnalysisTool(a.Store, a.MultimodalModel, allowed, nil)
+			if err != nil {
+				return personal.TurnOutput{}, err
+			}
+			registeredTools = append(registeredTools, imageTool)
+		}
+	}
 	readTools, err := agentctx.ReadTools(agentctx.ReadToolsConfig{Store: a.Store, Scope: personal.ReadScope{EventID: input.Event.ID}})
 	if err != nil {
 		return personal.TurnOutput{}, err

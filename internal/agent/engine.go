@@ -35,6 +35,7 @@ type Persona interface {
 // Engine 共享模型与读取能力；每个任务阶段创建独立阅读会话，读取计数和来源不会跨阶段共用。
 type Engine struct {
 	Model                 model.AgenticModel
+	MultimodalModel       model.AgenticModel
 	Config                config.Config
 	Profile               string
 	Read                  func(context.Context, string) (domain.Source, error)
@@ -65,6 +66,12 @@ func New(ctx context.Context, cfg config.Config, read func(context.Context, stri
 		personaText = persona.Prompt()
 	}
 	engine := &Engine{Model: m, Config: cfg, Profile: string(profile), Read: read, personaPrompt: personaText}
+	if cfg.MultimodalModel != nil {
+		engine.MultimodalModel, err = modelprovider.New(ctx, *cfg.MultimodalModel)
+		if err != nil {
+			return nil, fmt.Errorf("initialize multimodal model: %w", err)
+		}
+	}
 	engine.Model, err = engine.budgetModel(ctx)
 	if err != nil {
 		return nil, err
