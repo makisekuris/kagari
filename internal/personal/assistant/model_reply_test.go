@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -126,6 +127,124 @@ func TestSelectReplyFormatsAmbiguousTrailingEnvelope(t *testing.T) {
 				t.Fatalf("formatter requests=%d, want one", len(fixture.Requests))
 			}
 		})
+	}
+}
+
+func TestSelectReplyReportsReasonAfterRepairFails(t *testing.T) {
+	const raw = `{"text":"private original draft","reply_kind":"content","attachments":[],"private_unknown":"private value"}`
+	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+		testkit.ResponseText(`{"text":"private repaired draft","reply_kind":"content"}`),
+	}}
+	response, err := newMainAgent(t, fixture, newToolRepo()).selectReply(context.Background(), personal.TurnInput{
+		Event: personal.Event{ID: 52, Kind: personal.EventUser, Text: "请继续。"},
+	}, &personalTools{}, raw, nil, nil)
+	if err == nil || response.Text != "" {
+		t.Fatalf("response=%+v error=%v, want failed format repair", response, err)
+	}
+	var formatErr *personal.ReplyFormatError
+	if !errors.As(err, &formatErr) {
+		t.Fatalf("error=%T %v, want ReplyFormatError", err, err)
+	}
+	if !strings.Contains(formatErr.Reason, "缺少") || !strings.Contains(formatErr.Reason, "attachments") {
+		t.Fatalf("reason=%q, want the repair response's missing attachments field", formatErr.Reason)
+	}
+	message := personal.ReplyFormatMessage(err)
+	if !strings.Contains(message, formatErr.Reason) || strings.Contains(message, "private original draft") || strings.Contains(message, "private_unknown") || strings.Contains(message, "private value") {
+		t.Fatalf("user-facing message leaked model content or missed reason: %q", message)
+	}
+	if !strings.Contains(err.Error(), "unexpected field") || !strings.Contains(err.Error(), "missing or malformed fields") {
+		t.Fatalf("format error lost validation diagnostics: %v", err)
+	}
+	if len(fixture.Requests) != 1 {
+		t.Fatalf("formatter requests=%d, want one", len(fixture.Requests))
+	}
+}
+
+func TestRefusedRepairRetainsTrailingEnvelopeValidationReason(t *testing.T) {
+	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{testkit.ResponseRefusal()}}
+	agent := newMainAgent(t, fixture, newToolRepo())
+	raw := "Draft complete.\n\n" + `{"text":"ok","reply_kind":"content","attachments":[42]}`
+	_, err := agent.decodeOrFormatTurn(context.Background(), raw, nil)
+	if message := personal.ReplyFormatMessage(err); !strings.Contains(message, "附件列表（attachments）格式无效") {
+		t.Fatalf("refused repair lost the invalid attachment list: message=%q error=%v", message, err)
+	}
+}
+
+func TestSelectReplyAddsFormatFailureToRequiredTaskReply(t *testing.T) {
+	const raw = `{"text":"已收到。","attachments":[]}`
+	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+		testkit.ResponseText(`{"text":"修复失败。","attachments":[]}`),
+	}}
+	required := "请补充研究范围。"
+	response, err := newMainAgent(t, fixture, newToolRepo()).selectReply(context.Background(), personal.TurnInput{
+		Event: personal.Event{ID: 53, Kind: personal.EventUser, Text: "继续研究。"},
+	}, &personalTools{questions: []string{required}}, raw, nil, nil)
+	if err != nil {
+		t.Fatalf("required reply returned error: %v", err)
+	}
+	if response.ReplyKind != personal.ReplyContent || !strings.HasPrefix(response.Text, required+"\n\n") || !strings.Contains(response.Text, "缺少回复类型（reply_kind）字段") || !response.SkipReplyPresentation {
+		t.Fatalf("required reply did not carry the format explanation: %+v", response)
+	}
+}
+
+func TestSelectReplyCarriesSupplementalFormatFailure(t *testing.T) {
+	const raw = `{"text":"状态已确认。","attachments":[]}`
+	fixture := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
+		testkit.ResponseText(`{"text":"修复结果","reply_kind":"content"}`),
+	}}
+	tools := &personalTools{
+		persistedControl:    true,
+		supplementalWork:    true,
+		supplementalPurpose: personal.DeliveryControl,
+		controlDeliveries:   []personal.DeliveryIntent{{Draft: personal.DeliveryDraft{Text: "提醒状态已确认。", Attachments: []string{}}}},
+	}
+	response, err := newMainAgent(t, fixture, newToolRepo()).selectReply(context.Background(), personal.TurnInput{
+		Event: personal.Event{ID: 54, Kind: personal.EventUser, Text: "检查提醒。"},
+	}, tools, raw, nil, nil)
+	if err != nil || response.Text != "提醒状态已确认。" || response.SupplementalReply != nil {
+		t.Fatalf("control response=%+v error=%v", response, err)
+	}
+	if !strings.Contains(response.SupplementalReplyFailureMessage, "缺少附件列表（attachments）字段") {
+		t.Fatalf("supplemental failure message=%q", response.SupplementalReplyFailureMessage)
+	}
+}
+
+func TestSelectReplyDoesNotMarkInitialModelErrorAsFormatFailure(t *testing.T) {
+	modelErr := errors.New("initial model request failed")
+	fixture := &testkit.ResponsesFixture{T: t}
+	_, err := newMainAgent(t, fixture, newToolRepo()).selectReply(context.Background(), personal.TurnInput{
+		Event: personal.Event{ID: 55, Kind: personal.EventUser, Text: "你好。"},
+	}, &personalTools{}, `not json`, nil, modelErr)
+	if !errors.Is(err, modelErr) {
+		t.Fatalf("error=%v, want initial model error", err)
+	}
+	var formatErr *personal.ReplyFormatError
+	if errors.As(err, &formatErr) || len(fixture.Requests) != 0 {
+		t.Fatalf("initial model error was treated as a format failure: error=%v requests=%d", err, len(fixture.Requests))
+	}
+}
+
+type canDeferReplyErrorRepository struct {
+	Repository
+	err error
+}
+
+func (r canDeferReplyErrorRepository) CanDeferReply(context.Context, int64) (bool, error) {
+	return false, r.err
+}
+
+func TestSelectReplyDoesNotMarkDatabaseErrorAsFormatFailure(t *testing.T) {
+	databaseErr := errors.New("reply deferral query failed")
+	fixture := &testkit.ResponsesFixture{T: t}
+	_, err := newMainAgent(t, fixture, canDeferReplyErrorRepository{err: databaseErr}).selectReply(context.Background(), personal.TurnInput{
+		Event: personal.Event{ID: 56, Kind: personal.EventUser, Text: "https://example.com"},
+	}, &personalTools{}, `not json`, nil, nil)
+	if !errors.Is(err, databaseErr) {
+		t.Fatalf("error=%v, want database error", err)
+	}
+	var formatErr *personal.ReplyFormatError
+	if errors.As(err, &formatErr) || len(fixture.Requests) != 0 {
+		t.Fatalf("database error was treated as a format failure: error=%v requests=%d", err, len(fixture.Requests))
 	}
 }
 

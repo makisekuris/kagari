@@ -2,6 +2,7 @@ package personal
 
 import (
 	"context"
+	"errors"
 )
 
 type TurnInput struct {
@@ -27,6 +28,24 @@ const (
 	ReplyReceipt ReplyKind = "receipt"
 	ReplyContent ReplyKind = "content"
 )
+
+// ReplyFormatError carries the validator's user-facing reason when a repair fails.
+// Err retains the underlying failure for logging and provider error handling.
+type ReplyFormatError struct {
+	Reason string
+	Err    error
+}
+
+func (e *ReplyFormatError) Error() string { return e.Err.Error() }
+func (e *ReplyFormatError) Unwrap() error { return e.Err }
+
+func ReplyFormatMessage(err error) string {
+	var formatErr *ReplyFormatError
+	if errors.As(err, &formatErr) {
+		return "回复格式未能自动修复，" + formatErr.Reason + "。"
+	}
+	return ""
+}
 
 type TurnOutput struct {
 	ScheduleID                  int64

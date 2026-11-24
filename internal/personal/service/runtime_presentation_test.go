@@ -230,7 +230,7 @@ func TestRuntimeDirectUserModelDeadlineSkipsPresenter(t *testing.T) {
 			t.Fatalf("turn = %t, %v", worked, err)
 		}
 		message := testkit.AssistantMessage(t, s, eventID)
-		expected, err := r.committedActionFallback(ctx, committedEvent, personal.TurnOutput{})
+		expected, err := r.committedActionFallback(ctx, committedEvent, personal.TurnOutput{}, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -251,13 +251,19 @@ func TestRuntimeDirectUserModelDeadlineSkipsPresenter(t *testing.T) {
 
 func TestRuntimeDirectUserQuotaFailureSkipsPresenter(t *testing.T) {
 	for _, tc := range []struct {
-		code   string
-		status int
+		code         string
+		status       int
+		duringRepair bool
 	}{
 		{code: "pre_consume_token_quota_failed", status: http.StatusForbidden},
 		{code: "insufficient_quota", status: http.StatusTooManyRequests},
+		{code: "insufficient_quota", status: http.StatusTooManyRequests, duringRepair: true},
 	} {
-		t.Run(tc.code, func(t *testing.T) {
+		name := tc.code
+		if tc.duringRepair {
+			name += "/during_format_repair"
+		}
+		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			s := testkit.Store(t, filepath.Join(t.TempDir(), "quota.db"), time.Minute)
 			r := testRuntime(s)
@@ -269,7 +275,11 @@ func TestRuntimeDirectUserQuotaFailureSkipsPresenter(t *testing.T) {
 					Request:  &http.Request{Method: http.MethodPost, URL: &url.URL{Scheme: "https", Host: "api.example.org", Path: "/v1/responses"}},
 					Response: &http.Response{StatusCode: tc.status},
 				}
-				return personal.TurnOutput{}, errors.Join(errors.New("request rejected"), apiErr)
+				err := errors.Join(errors.New("request rejected"), apiErr)
+				if tc.duringRepair {
+					err = &personal.ReplyFormatError{Reason: "缺少 reply_kind 字段", Err: err}
+				}
+				return personal.TurnOutput{}, err
 			}
 			r.PresentReply = func(context.Context, personal.Event, string) (string, error) {
 				presenterCalls++

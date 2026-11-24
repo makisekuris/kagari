@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"go.uber.org/zap"
@@ -49,16 +50,16 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 			return response, nil
 		}
 		if modelErr != nil {
-			response.SupplementalReplyFailed = true
+			response.SupplementalReplyFailureMessage = incompleteSupplementalReply
 			return response, nil
 		}
-		supplemental, err := decodePersonalTurnResponseOrTrailingEnvelope(raw)
-		if err != nil {
-			supplemental, err = a.formatTurn(ctx, raw, createdAttachments)
-		}
+		supplemental, err := a.decodeOrFormatTurn(ctx, raw, createdAttachments)
 		if err != nil {
 			logging.FromContext(ctx).Warn("conversation.reply.supplemental_recovered", append(logging.ErrorFields(err), zap.Int64("event_id", input.Event.ID))...)
-			response.SupplementalReplyFailed = true
+			response.SupplementalReplyFailureMessage = personal.ReplyFormatMessage(err)
+			if response.SupplementalReplyFailureMessage == "" {
+				response.SupplementalReplyFailureMessage = incompleteSupplementalReply
+			}
 			return response, nil
 		}
 		if required == "" && input.Event.Kind == personal.EventUser && tools.supplementalPurpose == personal.DeliveryStatus && (supplemental.ReplyKind == personal.ReplyReceipt || supplemental.ReplyKind == personal.ReplySilent) {
@@ -71,7 +72,7 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 			}
 		}
 		if supplemental.ReplyKind == personal.ReplySilent || strings.TrimSpace(supplemental.Text) == "" && len(supplemental.Attachments) == 0 {
-			response.SupplementalReplyFailed = true
+			response.SupplementalReplyFailureMessage = incompleteSupplementalReply
 			return response, nil
 		}
 		purpose := tools.supplementalPurpose
@@ -118,11 +119,8 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 			return personalTurnResponse{ReplyKind: personal.ReplySilent}, nil
 		}
 	}
-	response, err := decodePersonalTurnResponseOrTrailingEnvelope(raw)
-	if err != nil {
-		// Formatting gets one tool-free attempt; committed actions are never replayed.
-		response, err = a.formatTurn(ctx, raw, createdAttachments)
-	}
+	// Formatting gets one tool-free attempt; committed actions are never replayed.
+	response, err := a.decodeOrFormatTurn(ctx, raw, createdAttachments)
 	if required != "" {
 		if err != nil {
 			logging.FromContext(ctx).Warn("conversation.reply.recovered", append(logging.ErrorFields(err), zap.Int64("event_id", input.Event.ID))...)
@@ -131,6 +129,10 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 			response.Text += "\n\n" + required
 		} else {
 			response.Text = required
+			if explanation := personal.ReplyFormatMessage(err); explanation != "" {
+				response.Text += "\n\n" + explanation
+				response.SkipReplyPresentation = true
+			}
 		}
 		response.ReplyKind = personal.ReplyContent
 		return response, nil
@@ -145,6 +147,27 @@ func (a *MainAgent) selectReply(ctx context.Context, input personal.TurnInput, t
 		}
 	}
 	return response, err
+}
+
+func (a *MainAgent) decodeOrFormatTurn(ctx context.Context, raw string, createdAttachments []channel.Attachment) (personalTurnResponse, error) {
+	response, validationErr := decodePersonalTurnResponseOrTrailingEnvelope(raw)
+	if validationErr == nil {
+		return response, nil
+	}
+	repaired, repairErr := a.formatTurn(ctx, raw, createdAttachments)
+	if repairErr == nil {
+		return repaired, nil
+	}
+
+	repairChainErr := errors.Join(repairErr, validationErr)
+	var validation *formatValidationError
+	if !errors.As(repairChainErr, &validation) {
+		return personalTurnResponse{}, repairChainErr
+	}
+	return personalTurnResponse{}, &personal.ReplyFormatError{
+		Reason: validation.reason,
+		Err:    repairChainErr,
+	}
 }
 
 func decodePersonalTurnResponseOrTrailingEnvelope(raw string) (personalTurnResponse, error) {
@@ -168,9 +191,5 @@ func decodePersonalTurnResponseOrTrailingEnvelope(raw string) (personalTurnRespo
 	if prefix == "" || strings.Contains(prefix, "}") || strings.HasSuffix(prefix, ":") || strings.HasSuffix(prefix, "：") {
 		return personalTurnResponse{}, err
 	}
-	response, envelopeErr := decodePersonalTurnResponse("{" + afterObject)
-	if envelopeErr != nil {
-		return personalTurnResponse{}, err
-	}
-	return response, nil
+	return decodePersonalTurnResponse("{" + afterObject)
 }

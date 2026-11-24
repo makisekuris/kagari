@@ -188,23 +188,32 @@ func (r *Runtime) turn(ctx context.Context) (worked bool, turnErr error) {
 	if thinkErr != nil || (!output.Silent && strings.TrimSpace(output.Text) == "" && len(output.Attachments) == 0) {
 		outcome = "fallback_reply"
 		log.Warn("conversation.model.failed", logging.ErrorFields(thinkErr)...)
-		fallback := "这轮回复未能完成。已提交的任务、计划和记忆操作仍保留，可以继续查询。"
 		attachmentUnavailable := errors.Is(thinkErr, personal.ErrAttachmentUnavailable)
-		modelQuotaFailure := event.Kind == personal.EventUser && isModelQuotaFailure(thinkErr) && !attachmentUnavailable
-		modelDeadline := event.Kind == personal.EventUser && errors.Is(thinkErr, context.DeadlineExceeded) && !attachmentUnavailable
+		fallback := "这轮回复未能完成。已提交的任务、计划和记忆操作仍保留，可以继续查询。"
+		var formatMessage string
+		var skipPresentation bool
 		if attachmentUnavailable {
 			fallback = "要发送的附件已删除或不可用，未发送。请重新上传或重新生成文件。"
-		} else if modelQuotaFailure {
-			fallback = "模型服务未能为这次请求分配额度。"
-		} else if modelDeadline {
-			fallback = "模型响应超时，本次未能生成回复。"
+		} else if event.Kind == personal.EventUser {
+			formatMessage = personal.ReplyFormatMessage(thinkErr)
+			skipPresentation = true
+			switch {
+			case isModelQuotaFailure(thinkErr):
+				fallback = "模型服务未能为这次请求分配额度。"
+			case errors.Is(thinkErr, context.DeadlineExceeded):
+				fallback = "模型响应超时，本次未能生成回复。"
+			case formatMessage != "":
+				fallback = formatMessage
+			default:
+				skipPresentation = false
+			}
 		}
 		output = personal.TurnOutput{
 			Text: fallback, TaskID: event.TaskID, ScheduleID: event.ScheduleID,
-			SkipReplyPresentation: modelDeadline || modelQuotaFailure,
+			SkipReplyPresentation: skipPresentation,
 		}
 		if !attachmentUnavailable {
-			output, err = r.committedActionFallback(ctx, *event, output)
+			output, err = r.committedActionFallback(ctx, *event, output, formatMessage)
 			if err != nil {
 				return true, err
 			}
@@ -321,7 +330,7 @@ func (r *Runtime) completeStaleTaskCallback(ctx context.Context, event personal.
 func (r *Runtime) recoverTurn(ctx context.Context, event personal.Event, task *personal.Task) error {
 	output := personal.TurnOutput{ScheduleID: event.ScheduleID, Text: "处理上一条消息时服务中断了。已提交的任务、计划和记忆操作仍保留，可以查询；尚未提交的部分请重新告诉我。"}
 	if event.Kind == personal.EventUser {
-		recovered, err := r.committedActionFallback(ctx, event, output)
+		recovered, err := r.committedActionFallback(ctx, event, output, "")
 		if err != nil {
 			return err
 		}

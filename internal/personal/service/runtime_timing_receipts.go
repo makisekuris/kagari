@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"strings"
@@ -13,7 +14,7 @@ import (
 const maxMemoryReceiptValueRunes = 80
 
 // Recover the durable outcomes even when the model fails after a tool commit.
-func (r *Runtime) committedActionFallback(ctx context.Context, event personal.Event, fallback personal.TurnOutput) (personal.TurnOutput, error) {
+func (r *Runtime) committedActionFallback(ctx context.Context, event personal.Event, fallback personal.TurnOutput, receiptNote string) (personal.TurnOutput, error) {
 	if event.Kind != personal.EventUser {
 		return fallback, nil
 	}
@@ -65,7 +66,8 @@ func (r *Runtime) committedActionFallback(ctx context.Context, event personal.Ev
 		}
 		lines = append(lines, line+"。")
 	}
-	out := personal.TurnOutput{Text: strings.Join(lines, "\n") + "\n回复中断，以上已提交操作已保存。", Purpose: personal.DeliveryControl}
+	lines = append(lines, cmp.Or(receiptNote, "回复中断，以上已提交操作已保存。"))
+	out := personal.TurnOutput{Text: strings.Join(lines, "\n"), Purpose: personal.DeliveryControl}
 	if len(memoryReceipts) == 0 && len(timingReceipts) == 1 && !timingReceipts[0].Reminder {
 		out.ScheduleID = timingReceipts[0].ID
 	}
@@ -73,7 +75,8 @@ func (r *Runtime) committedActionFallback(ctx context.Context, event personal.Ev
 }
 
 func (r *Runtime) committedActionSupplement(ctx context.Context, event personal.Event, output personal.TurnOutput) (personal.TurnOutput, error) {
-	recovered, err := r.committedActionFallback(ctx, event, personal.TurnOutput{})
+	feedback := strings.TrimSpace(output.RequiredFeedback)
+	recovered, err := r.committedActionFallback(ctx, event, personal.TurnOutput{}, feedback)
 	if err != nil || strings.TrimSpace(recovered.Text) == "" {
 		return output, err
 	}
@@ -87,12 +90,9 @@ func (r *Runtime) committedActionSupplement(ctx context.Context, event personal.
 		attachments = append(attachments, output.SupplementalReply.Draft.Attachments...)
 		taskIDs = append(taskIDs, output.SupplementalReply.TaskIDs...)
 	}
-	if feedback := strings.TrimSpace(output.RequiredFeedback); feedback != "" {
-		text += "\n\n" + feedback
-	}
 	taskIDs = append(taskIDs, output.TaskIDs...)
 	scheduleID := recovered.ScheduleID
-	if output.SupplementalReply != nil || len(taskIDs) > 0 || strings.TrimSpace(output.RequiredFeedback) != "" {
+	if output.SupplementalReply != nil || len(taskIDs) > 0 || feedback != "" {
 		scheduleID = 0
 	}
 	output.SupplementalReply = &personal.SupplementalReply{

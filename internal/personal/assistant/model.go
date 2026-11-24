@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -46,13 +45,15 @@ type MainAgent struct {
 }
 
 type personalTurnResponse struct {
-	Text                    string                      `json:"text"`
-	ReplyKind               personal.ReplyKind          `json:"reply_kind"`
-	Attachments             []string                    `json:"attachments"`
-	SkipReplyPresentation   bool                        `json:"-"`
-	SupplementalReply       *personal.SupplementalReply `json:"-"`
-	SupplementalReplyFailed bool                        `json:"-"`
+	Text                            string                      `json:"text"`
+	ReplyKind                       personal.ReplyKind          `json:"reply_kind"`
+	Attachments                     []string                    `json:"attachments"`
+	SkipReplyPresentation           bool                        `json:"-"`
+	SupplementalReply               *personal.SupplementalReply `json:"-"`
+	SupplementalReplyFailureMessage string                      `json:"-"`
 }
+
+const incompleteSupplementalReply = "本轮其他查询或回复未能完成。"
 
 func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (personal.TurnOutput, error) {
 	if a == nil || a.Store == nil || a.Model == nil {
@@ -166,7 +167,7 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 		if err != nil {
 			logging.FromContext(ctx).Warn("conversation.reply.supplemental_attachment_failed", append(logging.ErrorFields(err), zap.Int64("event_id", input.Event.ID))...)
 			response.SupplementalReply = nil
-			response.SupplementalReplyFailed = true
+			response.SupplementalReplyFailureMessage = incompleteSupplementalReply
 		} else {
 			attachments := make([]string, 0, len(files))
 			for _, file := range files {
@@ -209,12 +210,11 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 	requiredFeedback := ""
 	if tools.persistedControl && tools.settledDelivery == nil {
 		requiredFeedback = tools.requiredTaskReply()
-		if response.SupplementalReplyFailed {
-			const incompleteReply = "本轮其他查询或回复未能完成。"
+		if response.SupplementalReplyFailureMessage != "" {
 			if requiredFeedback != "" {
 				requiredFeedback += "\n\n"
 			}
-			requiredFeedback += incompleteReply
+			requiredFeedback += response.SupplementalReplyFailureMessage
 		}
 	}
 	purpose := personal.DeliveryPurpose("")
@@ -226,7 +226,7 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 		taskID = 0
 	}
 	return personal.TurnOutput{ScheduleID: scheduleID, Text: response.Text, TaskID: taskID, TaskIDs: taskIDs, RequiredFeedback: requiredFeedback, SupplementalReply: response.SupplementalReply,
-		CommittedActionsNeedReceipt: tools.persistedControl && response.SupplementalReplyFailed,
+		CommittedActionsNeedReceipt: tools.persistedControl && response.SupplementalReplyFailureMessage != "",
 		SkipReplyPresentation:       response.SkipReplyPresentation,
 		Purpose:                     purpose, Silent: !notify, Attachments: response.Attachments, ReplyKind: response.ReplyKind}, nil
 }
@@ -237,37 +237,6 @@ func personalJSONOutputOption(name string, schema map[string]any) model.Option {
 			Name: name, Strict: param.NewOpt(true), Schema: schema,
 		}},
 	})
-}
-
-func decodePersonalTurnResponse(raw string) (personalTurnResponse, error) {
-	fields, err := strictJSONObject(raw, "text", "reply_kind", "attachments")
-	if err != nil {
-		return personalTurnResponse{}, fmt.Errorf("invalid personal response: %w", err)
-	}
-	var text *string
-	var kind personal.ReplyKind
-	if err := json.Unmarshal(fields["text"], &text); err != nil || text == nil {
-		return personalTurnResponse{}, errors.New("invalid personal response text")
-	}
-	if err := json.Unmarshal(fields["reply_kind"], &kind); err != nil || (kind != personal.ReplySilent && kind != personal.ReplyReceipt && kind != personal.ReplyContent) {
-		return personalTurnResponse{}, errors.New("invalid personal response reply kind")
-	}
-	var attachments []string
-	if err := json.Unmarshal(fields["attachments"], &attachments); err != nil || attachments == nil {
-		return personalTurnResponse{}, errors.New("invalid personal response attachments")
-	}
-	for _, id := range attachments {
-		if strings.TrimSpace(id) == "" {
-			return personalTurnResponse{}, errors.New("blank attachment ID")
-		}
-	}
-	if kind != personal.ReplySilent && strings.TrimSpace(*text) == "" && len(attachments) == 0 {
-		return personalTurnResponse{}, errors.New("personal response text is blank")
-	}
-	if kind != personal.ReplyContent && len(attachments) > 0 {
-		return personalTurnResponse{}, errors.New("only a content response can include attachments")
-	}
-	return personalTurnResponse{Text: *text, ReplyKind: kind, Attachments: attachments}, nil
 }
 
 func taskOutcomeRequiresNotification(input personal.TurnInput) bool {
@@ -373,44 +342,4 @@ func personalInterimReply(raw string) string {
 		return ""
 	}
 	return text
-}
-
-func strictJSONObject(raw string, expected ...string) (map[string]json.RawMessage, error) {
-	dec := json.NewDecoder(strings.NewReader(raw))
-	token, err := dec.Token()
-	delim, ok := token.(json.Delim)
-	if err != nil || !ok || delim != '{' {
-		return nil, errors.New("expected object")
-	}
-	allowed := make(map[string]struct{}, len(expected))
-	for _, key := range expected {
-		allowed[key] = struct{}{}
-	}
-	fields := make(map[string]json.RawMessage, len(expected))
-	for dec.More() {
-		token, err = dec.Token()
-		key, ok := token.(string)
-		if err != nil || !ok {
-			return nil, errors.New("invalid object key")
-		}
-		if _, ok := allowed[key]; !ok {
-			return nil, fmt.Errorf("unexpected field %q", key)
-		}
-		if _, exists := fields[key]; exists {
-			return nil, fmt.Errorf("duplicate field %q", key)
-		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return nil, errors.New("invalid field value")
-		}
-		fields[key] = value
-	}
-	token, err = dec.Token()
-	if err != nil || token != json.Delim('}') || len(fields) != len(expected) {
-		return nil, errors.New("missing or malformed fields")
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, errors.New("trailing JSON data")
-	}
-	return fields, nil
 }
