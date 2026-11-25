@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"kagari/internal/channel"
+	"kagari/internal/documentarchive"
 	"kagari/internal/logging"
 	"kagari/internal/personal"
 	"kagari/internal/personal/agentctx"
@@ -33,6 +34,7 @@ type MainAgent struct {
 	WorkspaceDirectory string
 	Timezone           string
 	Store              Repository
+	Archive            *documentarchive.Service
 	Log                *zap.Logger
 	Model              model.AgenticModel
 	MultimodalModel    model.AgenticModel
@@ -84,6 +86,17 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 		return personal.TurnOutput{}, err
 	}
 	registeredTools = append(registeredTools, fileTools...)
+	var archiveTurn *archiveTurnTools
+	if a.Archive != nil {
+		archiveTurn = newArchiveTurnTools(a.Archive, a.Store, input, tools, func(file channel.Attachment) {
+			createdAttachments = append(createdAttachments, file)
+		})
+		archiveRegistered, err := archiveTurn.build()
+		if err != nil {
+			return personal.TurnOutput{}, fmt.Errorf("build archive tools: %w", err)
+		}
+		registeredTools = append(registeredTools, archiveRegistered...)
+	}
 	if a.MultimodalModel != nil && input.Event.Kind == personal.EventUser {
 		if allowed := turnImageAttachments(input); len(allowed) > 0 {
 			imageTool, err := agentctx.ImageAnalysisTool(a.Store, a.MultimodalModel, allowed, nil)
@@ -128,7 +141,7 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 	if err != nil {
 		return personal.TurnOutput{}, err
 	}
-	instruction := personalInstruction(a.Persona, a.Profile, input.Event.Kind == personal.EventTask && input.Schedule != nil)
+	instruction := personalInstruction(a.Persona, a.Profile, input.Event.Kind == personal.EventTask && input.Schedule != nil, a.Archive != nil)
 	view, err := assembleTurn(ctx, input, instruction, registeredTools, budgetModel.Limits())
 	if err != nil {
 		return personal.TurnOutput{}, err
@@ -167,7 +180,17 @@ func (a *MainAgent) Think(ctx context.Context, input personal.TurnInput) (person
 	cancelModel()
 	response, err := a.selectReply(ctx, input, tools, output, createdAttachments, err)
 	if err != nil {
-		return personal.TurnOutput{}, err
+		if archiveTurn == nil || !archiveTurn.hasMandatoryReply() {
+			return personal.TurnOutput{}, err
+		}
+		logging.FromContext(ctx).Warn("conversation.reply.recovered", append(logging.ErrorFields(err), zap.Int64("event_id", input.Event.ID))...)
+		response = personalTurnResponse{ReplyKind: personal.ReplyContent, Attachments: []string{}}
+	}
+	if archiveTurn != nil {
+		response = archiveTurn.finalizeReply(response)
+		if archiveTurn.hasMandatoryReply() {
+			tools.mustNotify = true
+		}
 	}
 	if tools.persistedControl && response.SupplementalReply != nil {
 		files, err := agentctx.ResolveAttachments(ctx, a.Store, response.SupplementalReply.Draft.Attachments)

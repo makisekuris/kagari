@@ -121,6 +121,20 @@ Configure `multimodal_model` to ask about an attached PNG, JPEG, or WebP, for ex
 
 Stop the service, change `personal.channel`, and restart with the same new-schema database to switch channels. Conversations, tasks, memory and persona are shared. Pending results use the active channel; sent or uncertain deliveries are not replayed automatically. Older personal databases are neither migrated nor deleted. Deleting a file preserves analysis and memory and does not recall remote copies. See the [channel design](docs/CHANNEL-DESIGN.md).
 
+### 文件归档 / Document archive
+
+在 `config.yaml` 中启用 `archive.enabled`，填写 S3 API 的 `archive.endpoint` 和已有私有桶的 `archive.bucket`。签名区域默认为 `us-east-1`。通过环境变量或本地 `.env` 设置 `KAGARI_ARCHIVE_ACCESS_KEY_ID` 和 `KAGARI_ARCHIVE_SECRET_ACCESS_KEY`。配置示例见 [config.example.yaml](config.example.yaml)。
+
+Enable `archive.enabled` in `config.yaml` and set the S3 API endpoint and an existing private bucket. The default signing region is `us-east-1`. Supply `KAGARI_ARCHIVE_ACCESS_KEY_ID` and `KAGARI_ARCHIVE_SECRET_ACCESS_KEY` through the environment or your local `.env`. See [config.example.yaml](config.example.yaml).
+
+发来文件后，可以说「把这份归档为厨房报价」「这是厨房报价的新版」或「找到提过防水质保的报价」。原件上传和轻总结在后台执行。Agent 按请求选版本，原件可下载后可以签发 15 分钟的链接。打开链接的设备需要能访问配置的 S3 地址。
+
+After sending a file, ask Kagari to archive it, add it as a new version of an existing document, or find it by title, note, or summary. Upload and summarization run in the background. The agent selects the requested version and can issue a 15-minute link once the original is available. The device opening the link needs access to the configured S3 endpoint.
+
+轻总结支持 UTF-8 文本和 `.docx` 正文。安装 Poppler 的 `pdftotext` 后可提取 PDF 前三页的文字层，配置 `multimodal_model` 后可概述 PNG、JPEG 和 WebP。对于暂时读不到正文的文件，可以随归档请求附上一句便于搜索的说明。版本规则见 [文件归档规划](docs/DOCUMENT-ARCHIVE-PLAN.md)。
+
+Summaries support UTF-8 text and `.docx` bodies. Poppler's `pdftotext` enables sampling the first three PDF pages, and `multimodal_model` enables PNG, JPEG, and WebP summaries. Include a short description when archiving a file whose content Kagari cannot read. See the [archive plan](docs/DOCUMENT-ARCHIVE-PLAN.md) for version behavior.
+
 ### 2. 启动服务 / Start the service
 
 启动所选渠道后，在已绑定账号的私聊中直接发送任务或偏好：

@@ -15,10 +15,12 @@ import (
 	"kagari/internal/browser"
 	"kagari/internal/channel"
 	"kagari/internal/config"
+	"kagari/internal/documentarchive"
 	"kagari/internal/domain"
 	"kagari/internal/logging"
 	"kagari/internal/persona"
 	"kagari/internal/personal"
+	"kagari/internal/personal/agentctx"
 	"kagari/internal/personal/assistant"
 	"kagari/internal/personal/execution"
 	"kagari/internal/personal/service"
@@ -33,6 +35,9 @@ func configuredSecrets(cfg config.Config) []string {
 	secrets := []string{cfg.Model.APIKey, cfg.Telegram.Token}
 	if cfg.MultimodalModel != nil {
 		secrets = append(secrets, cfg.MultimodalModel.APIKey)
+	}
+	if cfg.Archive.Enabled {
+		secrets = append(secrets, cfg.Archive.AccessKeyID, cfg.Archive.SecretAccessKey)
 	}
 	return secrets
 }
@@ -97,6 +102,15 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 	}
 	main := &assistant.MainAgent{Store: s, Log: log, Model: engine.Model, MultimodalModel: engine.MultimodalModel,
 		Persona: role.Prompt(), Profile: engine.Profile, Timezone: cfg.Personal.Timezone, MaxIterations: cfg.Agent.MaxIterations, Timeout: cfg.Agent.Timeout}
+	var runArchive func(context.Context) error
+	if cfg.Archive.Enabled {
+		objects, err := documentarchive.NewS3(cfg.Archive.Endpoint, cfg.Archive.Bucket, cfg.Archive.Region, cfg.Archive.AccessKeyID, cfg.Archive.SecretAccessKey)
+		if err != nil {
+			return fmt.Errorf("configure archive object storage: %w", err)
+		}
+		main.Archive = documentarchive.NewService(s, s, objects, agentctx.ArchiveSummarizer(engine.Model), agentctx.ArchiveSummarizer(engine.MultimodalModel))
+		runArchive = main.Archive.Run
+	}
 	var client channel.Client
 	if cfg.Personal.Channel == "weixin" {
 		credentials, loadErr := weixin.LoadCredentials(credentialPath(cfg))
@@ -124,7 +138,7 @@ func runPersonal(ctx context.Context, cfg config.Config, read func(context.Conte
 	main.WorkspaceDirectory = workspaceDirectory
 	runtime := &service.Runtime{
 		Store: s, Think: main.Think, Execute: execution.TaskExecutor(engine, s, workspaceDirectory), ReviewMemory: main.ReviewMemory, PresentReply: main.PresentReply,
-		Timezone: cfg.Personal.Timezone, TaskConcurrency: cfg.Personal.TaskConcurrency, Poll: client.Poll, Log: log,
+		Timezone: cfg.Personal.Timezone, TaskConcurrency: cfg.Personal.TaskConcurrency, Poll: client.Poll, Archive: runArchive, Log: log,
 		Prepare: channel.PrepareText, Send: client.Send, Ready: client.Ready,
 	}
 	return runtime.Run(ctx)

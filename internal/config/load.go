@@ -15,6 +15,7 @@ import (
 const (
 	defaultModelTimeout         = 60 * time.Second
 	defaultModelMaxOutputTokens = 5000
+	defaultArchiveRegion        = "us-east-1"
 )
 
 // Load 从当前工作目录读取可选的 .env 和 config.yaml；path 只替换 YAML 路径。
@@ -36,6 +37,8 @@ func Load(path string) (Config, error) {
 		"browser.enabled": false, "browser.command": "npx", "browser.args": []string{"-y", "@playwright/mcp@0.0.82", "--headless", "--isolated", "--codegen", "none"},
 		"agent.max_iterations": 10, "agent.timeout": "3m",
 		"agent.streaming": false,
+		"archive.enabled": false, "archive.endpoint": "", "archive.bucket": "", "archive.region": defaultArchiveRegion,
+		"archive.access_key_id": "", "archive.secret_access_key": "",
 	}
 	for key, value := range defaults {
 		v.SetDefault(key, value)
@@ -92,6 +95,9 @@ func Load(path string) (Config, error) {
 	}
 	if !configured {
 		cfg.MultimodalModel = nil
+	}
+	if cfg.Archive.Region == "" {
+		cfg.Archive.Region = defaultArchiveRegion
 	}
 	return cfg, cfg.Validate(false, false)
 }

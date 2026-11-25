@@ -43,6 +43,7 @@ func TestConfigEnvironmentAndValidation(t *testing.T) {
 
 func TestAgentStreamingOverride(t *testing.T) {
 	t.Chdir(t.TempDir())
+	unsetArchiveEnv(t)
 	if err := os.WriteFile("config.yaml", []byte("agent:\n  streaming: true\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +118,7 @@ func TestModelAPITypeEnvironmentPrecedenceAndValidation(t *testing.T) {
 
 func unsetModelAPITypeEnv(t *testing.T) {
 	t.Helper()
+	unsetArchiveEnv(t)
 	key := "KAGARI_MODEL_API_TYPE"
 	value, present := os.LookupEnv(key)
 	if err := os.Unsetenv(key); err != nil {
@@ -235,6 +237,7 @@ func TestIncompleteMultimodalModelIsRejected(t *testing.T) {
 
 func unsetMultimodalModelEnv(t *testing.T) {
 	t.Helper()
+	unsetArchiveEnv(t)
 	for _, key := range []string{
 		"KAGARI_MULTIMODAL_MODEL_BASE_URL", "KAGARI_MULTIMODAL_MODEL_NAME", "KAGARI_MULTIMODAL_MODEL_API_KEY",
 		"KAGARI_MULTIMODAL_MODEL_API_TYPE", "KAGARI_MULTIMODAL_MODEL_TIMEOUT", "KAGARI_MULTIMODAL_MODEL_MAX_OUTPUT_TOKENS",
@@ -256,6 +259,7 @@ func unsetMultimodalModelEnv(t *testing.T) {
 
 func TestRemovedArchiveSettingsAreRejected(t *testing.T) {
 	t.Chdir(t.TempDir())
+	unsetArchiveEnv(t)
 	for name, yaml := range map[string]string{
 		"weekly":          "weekly:\n  enabled: false\n",
 		"max_attempts":    "max_attempts: 6\n",
@@ -288,6 +292,76 @@ func TestLoggingDefaultsAndEnvironment(t *testing.T) {
 	cfg, err = Load("")
 	if err != nil || cfg.Logging != (Logging{Directory: "var/kagari.logs", RotateMiB: 25, MaxTotalMiB: 2048, RetentionDays: 30}) {
 		t.Fatalf("logging environment = %+v, err=%v", cfg.Logging, err)
+	}
+}
+
+func TestArchiveConfigurationDefaultsAndEnvironmentPrecedence(t *testing.T) {
+	t.Chdir(t.TempDir())
+	unsetArchiveEnv(t)
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Archive.Enabled || cfg.Archive.Region != "us-east-1" || cfg.Archive.Endpoint != "" || cfg.Archive.Bucket != "" {
+		t.Fatalf("archive defaults are incorrect: enabled=%t region=%q endpoint=%q bucket=%q", cfg.Archive.Enabled, cfg.Archive.Region, cfg.Archive.Endpoint, cfg.Archive.Bucket)
+	}
+
+	if err := os.WriteFile("config.yaml", []byte("archive:\n  enabled: true\n  endpoint: http://yaml.example:9000\n  bucket: yaml-bucket\n  region: eu-west-1\n  access_key_id: yaml-access\n  secret_access_key: yaml-secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".env", []byte("KAGARI_ARCHIVE_ENDPOINT=http://dotenv.example:9000\nKAGARI_ARCHIVE_BUCKET=dotenv-bucket\nKAGARI_ARCHIVE_REGION=ap-southeast-2\nKAGARI_ARCHIVE_ACCESS_KEY_ID=dotenv-access\nKAGARI_ARCHIVE_SECRET_ACCESS_KEY=dotenv-secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Archive.Endpoint != "http://dotenv.example:9000" || cfg.Archive.Bucket != "dotenv-bucket" || cfg.Archive.Region != "ap-southeast-2" || cfg.Archive.AccessKeyID != "dotenv-access" || cfg.Archive.SecretAccessKey != "dotenv-secret" {
+		t.Fatalf("archive .env values did not override YAML: enabled=%t region=%q endpoint=%q bucket=%q", cfg.Archive.Enabled, cfg.Archive.Region, cfg.Archive.Endpoint, cfg.Archive.Bucket)
+	}
+	t.Setenv("KAGARI_ARCHIVE_ENDPOINT", "http://system.example:9000")
+	t.Setenv("KAGARI_ARCHIVE_ENABLED", "false")
+	cfg, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Archive.Endpoint != "http://system.example:9000" || cfg.Archive.Enabled {
+		t.Fatalf("system environment did not override .env: enabled=%t endpoint=%q", cfg.Archive.Enabled, cfg.Archive.Endpoint)
+	}
+}
+
+func TestArchiveValidation(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.Archive.Enabled = true
+	if err := cfg.Validate(false, false); err == nil || !strings.Contains(err.Error(), "archive.endpoint") {
+		t.Fatalf("enabled archive without endpoint accepted: %v", err)
+	}
+	cfg.Archive.Endpoint = "http://rustfs.example:9000"
+	cfg.Archive.Bucket = "archive-test"
+	cfg.Archive.AccessKeyID = "test-access-key"
+	cfg.Archive.SecretAccessKey = "test-secret-key"
+	if err := cfg.Validate(false, false); err != nil {
+		t.Fatalf("valid archive configuration rejected: %v", err)
+	}
+	for _, endpoint := range []string{
+		"rustfs.example:9000", "ftp://rustfs.example", "http://user:pass@rustfs.example", "http://rustfs.example?token=secret", "http://rustfs.example#fragment", "http://bad%",
+	} {
+		cfg.Archive.Endpoint = endpoint
+		if err := cfg.Validate(false, false); err == nil || !strings.Contains(err.Error(), "archive.endpoint") {
+			t.Errorf("invalid endpoint %q accepted or not identified: %v", endpoint, err)
+		}
+	}
+	cfg.Archive.Endpoint = "http://rustfs.example:9000"
+	cfg.Archive.SecretAccessKey = ""
+	if err := cfg.Validate(false, false); err == nil || !strings.Contains(err.Error(), "archive.access_key_id") {
+		t.Fatalf("enabled archive without credentials accepted: %v", err)
+	}
+	cfg.Archive.Enabled = false
+	cfg.Archive.Endpoint = ""
+	cfg.Archive.Bucket = ""
+	if err := cfg.Validate(false, false); err != nil {
+		t.Fatalf("disabled archive unexpectedly required configuration: %v", err)
 	}
 }
 
@@ -368,6 +442,7 @@ func TestDotEnvPrecedenceAndIsolation(t *testing.T) {
 }
 
 func TestExampleDotEnvCanStartLocalCommands(t *testing.T) {
+	unsetArchiveEnv(t)
 	// 只读取可提交的示例，不接触开发者的真实 .env。
 	dotenvTemplate, err := os.ReadFile("../../.env.example")
 	if err != nil {
@@ -464,10 +539,33 @@ func unsetBrowserFallbackEnv(t *testing.T) {
 			}
 		})
 	}
+	unsetArchiveEnv(t)
+}
+
+func unsetArchiveEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"KAGARI_ARCHIVE_ENABLED", "KAGARI_ARCHIVE_ENDPOINT", "KAGARI_ARCHIVE_BUCKET", "KAGARI_ARCHIVE_REGION",
+		"KAGARI_ARCHIVE_ACCESS_KEY_ID", "KAGARI_ARCHIVE_SECRET_ACCESS_KEY",
+	} {
+		value, present := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+		key := key
+		t.Cleanup(func() {
+			if present {
+				_ = os.Setenv(key, value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
 }
 
 func unsetLoggingEnv(t *testing.T) {
 	t.Helper()
+	unsetArchiveEnv(t)
 	for _, key := range []string{"KAGARI_LOGGING_DIRECTORY", "KAGARI_LOGGING_ROTATE_MIB", "KAGARI_LOGGING_MAX_TOTAL_MIB", "KAGARI_LOGGING_RETENTION_DAYS"} {
 		value, present := os.LookupEnv(key)
 		if err := os.Unsetenv(key); err != nil {

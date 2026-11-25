@@ -71,29 +71,12 @@ func ImageAnalysisTool(files channel.Files, vision model.AgenticModel, allowed m
 		if err != nil {
 			return imageAnalysisFailure(ctx, err), nil
 		}
-		image := &schema.UserInputImage{
-			Base64Data: base64.StdEncoding.EncodeToString(data),
-			MIMEType:   mimeType,
-			Detail:     schema.ImageURLDetailAuto,
-		}
-		input := []*schema.AgenticMessage{
-			schema.SystemAgenticMessage(imageAnalysisInstruction),
-			{
-				Role: schema.AgenticRoleTypeUser,
-				ContentBlocks: []*schema.ContentBlock{
-					schema.NewContentBlock(&schema.UserInputText{Text: "Question: " + args.Question}),
-					schema.NewContentBlock(image),
-				},
-			},
-		}
-		// Parent callbacks can record complete model inputs. Keep this media request
-		// out of those handlers while retaining its cancellation and deadline.
-		output, err := vision.Generate(callbacks.InitCallbacks(ctx, nil), input)
+		output, err := generateImageResponse(ctx, vision, data, mimeType, imageAnalysisInstruction, "Question: "+args.Question)
 		if err != nil {
 			logging.FromContext(ctx).Warn("image.analysis.failed", logging.ErrorFields(err)...)
 			return imageAnalysisFailure(ctx, err), nil
 		}
-		observation, complete := assistantImageText(output)
+		observation, complete := completedAssistantText(output)
 		if !complete {
 			return imageAnalysisReply{Error: "image analysis did not complete"}, nil
 		}
@@ -115,6 +98,26 @@ func ImageAnalysisTool(files channel.Files, vision model.AgenticModel, allowed m
 		}
 		return reply, nil
 	})
+}
+
+func generateImageResponse(ctx context.Context, vision model.AgenticModel, data []byte, mimeType, instruction, prompt string) (*schema.AgenticMessage, error) {
+	image := &schema.UserInputImage{
+		Base64Data: base64.StdEncoding.EncodeToString(data),
+		MIMEType:   mimeType,
+		Detail:     schema.ImageURLDetailAuto,
+	}
+	input := []*schema.AgenticMessage{
+		schema.SystemAgenticMessage(instruction),
+		{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.UserInputText{Text: prompt}),
+				schema.NewContentBlock(image),
+			},
+		},
+	}
+	// Parent callbacks can record complete model inputs, including image bytes.
+	return vision.Generate(callbacks.InitCallbacks(ctx, nil), input)
 }
 
 func readImageAttachment(ctx context.Context, files channel.Files, id string) ([]byte, string, error) {
@@ -182,7 +185,7 @@ func imageAnalysisFailure(ctx context.Context, err error) imageAnalysisReply {
 	return imageAnalysisReply{Error: "image analysis is unavailable"}
 }
 
-func assistantImageText(message *schema.AgenticMessage) (string, bool) {
+func completedAssistantText(message *schema.AgenticMessage) (string, bool) {
 	if message == nil {
 		return "", false
 	}

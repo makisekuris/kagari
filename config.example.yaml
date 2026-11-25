@@ -21,6 +21,13 @@ model:
 storage:
   path: data/kagari-context.db
 
+archive:
+  enabled: false
+  endpoint: http://localhost:9000 # RustFS S3 API endpoint.
+  bucket: kagari-archive
+  region: us-east-1
+  # Credentials are read from KAGARI_ARCHIVE_ACCESS_KEY_ID and KAGARI_ARCHIVE_SECRET_ACCESS_KEY.
+
 telegram:
   # Use KAGARI_TELEGRAM_TOKEN for the credential.
   allowed_user_ids: [] # Set exactly one positive Telegram user ID for personal mode.

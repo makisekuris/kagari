@@ -25,6 +25,7 @@ type Runtime struct {
 	PresentReply    func(context.Context, personal.Event, string) (string, error)
 	TaskConcurrency int
 	Poll            func(context.Context) error
+	Archive         func(context.Context) error
 	Ready           func(context.Context) error
 	Prepare         func(string) ([]string, error)
 	Send            func(context.Context, channel.Content) (channel.Receipt, error)
@@ -62,7 +63,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var group sync.WaitGroup
-	failures := make(chan error, r.TaskConcurrency+5)
+	failures := make(chan error, r.TaskConcurrency+6)
 	start := func(name string, fn func(context.Context) error) {
 		group.Add(1)
 		go func() {
@@ -91,6 +92,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 	start("delivery", func(ctx context.Context) error { return r.loop(ctx, r.deliver) })
 	if r.Poll != nil {
 		start("channel", r.Poll)
+	}
+	if r.Archive != nil {
+		start("archive", r.Archive)
 	}
 	<-ctx.Done()
 	group.Wait()

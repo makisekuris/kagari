@@ -368,10 +368,44 @@ func (s *Store) DeleteAttachment(ctx context.Context, id string) error {
 	if status == "deleted" {
 		return nil
 	}
-	if status == "available" {
-		if _, err := s.db.ExecContext(ctx, `UPDATE personal_attachments SET status='deleting' WHERE id=? AND status='available'`, id); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var storedPath, currentStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT path,status FROM personal_attachments WHERE id=?`, id).Scan(&storedPath, &currentStatus); err != nil {
+		return err
+	}
+	if storedPath != path {
+		return errors.New("personal: attachment path changed during deletion")
+	}
+	if currentStatus == "deleted" {
+		return tx.Commit()
+	}
+	var archivePending int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM personal_archive_versions
+		WHERE attachment_id=? AND upload_status IN ('pending','processing'))`, id).Scan(&archivePending); err != nil {
+		return err
+	}
+	if archivePending != 0 {
+		return errors.New("personal: attachment is still needed by an archive upload")
+	}
+	if currentStatus == "available" {
+		result, err := tx.ExecContext(ctx, `UPDATE personal_attachments SET status='deleting' WHERE id=? AND status='available'`, id)
+		if err != nil {
 			return err
 		}
+		if changed, err := result.RowsAffected(); err != nil {
+			return err
+		} else if changed != 1 {
+			return errors.New("personal: attachment deletion state changed unexpectedly")
+		}
+	} else if currentStatus != "deleting" {
+		return fmt.Errorf("personal: attachment cannot be deleted from state %q", currentStatus)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		_, restoreErr := s.db.ExecContext(ctx, `UPDATE personal_attachments SET status='available' WHERE id=? AND status='deleting'`, id)

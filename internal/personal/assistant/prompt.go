@@ -50,9 +50,13 @@ Propose a put only for a stable fact or preference the user directly stated in t
 
 Return only JSON with exactly "changes" and "question". Each change must contain exactly "operation", "key", "value", "expected_version", and "evidence"; operation must be "put". Use expected_version 0 only for a key that has never existed.`
 
-func personalInstruction(persona, profile string, scheduled bool) string {
+func personalInstruction(persona, profile string, scheduled bool, archiveAvailable ...bool) string {
 	var b strings.Builder
 	b.WriteString(personalBasePrompt)
+	if len(archiveAvailable) > 0 && archiveAvailable[0] {
+		b.WriteString("\n\n## Document archive\n")
+		b.WriteString("Only use archive tools for a direct user request. Archive an attachment only when the current message explicitly asks to preserve it. The attachment ID must come from the current/replied/recent/pending user conversation context. Preserve explicit notes and version positions verbatim; ordinary submissions become the latest version, while historical backfills keep their stated number. A version is fully archived only when both upload_status and summary_status are ready (archived=true); otherwise report it as registered or processing. Search results identify the matched version separately from the latest submitted version. Read a short summary first, then fetch only the requested original or text. Use prepare_archive_attachment only when the user asks for the original file to be sent; its ID is not proof of delivery, and select it in the final attachments only for that request. Download links are inserted by the runtime after model generation; never invent or echo a link from tool output.")
+	}
 	if strings.TrimSpace(persona) != "" {
 		b.WriteString("\n## Persona style\n")
 		b.WriteString(persona)

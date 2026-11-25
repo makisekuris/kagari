@@ -43,7 +43,7 @@ func NewStore(path string, taskBudget time.Duration) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("personal: begin schema transaction: %w", err)
 	}
-	if _, err := tx.Exec(personalSchema + scheduleSchema + scheduleSuggestionSchema + replySchema + taskInputSchema + materialSchema + progressSchema + deliverySchema + reminderSchema); err != nil {
+	if _, err := tx.Exec(personalSchema + scheduleSchema + scheduleSuggestionSchema + replySchema + taskInputSchema + materialSchema + progressSchema + deliverySchema + reminderSchema + archiveSchema); err != nil {
 		_ = tx.Rollback()
 		_ = db.Close()
 		return nil, fmt.Errorf("personal: initialize schema: %w", err)

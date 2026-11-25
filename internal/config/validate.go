@@ -72,6 +72,20 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 	if c.Browser.Enabled && strings.TrimSpace(c.Browser.Command) == "" {
 		return errors.New("browser.command is required when browser.enabled=true")
 	}
+	if c.Archive.Enabled {
+		if strings.TrimSpace(c.Archive.Endpoint) == "" {
+			return errors.New("archive.endpoint is required when archive.enabled=true")
+		}
+		if err := validateArchiveEndpoint(c.Archive.Endpoint); err != nil {
+			return err
+		}
+		if strings.TrimSpace(c.Archive.Bucket) == "" {
+			return errors.New("archive.bucket is required when archive.enabled=true")
+		}
+		if strings.TrimSpace(c.Archive.AccessKeyID) == "" || strings.TrimSpace(c.Archive.SecretAccessKey) == "" {
+			return errors.New("archive.access_key_id and archive.secret_access_key are required when archive.enabled=true")
+		}
+	}
 	for _, arg := range c.Browser.Args {
 		for _, flag := range []string{"--config", "--proxy", "--cdp", "--endpoint", "--extension", "--allow-unrestricted-file-access", "--browser", "--user-data-dir", "--storage-state"} {
 			if arg == flag || strings.HasPrefix(arg, flag+"=") || strings.HasPrefix(arg, "--cdp-") || strings.HasPrefix(arg, "--proxy-") {
@@ -127,6 +141,18 @@ func (c Config) Validate(modelRequired, telegramRequired bool) error {
 				return errors.New("telegram.allowed_user_ids must contain positive user IDs")
 			}
 		}
+	}
+	return nil
+}
+
+func validateArchiveEndpoint(endpoint string) error {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return errors.New("archive.endpoint must be an HTTP(S) URL without credentials, query or fragment")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if u.Host == "" || (scheme != "http" && scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("archive.endpoint must be an HTTP(S) URL without credentials, query or fragment")
 	}
 	return nil
 }

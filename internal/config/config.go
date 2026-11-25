@@ -12,6 +12,7 @@ type Config struct {
 	Reader      Reader   `mapstructure:"reader"`
 	Browser     Browser  `mapstructure:"browser"`
 	Agent       Agent    `mapstructure:"agent"`
+	Archive     Archive  `mapstructure:"archive"`
 	Personal    Personal `mapstructure:"personal"`
 	Logging     Logging  `mapstructure:"logging"`
 	ProfilePath string   `mapstructure:"profile_path"`
@@ -81,4 +82,13 @@ type Logging struct {
 	RotateMiB     int64  `mapstructure:"rotate_mib"`
 	MaxTotalMiB   int64  `mapstructure:"max_total_mib"`
 	RetentionDays int    `mapstructure:"retention_days"`
+}
+
+type Archive struct {
+	Enabled         bool   `mapstructure:"enabled"`
+	Endpoint        string `mapstructure:"endpoint"`
+	Bucket          string `mapstructure:"bucket"`
+	Region          string `mapstructure:"region"`
+	AccessKeyID     string `mapstructure:"access_key_id"`
+	SecretAccessKey string `mapstructure:"secret_access_key"`
 }
