@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -68,7 +70,45 @@ func (a *MainAgent) runToolFreeFormatter(ctx context.Context, name, description,
 	if err != nil {
 		return "", err
 	}
-	return result, nil
+	// Some compatible endpoints wrap the requested JSON in a Markdown code fence.
+	// The caller still validates the entire unwrapped body against its reply contract.
+	opening, body, found := strings.Cut(strings.TrimSpace(result), "\n")
+	if found && strings.EqualFold(strings.TrimSpace(opening), "```json") {
+		if lastNewline := strings.LastIndexByte(body, '\n'); lastNewline >= 0 && strings.TrimSpace(body[lastNewline+1:]) == "```" {
+			result = body[:lastNewline]
+		}
+	}
+	return escapeFormatterJSONWhitespace(result), nil
+}
+
+// Escape literal whitespace within quoted strings while preserving existing escapes.
+func escapeFormatterJSONWhitespace(raw string) string {
+	var result strings.Builder
+	inString := false
+	start := 0
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if inString {
+				i++
+			}
+		case '\n', '\r', '\t':
+			if !inString {
+				continue
+			}
+			result.WriteString(raw[start:i])
+			quoted := strconv.Quote(raw[i : i+1])
+			result.WriteString(quoted[1 : len(quoted)-1])
+			start = i + 1
+		}
+	}
+	if start == 0 {
+		return raw
+	}
+	result.WriteString(raw[start:])
+	return result.String()
 }
 
 func personalTurnOutputSchema() map[string]any {

@@ -35,13 +35,14 @@ func TestImageHandoffReturnsObservationToTextOnlyChat(t *testing.T) {
 	const observation = "E7053"
 	chat := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{
 		testkit.ResponseTool("analyze_image", map[string]string{"id": image.ID, "question": input.Text}, "inspect"),
-		testkit.ResponseText(`{"text":"E7053","reply_kind":"content","attachments":[]}`),
+		testkit.ResponseText("The error code is " + observation),
+		testkit.ResponseText("```json\n" + `{"text":"E7053","reply_kind":"content","attachments":[]}` + "\n```"),
 	}}
 	vision := &testkit.ResponsesFixture{T: t, Responses: []testkit.Response{testkit.ResponseText(observation)}}
 	a := newMainAgent(t, chat, store)
 	a.MultimodalModel = vision.RawModel(t)
 	out, err := a.Think(ctx, personal.TurnInput{Event: *event})
-	if err != nil || out.Text != observation || len(chat.Requests) != 2 || len(vision.Requests) != 1 {
+	if err != nil || out.Text != observation || len(chat.Requests) != 3 || len(vision.Requests) != 1 {
 		t.Fatalf("answer=%q err=%v chat calls=%d vision calls=%d", out.Text, err, len(chat.Requests), len(vision.Requests))
 	}
 	var advertised bool
@@ -53,6 +54,7 @@ func TestImageHandoffReturnsObservationToTextOnlyChat(t *testing.T) {
 	if !advertised || !strings.Contains(testkit.RequestInput(chat.Requests[1]), observation) {
 		t.Fatal("chat must receive the tool schema, then the delegated observation")
 	}
+	assertStrictSchema(t, chat.Requests[2], "personal_turn")
 	for _, request := range chat.Requests {
 		raw, _ := json.Marshal(request)
 		if strings.Contains(string(raw), png) {
