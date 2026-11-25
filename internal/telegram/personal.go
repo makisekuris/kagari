@@ -192,22 +192,24 @@ func (c *PersonalClient) inputForUpdate(ctx context.Context, update *models.Upda
 		return nil, errors.New("Telegram update could not be saved")
 	}
 	text, entities := message.Text, message.Entities
-	if message.Document != nil || text == "" {
+	if message.Document != nil || len(message.Photo) > 0 || text == "" {
 		text, entities = message.Caption, message.CaptionEntities
 	}
 	text = appendEntityURLs(text, entities)
 	text = preserveCodeEntities(text, entities)
-	attachments := make([]channel.Attachment, 0, 1)
-	if message.Document != nil {
-		attachment := c.receiveDocument(ctx, message.Document)
-		attachments = append(attachments, attachment)
-		if attachment.Error != "" {
-			note := fmt.Sprintf("[附件 %q 接收失败：%s]", attachment.Name, attachment.Error)
-			if text != "" {
-				text += "\n"
-			}
-			text += note
+	var attachments []channel.Attachment
+	switch {
+	case message.Document != nil:
+		attachments = append(attachments, c.receiveDocument(ctx, message.Document))
+	case len(message.Photo) > 0:
+		attachments = append(attachments, c.receivePhoto(ctx, message.Photo))
+	}
+	if len(attachments) > 0 && attachments[0].Error != "" {
+		attachment := attachments[0]
+		if text != "" {
+			text += "\n"
 		}
+		text += fmt.Sprintf("[附件 %q 接收失败：%s]", attachment.Name, attachment.Error)
 	}
 	if media := unsupportedMedia(message); media != "" {
 		note := fmt.Sprintf("[收到暂不支持的 Telegram 原生%s；请以普通文件方式重新发送。]", media)
@@ -232,8 +234,6 @@ func (c *PersonalClient) inputForUpdate(ctx context.Context, update *models.Upda
 
 func unsupportedMedia(message *models.Message) string {
 	switch {
-	case len(message.Photo) > 0:
-		return "图片"
 	case message.Animation != nil:
 		return "动画"
 	case message.Audio != nil:
@@ -267,7 +267,7 @@ func (c *PersonalClient) Send(ctx context.Context, content channel.Content) (cha
 		return receipt, &channel.SendError{Reason: "Telegram delivery must contain either text or one attachment", Permanent: true}
 	}
 	if content.AttachmentID != "" {
-		messageID, err := c.sendDocument(ctx, content.AttachmentID)
+		messageID, err := c.sendAttachment(ctx, content.AttachmentID)
 		if err != nil {
 			return receipt, err
 		}

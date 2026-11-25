@@ -669,9 +669,9 @@ func TestUnsupportedNativeMediaBecomesExplicitInput(t *testing.T) {
 	}))
 	input, err := client.inputForUpdate(context.Background(), &models.Update{ID: 1, Message: &models.Message{
 		ID: 9, From: &models.User{ID: 7}, Chat: models.Chat{ID: 7, Type: models.ChatTypePrivate},
-		Photo: []models.PhotoSize{{FileID: "photo"}}, Caption: "caption",
+		Video: &models.Video{FileID: "video"}, Caption: "caption",
 	}})
-	if err != nil || input == nil || !strings.Contains(input.Text, "暂不支持的 Telegram 原生图片") || !strings.Contains(input.Text, "caption") {
+	if err != nil || input == nil || !strings.Contains(input.Text, "暂不支持的 Telegram 原生视频") || !strings.Contains(input.Text, "caption") {
 		t.Fatalf("unsupported-media input = (%#v, %v)", input, err)
 	}
 }

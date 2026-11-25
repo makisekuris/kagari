@@ -104,9 +104,13 @@ make build
 
 The terminal displays the QR code. Optional `-qr` saves and refreshes a PNG at a previously unused path. Repeating `login` for the same user reloads credentials in the running service; changing users requires stopping the service and running `weixin rebind`. After a login token changes, send a new message to the bot to resume pending deliveries. Credentials are stored at `<storage.path>.channels/weixin.json`. Status reports saved configuration, not live platform availability.
 
-两渠道支持文字和普通文件，单文件双向上限 20,000,000 字节；请将图片作为文件发送。配置 `multimodal_model` 后，可以随 PNG、JPEG 或 WebP 图片提问，例如「截图里的错误码是什么？」。主 Agent 把问题和指定图片交给视觉模型，拿到文字结果后在同一轮回答。后台 Task 也可以分析分配给它的图片。文本附件支持读取最多 1 MiB 的 UTF-8 文本。附件保留至显式删除：
+两渠道支持文字和普通文件，单文件收发上限为 20,000,000 字节。Telegram 可以直接接收聊天图片，发出的 JPEG 或 PNG 符合 Telegram 图片尺寸和 10 MB 大小限制时，会直接显示在聊天中。微信收发图片使用普通文件消息。
 
-Both channels support text and ordinary files up to 20,000,000 bytes each; send images as files. Configure `multimodal_model` to ask about an attached PNG, JPEG, or WebP, for example “What error code is in this screenshot?” The main agent delegates the image and question to the vision model and uses its text result to answer in the same turn. Background tasks can analyze images assigned to them. UTF-8 text attachments support reads up to 1 MiB. Files remain until explicitly deleted:
+Both channels support text and ordinary files up to 20,000,000 bytes each. Telegram accepts chat photos and displays outgoing JPEG or PNG attachments inline when they meet its photo dimensions and 10 MB size limit. Weixin handles images as ordinary files.
+
+配置 `multimodal_model` 后，可以随 PNG、JPEG 或 WebP 图片提问，例如「截图里的错误码是什么？」。主 Agent 把问题和指定图片交给视觉模型，拿到文字结果后在同一轮回答。后台 Task 也可以分析分配给它的图片。文本附件支持读取最多 1 MiB 的 UTF-8 文本。附件保留至显式删除。
+
+Configure `multimodal_model` to ask about an attached PNG, JPEG, or WebP, for example “What error code is in this screenshot?” The main agent delegates the image and question to the vision model and uses its text result to answer in the same turn. Background tasks can analyze images assigned to them. UTF-8 text attachments support reads up to 1 MiB. Files remain until explicitly deleted.
 
 ```sh
 ./bin/kagari attachments list

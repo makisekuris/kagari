@@ -21,9 +21,6 @@ import (
 )
 
 func (c *PersonalClient) receiveDocument(ctx context.Context, document *models.Document) channel.Attachment {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	name := document.FileName
 	if name == "" {
 		name = "document"
@@ -32,18 +29,29 @@ func (c *PersonalClient) receiveDocument(ctx context.Context, document *models.D
 	if mimeType == "" {
 		mimeType = mime.TypeByExtension(filepath.Ext(name))
 	}
+	return c.receiveFile(ctx, document.FileID, document.FileSize, name, mimeType)
+}
+
+// A native photo has no supplied name or media type. Fill them from the download.
+func (c *PersonalClient) receiveFile(ctx context.Context, fileID string, fileSize int64, name, mimeType string) channel.Attachment {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	attachment := channel.Attachment{Name: name, MIME: mimeType}
 	fail := func(reason string) channel.Attachment {
+		if attachment.Name == "" {
+			attachment.Name = "photo"
+		}
 		attachment.Error = reason
 		return attachment
 	}
-	if document.FileSize < 0 || document.FileSize > channel.MaxFileBytes {
+	if fileSize < 0 || fileSize > channel.MaxFileBytes {
 		return fail("文件超过 20,000,000 字节上限")
 	}
-	if document.FileID == "" {
+	if fileID == "" {
 		return fail("Telegram 文件标识缺失")
 	}
-	file, err := c.bot.GetFile(ctx, &telegrambot.GetFileParams{FileID: document.FileID})
+	file, err := c.bot.GetFile(ctx, &telegrambot.GetFileParams{FileID: fileID})
 	if err != nil {
 		if errors.Is(err, telegrambot.ErrorUnauthorized) {
 			c.markAuthInvalid()
@@ -81,11 +89,15 @@ func (c *PersonalClient) receiveDocument(ctx context.Context, document *models.D
 	if int64(len(data)) > channel.MaxFileBytes {
 		return fail("文件超过 20,000,000 字节上限")
 	}
-	if document.FileSize > 0 && int64(len(data)) != document.FileSize || file.FileSize > 0 && int64(len(data)) != file.FileSize {
+	if fileSize > 0 && int64(len(data)) != fileSize || file.FileSize > 0 && int64(len(data)) != file.FileSize {
 		return fail("下载文件大小与 Telegram 元数据不符")
 	}
+	if name == "" {
+		attachment.Name = filepath.Base(file.FilePath)
+		attachment.MIME = http.DetectContentType(data)
+	}
 	attachment.Size = int64(len(data))
-	saved, err := c.files.SaveAttachment(ctx, name, mimeType, bytes.NewReader(data))
+	saved, err := c.files.SaveAttachment(ctx, attachment.Name, attachment.MIME, bytes.NewReader(data))
 	if err != nil || saved.ID == "" {
 		return fail("附件保存失败")
 	}
@@ -108,10 +120,7 @@ func (c *PersonalClient) fileURL(filePath string) (string, error) {
 	return c.baseURL + "/file/bot" + c.token + "/" + strings.Join(escaped, "/"), nil
 }
 
-func (c *PersonalClient) sendDocument(ctx context.Context, attachmentID string) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (c *PersonalClient) sendAttachment(ctx context.Context, attachmentID string) (string, error) {
 	attachment, err := c.files.Attachment(ctx, attachmentID)
 	if err != nil || attachment.ID == "" || attachment.Error != "" || attachment.Deleted {
 		return "", &channel.SendError{Reason: "Telegram attachment is unavailable", Permanent: true}
@@ -134,11 +143,16 @@ func (c *PersonalClient) sendDocument(ctx context.Context, attachmentID string) 
 	if int64(len(data)) != attachment.Size {
 		return "", &channel.SendError{Reason: "Telegram attachment size does not match stored metadata", Permanent: true}
 	}
+	method, field := "sendDocument", "document"
+	mimeType := attachment.MIME
+	if photoMIME := photoUploadMIME(data); photoMIME != "" {
+		method, field = "sendPhoto", "photo"
+		mimeType = photoMIME
+	}
 	name := attachment.Name
 	if name == "" {
-		name = "document"
+		name = field
 	}
-	mimeType := attachment.MIME
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
@@ -149,27 +163,28 @@ func (c *PersonalClient) sendDocument(ctx context.Context, attachmentID string) 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	if err := writer.WriteField("chat_id", strconv.FormatInt(c.ownerID, 10)); err != nil {
-		return "", &channel.SendError{Reason: "Telegram document could not be prepared", Permanent: true}
+		return "", &channel.SendError{Reason: "Telegram attachment could not be prepared", Permanent: true}
 	}
 	header := make(textproto.MIMEHeader)
-	if disposition := mime.FormatMediaType("form-data", map[string]string{"name": "document", "filename": name}); disposition == "" {
+	disposition := mime.FormatMediaType("form-data", map[string]string{"name": field, "filename": name})
+	if disposition == "" {
 		return "", &channel.SendError{Reason: "Telegram attachment name is invalid", Permanent: true}
 	}
-	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": "document", "filename": name}))
+	header.Set("Content-Disposition", disposition)
 	header.Set("Content-Type", mimeType)
 	part, err := writer.CreatePart(header)
 	if err != nil {
-		return "", &channel.SendError{Reason: "Telegram document could not be prepared", Permanent: true}
+		return "", &channel.SendError{Reason: "Telegram attachment could not be prepared", Permanent: true}
 	}
 	if _, err := part.Write(data); err != nil {
-		return "", &channel.SendError{Reason: "Telegram document could not be prepared", Permanent: true}
+		return "", &channel.SendError{Reason: "Telegram attachment could not be prepared", Permanent: true}
 	}
 	if err := writer.Close(); err != nil {
-		return "", &channel.SendError{Reason: "Telegram document could not be prepared", Permanent: true}
+		return "", &channel.SendError{Reason: "Telegram attachment could not be prepared", Permanent: true}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bot"+c.token+"/sendDocument", &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bot"+c.token+"/"+method, &body)
 	if err != nil {
-		return "", &channel.SendError{Reason: "Telegram document could not be prepared", Permanent: true}
+		return "", &channel.SendError{Reason: "Telegram attachment could not be prepared", Permanent: true}
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := c.http.Do(req)
@@ -184,22 +199,21 @@ func (c *PersonalClient) sendDocument(ctx context.Context, attachmentID string) 
 	response, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil || len(response) > maxResponseSize {
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return "", c.documentSendError(resp.StatusCode, 0)
+			return "", c.attachmentSendError(field, resp.StatusCode, 0)
 		}
 		return "", &channel.SendError{Reason: "Telegram send outcome is unknown", Uncertain: true}
 	}
 	var result struct {
-		OK          bool            `json:"ok"`
-		Result      json.RawMessage `json:"result"`
-		ErrorCode   int             `json:"error_code"`
-		Description string          `json:"description"`
-		Parameters  struct {
+		OK         bool            `json:"ok"`
+		Result     json.RawMessage `json:"result"`
+		ErrorCode  int             `json:"error_code"`
+		Parameters struct {
 			RetryAfter int `json:"retry_after"`
 		} `json:"parameters"`
 	}
 	if err := json.Unmarshal(response, &result); err != nil {
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return "", c.documentSendError(resp.StatusCode, 0)
+			return "", c.attachmentSendError(field, resp.StatusCode, 0)
 		}
 		return "", &channel.SendError{Reason: "Telegram send outcome is unknown", Uncertain: true}
 	}
@@ -208,7 +222,7 @@ func (c *PersonalClient) sendDocument(ctx context.Context, attachmentID string) 
 		if code == 0 {
 			code = resp.StatusCode
 		}
-		return "", c.documentSendError(code, result.Parameters.RetryAfter)
+		return "", c.attachmentSendError(field, code, result.Parameters.RetryAfter)
 	}
 	var message struct {
 		ID json.RawMessage `json:"message_id"`
@@ -225,20 +239,18 @@ func (c *PersonalClient) sendDocument(ctx context.Context, attachmentID string) 
 	return messageID, nil
 }
 
-func (c *PersonalClient) documentSendError(code, retryAfterSeconds int) *channel.SendError {
+func (c *PersonalClient) attachmentSendError(field string, code, retryAfterSeconds int) *channel.SendError {
 	switch code {
 	case http.StatusUnauthorized:
 		c.markAuthInvalid()
 		return &channel.SendError{Reason: "Telegram authorization is invalid", Permanent: true, Waiting: true}
 	case http.StatusTooManyRequests:
 		return &channel.SendError{Reason: "Telegram rate limit", RetryAfter: retryAfter(retryAfterSeconds)}
-	case http.StatusBadRequest:
-		return &channel.SendError{Reason: "Telegram rejected the document", Permanent: true}
 	case http.StatusForbidden:
-		return &channel.SendError{Reason: "Telegram does not allow this document", Permanent: true}
+		return &channel.SendError{Reason: "Telegram does not allow this " + field, Permanent: true}
 	default:
 		if code >= 400 && code < 500 {
-			return &channel.SendError{Reason: "Telegram rejected the document", Permanent: true}
+			return &channel.SendError{Reason: "Telegram rejected the " + field, Permanent: true}
 		}
 		return &channel.SendError{Reason: "Telegram send outcome is unknown", Uncertain: true}
 	}
